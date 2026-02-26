@@ -482,6 +482,7 @@ fn advanced_face(
     // assigning it to the first point in the list, which causes it to get
     // deduplicated), then retry.
     let mut pts = surf.lower_verts(&mut mesh.verts[v_start..])?;
+    resolve_crossing_edges(&mut pts, &mut edges, &mut mesh.verts, v_start);
     let bonus_points = pts.len();
     surf.add_steiner_points(&mut pts, &mut mesh.verts);
     let result = std::panic::catch_unwind(|| {
@@ -835,4 +836,88 @@ fn vertex_point(s: &StepFile, v: Vertex) -> DVec3 {
             .expect("Could not get VertexPoint")
             .vertex_geometry
             .cast())
+}
+
+/// Compute intersection parameters (t, s) for segments A-B and C-D.
+/// Returns Some((t, s)) if the segments cross at interior points (not
+/// at endpoints), where the intersection is at A + t*(B-A) = C + s*(D-C).
+fn segment_intersection_params(
+    a: (f64, f64), b: (f64, f64),
+    c: (f64, f64), d: (f64, f64),
+) -> Option<(f64, f64)> {
+    let denom = (b.0 - a.0) * (d.1 - c.1) - (b.1 - a.1) * (d.0 - c.0);
+    if denom.abs() < 1e-12 {
+        return None; // parallel or coincident
+    }
+    let t = ((c.0 - a.0) * (d.1 - c.1) - (c.1 - a.1) * (d.0 - c.0)) / denom;
+    let s = ((c.0 - a.0) * (b.1 - a.1) - (c.1 - a.1) * (b.0 - a.0)) / denom;
+    let eps = 1e-10;
+    if t > eps && t < 1.0 - eps && s > eps && s < 1.0 - eps {
+        Some((t, s))
+    } else {
+        None
+    }
+}
+
+/// Pre-process edges to resolve any crossings before feeding them to the CDT.
+/// When two constrained edges cross, split both at the intersection point by
+/// inserting a new shared vertex.
+fn resolve_crossing_edges(
+    pts: &mut Vec<(f64, f64)>,
+    edges: &mut Vec<(usize, usize)>,
+    verts: &mut Vec<mesh::Vertex>,
+    v_start: usize,
+) {
+    // Limit iterations to prevent pathological runaway
+    for _ in 0..100 {
+        let mut found = None;
+        'outer: for i in 0..edges.len() {
+            for j in (i + 1)..edges.len() {
+                // Skip edges that share an endpoint
+                if edges[i].0 == edges[j].0 || edges[i].0 == edges[j].1
+                || edges[i].1 == edges[j].0 || edges[i].1 == edges[j].1 {
+                    continue;
+                }
+                if let Some((t, _s)) = segment_intersection_params(
+                    pts[edges[i].0], pts[edges[i].1],
+                    pts[edges[j].0], pts[edges[j].1],
+                ) {
+                    found = Some((i, j, t));
+                    break 'outer;
+                }
+            }
+        }
+        let (i, j, t) = match found {
+            Some(v) => v,
+            None => break, // no more crossings
+        };
+
+        // Compute 2D intersection point
+        let (ax, ay) = pts[edges[i].0];
+        let (bx, by) = pts[edges[i].1];
+        let new_2d = (ax + t * (bx - ax), ay + t * (by - ay));
+
+        // Compute 3D vertex by interpolation along edge i
+        let va = verts[v_start + edges[i].0];
+        let vb = verts[v_start + edges[i].1];
+        let new_3d = mesh::Vertex {
+            pos: va.pos * (1.0 - t) + vb.pos * t,
+            norm: DVec3::zeros(),
+            color: DVec3::zeros(),
+        };
+
+        let new_idx = pts.len();
+        pts.push(new_2d);
+        verts.push(new_3d);
+
+        // Split edge i: (a, b) → (a, new), (new, b)
+        let (a, b) = edges[i];
+        edges[i] = (a, new_idx);
+        edges.push((new_idx, b));
+
+        // Split edge j: (c, d) → (c, new), (new, d)
+        let (c, d) = edges[j];
+        edges[j] = (c, new_idx);
+        edges.push((new_idx, d));
+    }
 }
