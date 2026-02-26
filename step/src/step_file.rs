@@ -77,6 +77,9 @@ impl<'a> StepFile<'a> {
                 }
                 // TODO: don't skip whitespace inside of strings
                 c if c.is_ascii_whitespace() => (),
+                // Replace non-ASCII bytes (e.g. GBK-encoded CJK names from
+                // SolidWorks) with '?' so the output is always valid UTF-8.
+                c if !c.is_ascii() => out.push(b'?'),
                 c => out.push(c),
             }
             i += 1;
