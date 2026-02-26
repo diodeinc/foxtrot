@@ -63,6 +63,153 @@ fn transform_stack_roots<'a>(transform_stack: &TransformStack<'a>) -> Vec<Repres
         .collect()
 }
 
+/// Detect the length unit in a STEP file and return a scale factor to
+/// convert coordinates to millimeters.  Returns 1.0 if the file already
+/// uses mm or if the unit cannot be determined.
+fn detect_length_scale_to_mm(s: &StepFile) -> f64 {
+    // Helper: given a unit entity, return the mm scale if it's a length unit
+    let unit_scale = |unit_entity: &Entity| -> Option<f64> {
+        match unit_entity {
+            Entity::SiUnit(si) if matches!(si.name, SiUnitName::Metre) => {
+                Some(match &si.prefix {
+                    Some(SiPrefix::Milli) => 1.0,
+                    Some(SiPrefix::Centi) => 10.0,
+                    Some(SiPrefix::Micro) => 0.001,
+                    Some(SiPrefix::Nano) => 0.000_001,
+                    Some(SiPrefix::Kilo) => 1_000_000.0,
+                    None => 1000.0, // bare metres → mm
+                    _ => 1.0,
+                })
+            },
+            Entity::ConversionBasedUnit(cbu) => {
+                let name = cbu.name.0.to_uppercase();
+                if name.contains("INCH") {
+                    return Some(25.4);
+                } else if name.contains("FOOT") || name.contains("FT") {
+                    return Some(304.8);
+                }
+                // Try to read the conversion factor
+                if let Entity::MeasureWithUnit(mwu) = &s.0[cbu.conversion_factor.0] {
+                    if let MeasureValue::LengthMeasure(lm) = &mwu.value_component {
+                        return Some(lm.0 * 1000.0);
+                    }
+                }
+                if let Entity::LengthMeasureWithUnit(lmwu) = &s.0[cbu.conversion_factor.0] {
+                    if let MeasureValue::LengthMeasure(lm) = &lmwu.value_component {
+                        return Some(lm.0 * 1000.0);
+                    }
+                }
+                None
+            },
+            _ => None,
+        }
+    };
+
+    for entity in s.0.iter() {
+        // GlobalUnitAssignedContext may be standalone or inside a ComplexEntity
+        let guacs: Vec<&GlobalUnitAssignedContext_> = match entity {
+            Entity::GlobalUnitAssignedContext(g) => vec![g],
+            Entity::ComplexEntity(subs) => subs.iter()
+                .filter_map(|e| GlobalUnitAssignedContext_::try_from_entity(e))
+                .collect(),
+            _ => continue,
+        };
+        for guac in guacs {
+            for unit_id in &guac.units {
+                // The unit may be a direct entity or inside a ComplexEntity
+                let check_entity = |e: &Entity| -> Option<f64> { unit_scale(e) };
+                match &s.0[unit_id.0] {
+                    Entity::ComplexEntity(subs) => {
+                        for sub in subs {
+                            if let Some(scale) = check_entity(sub) {
+                                if (scale - 1.0).abs() > 1e-10 {
+                                    info!("STEP length unit scale: {}", scale);
+                                }
+                                return scale;
+                            }
+                        }
+                    },
+                    e => {
+                        if let Some(scale) = check_entity(e) {
+                            if (scale - 1.0).abs() > 1e-10 {
+                                info!("STEP length unit scale: {}", scale);
+                            }
+                            return scale;
+                        }
+                    },
+                }
+            }
+        }
+    }
+    1.0 // default: assume mm
+}
+
+/// Fallback unit detection when the structured GUAC-based approach returns
+/// the default (1.0).  Scans all entities for length-related SiUnits and
+/// ConversionBasedUnits that may exist outside of a GUAC context (or whose
+/// GUAC failed to parse).
+fn detect_length_scale_fallback(s: &StepFile) -> f64 {
+    let mut found_bare_metre = false;
+    let mut found_milli_metre = false;
+    let mut found_inch = false;
+
+    for entity in s.0.iter() {
+        let subs: &[Entity] = match entity {
+            Entity::ComplexEntity(v) => v,
+            _ => std::slice::from_ref(entity),
+        };
+        // Check if this entity group contains a LENGTH_UNIT marker
+        let has_length_unit = subs.iter().any(|e| matches!(e, Entity::LengthUnit(_)));
+        if !has_length_unit { continue; }
+
+        for sub in subs {
+            match sub {
+                Entity::SiUnit(si) if matches!(si.name, SiUnitName::Metre) => {
+                    match &si.prefix {
+                        Some(SiPrefix::Milli) => found_milli_metre = true,
+                        None => found_bare_metre = true,
+                        _ => {},
+                    }
+                },
+                Entity::ConversionBasedUnit(cbu) => {
+                    if cbu.name.0.to_uppercase().contains("INCH") {
+                        found_inch = true;
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+
+    // Also check LengthMeasureWithUnit for known conversion factors.
+    // CONVERSION_BASED_UNIT('INCH', ...) often fails to parse, but the
+    // corresponding LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.0254), ...)
+    // may still be present.
+    if !found_inch {
+        for entity in s.0.iter() {
+            if let Entity::LengthMeasureWithUnit(lmwu) = entity {
+                if let MeasureValue::LengthMeasure(lm) = &lmwu.value_component {
+                    // 0.0254 m = 1 inch
+                    if (lm.0 - 0.0254).abs() < 1e-6 {
+                        found_inch = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if found_inch {
+        info!("STEP fallback unit detection: INCH → scale 25.4");
+        25.4
+    } else if found_bare_metre && !found_milli_metre {
+        info!("STEP fallback unit detection: bare METRE → scale 1000");
+        1000.0
+    } else {
+        1.0
+    }
+}
+
 pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
     let styled_items: Vec<_> = s.0.iter()
         .filter_map(|e| MechanicalDesignGeometricPresentationRepresentation_::try_from_entity(e))
@@ -239,6 +386,19 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
             mesh_fold
         }
     };
+
+    // Scale coordinates to millimeters based on the STEP file's length unit
+    let mut scale = detect_length_scale_to_mm(s);
+    if (scale - 1.0).abs() < 1e-10 {
+        scale = detect_length_scale_fallback(s);
+    }
+    let mut mesh = mesh;
+    if (scale - 1.0).abs() > 1e-10 {
+        info!("Applying unit scale factor: {}", scale);
+        for v in &mut mesh.verts {
+            v.pos *= scale;
+        }
+    }
 
     info!("num_shells: {}", stats.num_shells);
     info!("num_faces: {}", stats.num_faces);
