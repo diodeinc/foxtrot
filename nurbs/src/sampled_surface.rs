@@ -69,11 +69,21 @@ impl<const N: usize> SampledSurface<N>
             //    |S_u(uv_i) dot (S(uv_i) - P)| / |S_u(uv_i)| / |S(uv_i) - P| < \epsilon_2  and
             //    |S_v(uv_i) dot (S(uv_i) - P)| / |S_v(uv_i)| / |S(uv_i) - P| < \epsilon_2
             // then we are done
-            if length(&r) < eps1
-                && dot(&r, &S_u).abs() / length(&S_u) / length(&r) < eps2
-                && dot(&r, &S_v).abs() / length(&S_v) / length(&r) < eps2
-            {
-                return Some(uv_i);
+            let r_len = length(&r);
+            if r_len < eps1 {
+                let su_len = length(&S_u);
+                let sv_len = length(&S_v);
+                // Skip cosine check when the derivative or residual is
+                // degenerate (near-zero) to avoid 0/0 = NaN failures.
+                // Use a tight threshold so we only bypass for truly
+                // degenerate surfaces (collapsed control point rows).
+                let cos_u_ok = su_len < 1e-10 || r_len < 1e-10
+                    || dot(&r, &S_u).abs() / su_len / r_len < eps2;
+                let cos_v_ok = sv_len < 1e-10 || r_len < 1e-10
+                    || dot(&r, &S_v).abs() / sv_len / r_len < eps2;
+                if cos_u_ok && cos_v_ok {
+                    return Some(uv_i);
+                }
             }
 
             // Otherwise, compute uv_{i+1} by computing:
@@ -95,7 +105,15 @@ impl<const N: usize> SampledSurface<N>
                 length2(&S_v) + dot(&r, &S_vv),
             );
             let delta_i = match J_i.try_inverse() {
-                None => return None,
+                None => {
+                    // Singular Jacobian (e.g. degenerate surface edge where
+                    // a whole row of control points collapses to one point).
+                    // If we're already reasonably close, accept the result.
+                    if r_len < eps1 * 10.0 {
+                        return Some(uv_i);
+                    }
+                    return None;
+                },
                 Some(m) => m * K_i,
             };
             let mut uv_ip1 = uv_i + delta_i;
