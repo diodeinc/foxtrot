@@ -29,8 +29,8 @@ fn main() {
                   size.x, size.y, size.z, size.x.max(size.y).max(size.z));
     }
 
-    if std::env::args().any(|a| a == "--stl") {
-        let out = args.get(2).map(|s| s.as_str()).unwrap_or("out.stl");
+    if let Some(pos) = args.iter().position(|a| a == "--stl") {
+        let out = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("out.stl");
         mesh.save_stl(out).expect("Could not save STL");
         eprintln!("Saved to {}", out);
     }

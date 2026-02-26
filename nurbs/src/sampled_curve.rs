@@ -80,6 +80,14 @@ impl<const N: usize> SampledCurve<N>
         }
     }
 
+    pub fn min_u(&self) -> f64 {
+        self.curve.min_u()
+    }
+
+    pub fn max_u(&self) -> f64 {
+        self.curve.max_u()
+    }
+
     pub fn u_from_point(&self, p: DVec3) -> f64 {
         use ordered_float::OrderedFloat;
         let best_u = self.samples.iter()

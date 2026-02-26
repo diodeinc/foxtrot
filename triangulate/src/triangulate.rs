@@ -893,9 +893,10 @@ fn edge_curve(s: &StepFile, e: EdgeCurve, orientation: bool) -> Result<Vec<DVec3
     } else {
         (edge_curve.edge_end, edge_curve.edge_start)
     };
+    let is_loop = edge_curve.edge_start == edge_curve.edge_end;
     let u = vertex_point(s, start);
     let v = vertex_point(s, end);
-    Ok(curve.build(u, v))
+    Ok(curve.build(u, v, is_loop))
 }
 
 fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
@@ -916,9 +917,7 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
                                edge_curve.same_sense ^ !orientation)
         },
         Entity::BSplineCurveWithKnots(c) => {
-            if c.closed_curve.0 != Some(false) {
-                return Err(Error::ClosedCurve);
-            } else if c.self_intersect.0 != Some(false) {
+            if c.self_intersect.0 == Some(true) {
                 return Err(Error::SelfIntersectingCurve);
             }
 
@@ -933,8 +932,9 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
                 c.degree.try_into().expect("Got negative degree"),
                 &knots, &multiplicities);
 
+            let open = c.closed_curve.0 != Some(true);
             let curve = nurbs::BSplineCurve::new(
-                c.closed_curve.0.unwrap() == false,
+                open,
                 knot_vec,
                 control_points_list,
             );
@@ -968,8 +968,9 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
                 .map(|(p, w)| DVec4::new(p.x * w, p.y * w, p.z * w, *w))
                 .collect();
 
+            let open = bspline.closed_curve.0 != Some(true);
             let curve = nurbs::NURBSCurve::new(
-                bspline.closed_curve.0.unwrap() == false,
+                open,
                 knot_vec,
                 control_points_list,
             );
