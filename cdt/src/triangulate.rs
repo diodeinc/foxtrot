@@ -526,13 +526,15 @@ impl Triangulation {
         let edge = self.half.edge(e_ab);
         let a = edge.src;
         let b = edge.dst;
-        assert!(edge.next != EMPTY_EDGE);
-        assert!(edge.prev != EMPTY_EDGE);
-        assert!(edge.buddy == EMPTY_EDGE);
-
-        assert!(a != b);
-        assert!(a != p);
-        assert!(b != p);
+        if edge.next == EMPTY_EDGE
+            || edge.prev == EMPTY_EDGE
+            || edge.buddy != EMPTY_EDGE
+            || a == b
+            || a == p
+            || b == p
+        {
+            return Err(Error::HalfEdgeInvariant);
+        }
 
         let o = self.orient2d(b, a, p);
         let h_p = if o <= 0.0 {
@@ -557,11 +559,15 @@ impl Triangulation {
             // the constraint, which is acceptable for mesh generation.
             let was_fixed = edge.sign;
 
-            assert!(edge.buddy == EMPTY_EDGE);
+            if edge.buddy != EMPTY_EDGE {
+                return Err(Error::HalfEdgeInvariant);
+            }
             let edge_bc = self.half.edge(edge.next);
             let edge_ca = self.half.edge(edge.prev);
             let c = edge_bc.dst;
-            assert!(c == edge_ca.src);
+            if c != edge_ca.src {
+                return Err(Error::HalfEdgeInvariant);
+            }
 
             let hull_right = self.hull.right_hull(h_ab);
             let hull_left = self.hull.left_hull(h_ab);
@@ -599,8 +605,9 @@ impl Triangulation {
             h_ap
         } else {
             let f = self.half.insert(b, a, p, EMPTY_EDGE, EMPTY_EDGE, e_ab);
-            assert!(o != 0.0);
-            assert!(o > 0.0);
+            if o <= 0.0 {
+                return Err(Error::HalfEdgeInvariant);
+            }
 
             // Replaces the previous item in the hull
             self.hull.update(h_ab, self.half.prev(f));
