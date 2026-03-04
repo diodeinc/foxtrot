@@ -15,8 +15,15 @@ SCENE.addCameraCallback(function () {
 });
 
 worker.onmessage = function(e) {
+    if (e.data && e.data.ok === false) {
+        setStatus("Tessellation failed: " + e.data.error);
+        fileSelector.disabled = false;
+        exampleSelector.disabled = false;
+        return;
+    }
+    const triangles = (e.data && e.data.ok === true) ? e.data.triangles : e.data;
     setStatus("Building scene...");
-    SCENE.loadMesh(e.data);
+    SCENE.loadMesh(triangles);
     fileSelector.disabled = false;
     exampleSelector.disabled = false;
     const d = new Date();
