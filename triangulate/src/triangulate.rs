@@ -63,19 +63,166 @@ fn transform_stack_roots<'a>(transform_stack: &TransformStack<'a>) -> Vec<Repres
         .collect()
 }
 
+/// Detect the length unit in a STEP file and return a scale factor to
+/// convert coordinates to millimeters.  Returns 1.0 if the file already
+/// uses mm or if the unit cannot be determined.
+fn detect_length_scale_to_mm(s: &StepFile) -> f64 {
+    // Helper: given a unit entity, return the mm scale if it's a length unit
+    let unit_scale = |unit_entity: &Entity| -> Option<f64> {
+        match unit_entity {
+            Entity::SiUnit(si) if matches!(si.name, SiUnitName::Metre) => {
+                Some(match &si.prefix {
+                    Some(SiPrefix::Milli) => 1.0,
+                    Some(SiPrefix::Centi) => 10.0,
+                    Some(SiPrefix::Micro) => 0.001,
+                    Some(SiPrefix::Nano) => 0.000_001,
+                    Some(SiPrefix::Kilo) => 1_000_000.0,
+                    None => 1000.0, // bare metres → mm
+                    _ => 1.0,
+                })
+            },
+            Entity::ConversionBasedUnit(cbu) => {
+                let name = cbu.name.0.to_uppercase();
+                if name.contains("INCH") {
+                    return Some(25.4);
+                } else if name.contains("FOOT") || name.contains("FT") {
+                    return Some(304.8);
+                }
+                // Try to read the conversion factor
+                if let Entity::MeasureWithUnit(mwu) = &s.0[cbu.conversion_factor.0] {
+                    if let MeasureValue::LengthMeasure(lm) = &mwu.value_component {
+                        return Some(lm.0 * 1000.0);
+                    }
+                }
+                if let Entity::LengthMeasureWithUnit(lmwu) = &s.0[cbu.conversion_factor.0] {
+                    if let MeasureValue::LengthMeasure(lm) = &lmwu.value_component {
+                        return Some(lm.0 * 1000.0);
+                    }
+                }
+                None
+            },
+            _ => None,
+        }
+    };
+
+    for entity in s.0.iter() {
+        // GlobalUnitAssignedContext may be standalone or inside a ComplexEntity
+        let guacs: Vec<&GlobalUnitAssignedContext_> = match entity {
+            Entity::GlobalUnitAssignedContext(g) => vec![g],
+            Entity::ComplexEntity(subs) => subs.iter()
+                .filter_map(|e| GlobalUnitAssignedContext_::try_from_entity(e))
+                .collect(),
+            _ => continue,
+        };
+        for guac in guacs {
+            for unit_id in &guac.units {
+                // The unit may be a direct entity or inside a ComplexEntity
+                let check_entity = |e: &Entity| -> Option<f64> { unit_scale(e) };
+                match &s.0[unit_id.0] {
+                    Entity::ComplexEntity(subs) => {
+                        for sub in subs {
+                            if let Some(scale) = check_entity(sub) {
+                                if (scale - 1.0).abs() > 1e-10 {
+                                    info!("STEP length unit scale: {}", scale);
+                                }
+                                return scale;
+                            }
+                        }
+                    },
+                    e => {
+                        if let Some(scale) = check_entity(e) {
+                            if (scale - 1.0).abs() > 1e-10 {
+                                info!("STEP length unit scale: {}", scale);
+                            }
+                            return scale;
+                        }
+                    },
+                }
+            }
+        }
+    }
+    1.0 // default: assume mm
+}
+
+/// Fallback unit detection when the structured GUAC-based approach returns
+/// the default (1.0).  Scans all entities for length-related SiUnits and
+/// ConversionBasedUnits that may exist outside of a GUAC context (or whose
+/// GUAC failed to parse).
+fn detect_length_scale_fallback(s: &StepFile) -> f64 {
+    let mut found_bare_metre = false;
+    let mut found_milli_metre = false;
+    let mut found_inch = false;
+
+    for entity in s.0.iter() {
+        let subs: &[Entity] = match entity {
+            Entity::ComplexEntity(v) => v,
+            _ => std::slice::from_ref(entity),
+        };
+        // Check if this entity group contains a LENGTH_UNIT marker
+        let has_length_unit = subs.iter().any(|e| matches!(e, Entity::LengthUnit(_)));
+        if !has_length_unit { continue; }
+
+        for sub in subs {
+            match sub {
+                Entity::SiUnit(si) if matches!(si.name, SiUnitName::Metre) => {
+                    match &si.prefix {
+                        Some(SiPrefix::Milli) => found_milli_metre = true,
+                        None => found_bare_metre = true,
+                        _ => {},
+                    }
+                },
+                Entity::ConversionBasedUnit(cbu) => {
+                    if cbu.name.0.to_uppercase().contains("INCH") {
+                        found_inch = true;
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+
+    // Also check LengthMeasureWithUnit for known conversion factors.
+    // CONVERSION_BASED_UNIT('INCH', ...) often fails to parse, but the
+    // corresponding LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.0254), ...)
+    // may still be present.
+    if !found_inch {
+        for entity in s.0.iter() {
+            if let Entity::LengthMeasureWithUnit(lmwu) = entity {
+                if let MeasureValue::LengthMeasure(lm) = &lmwu.value_component {
+                    // 0.0254 m = 1 inch
+                    if (lm.0 - 0.0254).abs() < 1e-6 {
+                        found_inch = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if found_inch {
+        info!("STEP fallback unit detection: INCH → scale 25.4");
+        25.4
+    } else if found_bare_metre && !found_milli_metre {
+        info!("STEP fallback unit detection: bare METRE → scale 1000");
+        1000.0
+    } else {
+        1.0
+    }
+}
+
 pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
     let styled_items: Vec<_> = s.0.iter()
         .filter_map(|e| MechanicalDesignGeometricPresentationRepresentation_::try_from_entity(e))
         .flat_map(|m| m.items.iter())
         .filter_map(|item| s.entity(item.cast::<StyledItem_>()))
         .collect();
-    let brep_colors: HashMap<_, DVec3> = styled_items.iter()
+    let styled_item_colors: HashMap<usize, DVec3> = styled_items.iter()
         .filter_map(|styled|
             if styled.styles.len() != 1 {
                 None
             } else {
                 presentation_style_color(s, styled.styles[0])
-                    .map(|c| (styled.item, c))
+                    .map(|c| (styled.item.0, c))
             })
         .collect();
 
@@ -171,27 +318,27 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
             |(mut mesh, mut stats), (id, mats)| {
                 let v_start = mesh.verts.len();
                 let t_start = mesh.triangles.len();
+                let default_color = styled_item_colors.get(&id.0)
+                    .copied()
+                    .unwrap_or(DVec3::new(0.5, 0.5, 0.5));
                 match &s[*id] {
                     Entity::ManifoldSolidBrep(b) =>
-                        closed_shell(s, b.outer, &mut mesh, &mut stats),
+                        closed_shell(s, b.outer, &mut mesh, &mut stats,
+                            &styled_item_colors, default_color),
                     Entity::ShellBasedSurfaceModel(b) =>
                         for v in &b.sbsm_boundary {
-                            shell(s, *v, &mut mesh, &mut stats);
+                            shell(s, *v, &mut mesh, &mut stats,
+                                &styled_item_colors, default_color);
                         },
                     Entity::BrepWithVoids(b) =>
                         // TODO: handle voids
-                        closed_shell(s, b.outer, &mut mesh, &mut stats),
+                        closed_shell(s, b.outer, &mut mesh, &mut stats,
+                            &styled_item_colors, default_color),
                     _ => {
                         warn!("Skipping {:?} (not a known solid)", s[*id]);
                         return (mesh, stats);
                     },
                 };
-
-                // Pick out a color from the color map and apply it to each
-                // newly-created vertex
-                let color = brep_colors.get(id)
-                    .map(|c| *c)
-                    .unwrap_or(DVec3::new(0.5, 0.5, 0.5));
 
                 // Build copies of the mesh by copying and applying transforms
                 let v_end = mesh.verts.len();
@@ -204,6 +351,7 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
 
                         let n = mesh.verts[v].norm;
                         let norm = (mat * glm::vec3_to_vec4(&n)).xyz();
+                        let color = mesh.verts[v].color;
 
                         mesh.verts.push(mesh::Vertex { pos, norm, color });
                     }
@@ -225,8 +373,6 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
 
                     let n = mesh.verts[v].norm;
                     mesh.verts[v].norm = (mat * glm::vec3_to_vec4(&n)).xyz();
-
-                    mesh.verts[v].color = color;
                 }
                 (mesh, stats)
             });
@@ -240,6 +386,19 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
             mesh_fold
         }
     };
+
+    // Scale coordinates to millimeters based on the STEP file's length unit
+    let mut scale = detect_length_scale_to_mm(s);
+    if (scale - 1.0).abs() < 1e-10 {
+        scale = detect_length_scale_fallback(s);
+    }
+    let mut mesh = mesh;
+    if (scale - 1.0).abs() > 1e-10 {
+        info!("Applying unit scale factor: {}", scale);
+        for v in &mut mesh.verts {
+            v.pos *= scale;
+        }
+    }
 
     info!("num_shells: {}", stats.num_shells);
     info!("num_faces: {}", stats.num_faces);
@@ -329,38 +488,93 @@ fn axis2_placement_3d(s: &StepFile, t: Id<Axis2Placement3d_>) -> (DVec3, DVec3, 
     (location, axis, ref_direction)
 }
 
-fn shell(s: &StepFile, c: Shell, mesh: &mut Mesh, stats: &mut Stats) {
+fn shell(
+    s: &StepFile,
+    c: Shell,
+    mesh: &mut Mesh,
+    stats: &mut Stats,
+    styled_item_colors: &HashMap<usize, DVec3>,
+    default_color: DVec3,
+) {
     match &s[c] {
-        Entity::ClosedShell(_) => closed_shell(s, c.cast(), mesh, stats),
-        Entity::OpenShell(_) => open_shell(s, c.cast(), mesh, stats),
+        Entity::ClosedShell(_) => closed_shell(
+            s,
+            c.cast(),
+            mesh,
+            stats,
+            styled_item_colors,
+            default_color,
+        ),
+        Entity::OpenShell(_) => open_shell(
+            s,
+            c.cast(),
+            mesh,
+            stats,
+            styled_item_colors,
+            default_color,
+        ),
         h => warn!("Skipping {:?} (unknown Shell type)", h),
     }
 }
 
-fn open_shell(s: &StepFile, c: OpenShell, mesh: &mut Mesh, stats: &mut Stats) {
+fn open_shell(
+    s: &StepFile,
+    c: OpenShell,
+    mesh: &mut Mesh,
+    stats: &mut Stats,
+    styled_item_colors: &HashMap<usize, DVec3>,
+    default_color: DVec3,
+) {
     let cs = s.entity(c).expect("Could not get OpenShell");
     for face in &cs.cfs_faces {
-        if let Err(err) = advanced_face(s, face.cast(), mesh, stats) {
+        if let Err(err) = advanced_face(
+            s,
+            face.cast(),
+            mesh,
+            stats,
+            styled_item_colors,
+            default_color,
+        ) {
             error!("Failed to triangulate {:?}: {}", s[*face], err);
         }
     }
     stats.num_shells += 1;
 }
 
-fn closed_shell(s: &StepFile, c: ClosedShell, mesh: &mut Mesh, stats: &mut Stats) {
+fn closed_shell(
+    s: &StepFile,
+    c: ClosedShell,
+    mesh: &mut Mesh,
+    stats: &mut Stats,
+    styled_item_colors: &HashMap<usize, DVec3>,
+    default_color: DVec3,
+) {
     let cs = s.entity(c).expect("Could not get ClosedShell");
     for face in &cs.cfs_faces {
-        if let Err(err) = advanced_face(s, face.cast(), mesh, stats) {
+        if let Err(err) = advanced_face(
+            s,
+            face.cast(),
+            mesh,
+            stats,
+            styled_item_colors,
+            default_color,
+        ) {
             error!("Failed to triangulate {:?}: {}", s[*face], err);
         }
     }
     stats.num_shells += 1;
 }
 
-fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
-                 stats: &mut Stats) -> Result<(), Error>
-{
+fn advanced_face(
+    s: &StepFile,
+    f: AdvancedFace,
+    mesh: &mut Mesh,
+    stats: &mut Stats,
+    styled_item_colors: &HashMap<usize, DVec3>,
+    default_color: DVec3,
+) -> Result<(), Error> {
     let face = s.entity(f).expect("Could not get AdvancedFace");
+    let face_color = styled_item_colors.get(&f.0).copied().unwrap_or(default_color);
     stats.num_faces += 1;
 
     // Grab the surface, returning early if it's unimplemented
@@ -389,7 +603,7 @@ fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
                 mesh.verts.push(mesh::Vertex {
                     pos: bound_contours[0],
                     norm: DVec3::zeros(),
-                    color: DVec3::new(0.0, 0.0, 0.0),
+                    color: face_color,
                 });
             },
 
@@ -405,7 +619,7 @@ fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
                     mesh.verts.push(mesh::Vertex {
                         pos: pt,
                         norm: DVec3::zeros(),
-                        color: DVec3::new(0.0, 0.0, 0.0),
+                        color: face_color,
                     });
                     num_pts += 1;
                 }
@@ -428,6 +642,7 @@ fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
     // assigning it to the first point in the list, which causes it to get
     // deduplicated), then retry.
     let mut pts = surf.lower_verts(&mut mesh.verts[v_start..])?;
+    resolve_crossing_edges(&mut pts, &mut edges, &mut mesh.verts, v_start);
     let bonus_points = pts.len();
     surf.add_steiner_points(&mut pts, &mut mesh.verts);
     let result = std::panic::catch_unwind(|| {
@@ -490,6 +705,9 @@ fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
             }
             stats.num_panics += 1;
         }
+    }
+    for v in &mut mesh.verts[v_start..] {
+        v.color = face_color;
     }
     // Flip normals of new vertices, depending on the same_sense flag
     if !face.same_sense {
@@ -675,9 +893,10 @@ fn edge_curve(s: &StepFile, e: EdgeCurve, orientation: bool) -> Result<Vec<DVec3
     } else {
         (edge_curve.edge_end, edge_curve.edge_start)
     };
+    let is_loop = edge_curve.edge_start == edge_curve.edge_end;
     let u = vertex_point(s, start);
     let v = vertex_point(s, end);
-    Ok(curve.build(u, v))
+    Ok(curve.build(u, v, is_loop))
 }
 
 fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
@@ -698,9 +917,7 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
                                edge_curve.same_sense ^ !orientation)
         },
         Entity::BSplineCurveWithKnots(c) => {
-            if c.closed_curve.0 != Some(false) {
-                return Err(Error::ClosedCurve);
-            } else if c.self_intersect.0 != Some(false) {
+            if c.self_intersect.0 == Some(true) {
                 return Err(Error::SelfIntersectingCurve);
             }
 
@@ -715,8 +932,9 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
                 c.degree.try_into().expect("Got negative degree"),
                 &knots, &multiplicities);
 
+            let open = c.closed_curve.0 != Some(true);
             let curve = nurbs::BSplineCurve::new(
-                c.closed_curve.0.unwrap() == false,
+                open,
                 knot_vec,
                 control_points_list,
             );
@@ -750,8 +968,9 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
                 .map(|(p, w)| DVec4::new(p.x * w, p.y * w, p.z * w, *w))
                 .collect();
 
+            let open = bspline.closed_curve.0 != Some(true);
             let curve = nurbs::NURBSCurve::new(
-                bspline.closed_curve.0.unwrap() == false,
+                open,
                 knot_vec,
                 control_points_list,
             );
@@ -778,4 +997,88 @@ fn vertex_point(s: &StepFile, v: Vertex) -> DVec3 {
             .expect("Could not get VertexPoint")
             .vertex_geometry
             .cast())
+}
+
+/// Compute intersection parameters (t, s) for segments A-B and C-D.
+/// Returns Some((t, s)) if the segments cross at interior points (not
+/// at endpoints), where the intersection is at A + t*(B-A) = C + s*(D-C).
+fn segment_intersection_params(
+    a: (f64, f64), b: (f64, f64),
+    c: (f64, f64), d: (f64, f64),
+) -> Option<(f64, f64)> {
+    let denom = (b.0 - a.0) * (d.1 - c.1) - (b.1 - a.1) * (d.0 - c.0);
+    if denom.abs() < 1e-12 {
+        return None; // parallel or coincident
+    }
+    let t = ((c.0 - a.0) * (d.1 - c.1) - (c.1 - a.1) * (d.0 - c.0)) / denom;
+    let s = ((c.0 - a.0) * (b.1 - a.1) - (c.1 - a.1) * (b.0 - a.0)) / denom;
+    let eps = 1e-10;
+    if t > eps && t < 1.0 - eps && s > eps && s < 1.0 - eps {
+        Some((t, s))
+    } else {
+        None
+    }
+}
+
+/// Pre-process edges to resolve any crossings before feeding them to the CDT.
+/// When two constrained edges cross, split both at the intersection point by
+/// inserting a new shared vertex.
+fn resolve_crossing_edges(
+    pts: &mut Vec<(f64, f64)>,
+    edges: &mut Vec<(usize, usize)>,
+    verts: &mut Vec<mesh::Vertex>,
+    v_start: usize,
+) {
+    // Limit iterations to prevent pathological runaway
+    for _ in 0..100 {
+        let mut found = None;
+        'outer: for i in 0..edges.len() {
+            for j in (i + 1)..edges.len() {
+                // Skip edges that share an endpoint
+                if edges[i].0 == edges[j].0 || edges[i].0 == edges[j].1
+                || edges[i].1 == edges[j].0 || edges[i].1 == edges[j].1 {
+                    continue;
+                }
+                if let Some((t, _s)) = segment_intersection_params(
+                    pts[edges[i].0], pts[edges[i].1],
+                    pts[edges[j].0], pts[edges[j].1],
+                ) {
+                    found = Some((i, j, t));
+                    break 'outer;
+                }
+            }
+        }
+        let (i, j, t) = match found {
+            Some(v) => v,
+            None => break, // no more crossings
+        };
+
+        // Compute 2D intersection point
+        let (ax, ay) = pts[edges[i].0];
+        let (bx, by) = pts[edges[i].1];
+        let new_2d = (ax + t * (bx - ax), ay + t * (by - ay));
+
+        // Compute 3D vertex by interpolation along edge i
+        let va = verts[v_start + edges[i].0];
+        let vb = verts[v_start + edges[i].1];
+        let new_3d = mesh::Vertex {
+            pos: va.pos * (1.0 - t) + vb.pos * t,
+            norm: DVec3::zeros(),
+            color: DVec3::zeros(),
+        };
+
+        let new_idx = pts.len();
+        pts.push(new_2d);
+        verts.push(new_3d);
+
+        // Split edge i: (a, b) → (a, new), (new, b)
+        let (a, b) = edges[i];
+        edges[i] = (a, new_idx);
+        edges.push((new_idx, b));
+
+        // Split edge j: (c, d) → (c, new), (new, d)
+        let (c, d) = edges[j];
+        edges[j] = (c, new_idx);
+        edges.push((new_idx, d));
+    }
 }

@@ -48,22 +48,27 @@ impl Curve {
         Self::Line
     }
 
-    fn curve_points<const N: usize>(u: DVec3, v: DVec3, curve: &SampledCurve<N>) -> Vec<DVec3>
+    fn curve_points<const N: usize>(u: DVec3, v: DVec3, curve: &SampledCurve<N>,
+                                     is_loop: bool) -> Vec<DVec3>
         where NDBSplineCurve<N>: AbstractCurve
     {
-        let t_start = curve.u_from_point(u);
-        let t_end = curve.u_from_point(v);
+        let (t_start, t_end) = if is_loop {
+            // Full-loop edge: sample the entire parameter range
+            (curve.min_u(), curve.max_u())
+        } else {
+            (curve.u_from_point(u), curve.u_from_point(v))
+        };
         let mut c = curve.as_polyline(t_start, t_end, 8);
         c[0] = u;
         *c.last_mut().unwrap() = v;
         c
     }
 
-    pub fn build(&self, u: DVec3, v: DVec3) -> Vec<DVec3> {
+    pub fn build(&self, u: DVec3, v: DVec3, is_loop: bool) -> Vec<DVec3> {
         match self {
             Self::Line => vec![u, v],
-            Self::BSplineCurveWithKnots(curve) => Self::curve_points(u, v, curve),
-            Self::NURBSCurve(curve) => Self::curve_points(u, v, curve),
+            Self::BSplineCurveWithKnots(curve) => Self::curve_points(u, v, curve, is_loop),
+            Self::NURBSCurve(curve) => Self::curve_points(u, v, curve, is_loop),
             Self::Ellipse {
                 eplane_from_world, world_from_eplane, closed, dir
             } => {

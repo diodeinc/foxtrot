@@ -98,6 +98,12 @@ pub enum Error {
     /// This indicates a logic error in the crate, but it happens occasionally
     #[error("escaped wedge when searching fixed edge")]
     WedgeEscape,
+
+    /// A half-edge invariant was violated (corrupt mesh state).  This
+    /// replaces assertions that would panic and is safe to skip on wasm
+    /// where catch_unwind is unavailable.
+    #[error("half-edge invariant violation")]
+    HalfEdgeInvariant,
 }
 
 ////////////////////////////////////////////////////////////////////////////////

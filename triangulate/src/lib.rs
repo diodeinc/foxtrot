@@ -1,3 +1,4 @@
+pub mod colored_mesh;
 pub mod mesh;
 pub mod stats;
 pub mod surface;

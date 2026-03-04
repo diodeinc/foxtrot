@@ -10,6 +10,9 @@ use crate::{
 enum Walk {
     Inside(EdgeIndex),
     Done(EdgeIndex),
+    /// A collinear intermediate point was found on the src→dst line.
+    /// The caller should lock src→mid, then continue with mid→dst.
+    Through(PointIndex),
 }
 
 /// This `struct` contains all of the data needed to generate a (constrained)
@@ -523,13 +526,15 @@ impl Triangulation {
         let edge = self.half.edge(e_ab);
         let a = edge.src;
         let b = edge.dst;
-        assert!(edge.next != EMPTY_EDGE);
-        assert!(edge.prev != EMPTY_EDGE);
-        assert!(edge.buddy == EMPTY_EDGE);
-
-        assert!(a != b);
-        assert!(a != p);
-        assert!(b != p);
+        if edge.next == EMPTY_EDGE
+            || edge.prev == EMPTY_EDGE
+            || edge.buddy != EMPTY_EDGE
+            || a == b
+            || a == p
+            || b == p
+        {
+            return Err(Error::HalfEdgeInvariant);
+        }
 
         let o = self.orient2d(b, a, p);
         let h_p = if o <= 0.0 {
@@ -547,16 +552,22 @@ impl Triangulation {
                 Special case: if p is exactly on the line (or inside), then we
                 split the line instead of inserting a new triangle.
             */
-            if edge.fixed() {
-                // TODO: this should only be checked if o == 0.0; otherwise,
-                // we should re-insert a-b with a-b-p being a third triangle
-                return Err(Error::PointOnFixedEdge(self.remap[p]));
+            // When the hull edge is fixed (constrained), split it and
+            // propagate the fixed status to both halves.  For o == 0
+            // this is exact; for o < 0 (point slightly inside the hull
+            // triangle due to angle-ordering) it approximately preserves
+            // the constraint, which is acceptable for mesh generation.
+            let was_fixed = edge.sign;
+
+            if edge.buddy != EMPTY_EDGE {
+                return Err(Error::HalfEdgeInvariant);
             }
-            assert!(edge.buddy == EMPTY_EDGE);
             let edge_bc = self.half.edge(edge.next);
             let edge_ca = self.half.edge(edge.prev);
             let c = edge_bc.dst;
-            assert!(c == edge_ca.src);
+            if c != edge_ca.src {
+                return Err(Error::HalfEdgeInvariant);
+            }
 
             let hull_right = self.hull.right_hull(h_ab);
             let hull_left = self.hull.left_hull(h_ab);
@@ -565,6 +576,13 @@ impl Triangulation {
 
             let e_pc = self.half.insert(p, c, a, edge_ca.buddy, EMPTY_EDGE, EMPTY_EDGE);
             let e_cp = self.half.insert(c, p, b, EMPTY_EDGE, edge_bc.buddy, e_pc);
+
+            // If the original edge was fixed, mark the split halves
+            // as fixed too so the constraint is preserved.
+            if was_fixed.is_some() {
+                self.half.set_sign(self.half.prev(e_pc), was_fixed); // a→p
+                self.half.set_sign(self.half.next(e_cp), was_fixed); // p→b
+            }
 
             // Update the hull point at b to point to the new split edge
             self.hull.update(h_ab, self.half.next(e_cp));
@@ -587,8 +605,9 @@ impl Triangulation {
             h_ap
         } else {
             let f = self.half.insert(b, a, p, EMPTY_EDGE, EMPTY_EDGE, e_ab);
-            assert!(o != 0.0);
-            assert!(o > 0.0);
+            if o <= 0.0 {
+                return Err(Error::HalfEdgeInvariant);
+            }
 
             // Replaces the previous item in the hull
             self.hull.update(h_ab, self.half.prev(f));
@@ -794,12 +813,12 @@ impl Triangulation {
         let o_left = self.orient2d(src, wedge_left, dst);
         let o_right = self.orient2d(src, dst, wedge_right);
 
-        // For now, we don't handle cases where fixed edges have coincident
-        // points that are not the start/end of the fixed edge.
+        // If a point is collinear with the fixed edge (orient2d == 0),
+        // split the fixed edge at that point instead of erroring.
         if o_left == 0.0 {
-            return Err(Error::PointOnFixedEdge(self.remap[wedge_left]));
+            return Ok(Walk::Through(wedge_left));
         } else if o_right == 0.0 {
-            return Err(Error::PointOnFixedEdge(self.remap[wedge_right]));
+            return Ok(Walk::Through(wedge_right));
         }
 
         // Walk the inside of the wedge until we find the
@@ -870,8 +889,8 @@ impl Triangulation {
                 }
                 index_a_src = self.half.edge(buddy).prev;
             } else {
-                // If we hit a vertex, exactly, then return an error
-                return Err(Error::PointOnFixedEdge(self.remap[a]));
+                // Hit a vertex exactly on the src→dst line; split there
+                return Ok(Walk::Through(a));
             }
         }
     }
@@ -1043,22 +1062,66 @@ impl Triangulation {
                 assert!(edge_ca.buddy != EMPTY_EDGE);
                 edge_ca.buddy
             } else {
-                return Err(Error::PointOnFixedEdge(self.remap[c]));
+                // c is collinear with src→dst.  Close the contours here
+                // (same as the c==dst termination), lock src→c, then
+                // continue with c→dst via handle_fixed_edge.
+                let e_c_src = steps_left.push(self, c,
+                    if edge_bc.buddy == EMPTY_EDGE {
+                        let h = self.hull.index_of(edge_bc.dst);
+                        assert!(self.hull.edge(h) == e_bc);
+                        ContourData::Hull(h, edge_bc.sign)
+                    } else {
+                        ContourData::Buddy(edge_bc.buddy)
+                    }).expect("Failed to create fixed edge at collinear split");
+
+                let e_src_c = steps_right.push(self, c,
+                    if edge_ca.buddy == EMPTY_EDGE {
+                        let h = self.hull.index_of(edge_ca.dst);
+                        assert!(self.hull.edge(h) == e_ca);
+                        ContourData::Hull(h, edge_ca.sign)
+                    } else {
+                        ContourData::Buddy(edge_ca.buddy)
+                    }).expect("Failed to create fixed edge at collinear split (right)");
+
+                self.half.link(e_src_c, e_c_src);
+                self.half.toggle_lock_sign(e_src_c);
+
+                // Continue with the remaining portion c→dst
+                let h_c = self.hull.index_of(c);
+                return self.handle_fixed_edge(h_c, c, dst);
             }
         }
         Ok(())
     }
 
-    fn handle_fixed_edge(&mut self, h: HullIndex, src: PointIndex, dst: PointIndex) -> Result<(), Error> {
-        match self.find_hull_walk_mode(h, src, dst)? {
-            // Easy mode: the fixed edge is directly connected to the new
-            // point, so we lock it and return immediately.
-            Walk::Done(e) => { self.half.toggle_lock_sign(e); Ok(()) },
+    fn handle_fixed_edge(&mut self, mut h: HullIndex, mut src: PointIndex, dst: PointIndex) -> Result<(), Error> {
+        // Use a loop to handle Through (tail-call elimination for the
+        // second recursive call, mid→dst).
+        for _ in 0..1000 {
+            match self.find_hull_walk_mode(h, src, dst)? {
+                // Easy mode: the fixed edge is directly connected to the new
+                // point, so we lock it and return immediately.
+                Walk::Done(e) => { self.half.toggle_lock_sign(e); return Ok(()); },
 
-            // Otherwise, we're guaranteed to be inside the triangulation,
-            // because the hull is convex by construction.
-            Walk::Inside(e) => self.walk_fill(src, dst, e),
+                // Otherwise, we're guaranteed to be inside the triangulation,
+                // because the hull is convex by construction.
+                Walk::Inside(e) => return self.walk_fill(src, dst, e),
+
+                // A collinear intermediate point was found on src→dst.
+                // Lock src→mid, then continue the loop with mid→dst.
+                Walk::Through(mid) => {
+                    if mid == src || mid == dst {
+                        return Err(Error::PointOnFixedEdge(src.0 as usize));
+                    }
+                    self.handle_fixed_edge(h, src, mid)?;
+                    h = self.hull.index_of(mid);
+                    src = mid;
+                    // Loop continues with mid→dst
+                },
+            }
         }
+        // Safety: if we hit the loop limit, bail out
+        Err(Error::PointOnFixedEdge(src.0 as usize))
     }
 
     pub(crate) fn legalize(&mut self, e_ab: EdgeIndex) {
