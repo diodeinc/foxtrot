@@ -14,6 +14,8 @@ triangulate = { path = "../triangulate", features = ["parallel"] }
 bytemuck = { version = "1.5.1", features = ["derive"] }
 clap = "2.33"
 env_logger = "0.8.3"
+glob = "0.3"
+log = "0.4"
 itertools = "0.10.0"
 nalgebra-glm = "0.13.0"
 pollster = "0.2.4"

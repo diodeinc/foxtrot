@@ -1,0 +1,44 @@
+name: Regression Test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-regression-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-regression-
+
+      - name: Build regression test
+        run: cargo build --release --example regression_test
+
+      - name: Run regression test
+        run: |
+          RUST_LOG=error cargo run --release --example regression_test -- \
+            --compare test_assets/baseline.json \
+            --timing-threshold 0.02 \
+            --save-baseline /tmp/current_baseline.json
+
+      - name: Upload current results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-results
+          path: /tmp/current_baseline.json
