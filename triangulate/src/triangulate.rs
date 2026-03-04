@@ -113,15 +113,11 @@ impl TriangulationWatchdog {
         self.checkpoint().map_err(|_| cdt::Error::Aborted)
     }
 
-    fn map_cdt_error(&self, err: cdt::Error) -> Error {
-        if err == cdt::Error::Aborted {
-            match self.reason {
-                Some(WatchdogAbortReason::Timeout) => Error::Timeout,
-                Some(WatchdogAbortReason::BudgetExceeded) => Error::WatchdogBudgetExceeded,
-                None => Error::WatchdogBudgetExceeded,
-            }
-        } else {
-            Error::WatchdogBudgetExceeded
+    fn map_cdt_aborted(&self) -> Error {
+        match self.reason {
+            Some(WatchdogAbortReason::Timeout) => Error::Timeout,
+            Some(WatchdogAbortReason::BudgetExceeded) => Error::WatchdogBudgetExceeded,
+            None => Error::WatchdogBudgetExceeded,
         }
     }
 
@@ -130,6 +126,50 @@ impl TriangulationWatchdog {
             WatchdogAbortReason::Timeout => Error::Timeout,
             WatchdogAbortReason::BudgetExceeded => Error::WatchdogBudgetExceeded,
         }
+    }
+}
+
+trait TessellationWatchdog {
+    fn checkpoint_error(&mut self) -> Result<(), Error>;
+    fn checkpoint_cdt(&mut self) -> Result<(), cdt::Error>;
+    fn map_cdt_aborted(&self) -> Error;
+    fn should_fail_fast(&self, _err: &Error) -> bool {
+        false
+    }
+}
+
+struct NoopWatchdog;
+
+impl TessellationWatchdog for NoopWatchdog {
+    fn checkpoint_error(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn checkpoint_cdt(&mut self) -> Result<(), cdt::Error> {
+        Ok(())
+    }
+
+    fn map_cdt_aborted(&self) -> Error {
+        panic!("cdt abort should be unreachable with no-op watchdog");
+    }
+}
+
+#[cfg(feature = "timeouts")]
+impl TessellationWatchdog for TriangulationWatchdog {
+    fn checkpoint_error(&mut self) -> Result<(), Error> {
+        TriangulationWatchdog::checkpoint_error(self)
+    }
+
+    fn checkpoint_cdt(&mut self) -> Result<(), cdt::Error> {
+        TriangulationWatchdog::checkpoint_cdt(self)
+    }
+
+    fn map_cdt_aborted(&self) -> Error {
+        TriangulationWatchdog::map_cdt_aborted(self)
+    }
+
+    fn should_fail_fast(&self, err: &Error) -> bool {
+        matches!(err, Error::Timeout | Error::WatchdogBudgetExceeded)
     }
 }
 
@@ -354,237 +394,9 @@ fn detect_length_scale_fallback(s: &StepFile) -> f64 {
     }
 }
 
-pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
-    let styled_items: Vec<_> = s
-        .0
-        .iter()
-        .filter_map(|e| MechanicalDesignGeometricPresentationRepresentation_::try_from_entity(e))
-        .flat_map(|m| m.items.iter())
-        .filter_map(|item| s.entity(item.cast::<StyledItem_>()))
-        .collect();
-    let styled_item_colors: HashMap<usize, DVec3> = styled_items
-        .iter()
-        .filter_map(|styled| {
-            if styled.styles.len() != 1 {
-                None
-            } else {
-                presentation_style_color(s, styled.styles[0]).map(|c| (styled.item.0, c))
-            }
-        })
-        .collect();
-
-    // Store a map of parent -> (child, transform)
-    let mut transform_stack = build_transform_stack(s, false);
-    let mut roots = transform_stack_roots(&transform_stack);
-    // The transformation graph isn't directional (because STEP is a Good File
-    // Format), so if it's got more than one root, assume it's backwards.  We
-    // are assuming that directions in the graph are consistent within the file,
-    // until we find a counterexample.
-    if roots.len() > 1 {
-        info!("Flipping transform stack");
-        transform_stack = build_transform_stack(s, true);
-        roots = transform_stack_roots(&transform_stack);
-    }
-    let mut todo: Vec<_> = roots.into_iter().map(|v| (v, DMat4::identity())).collect();
-    if todo.len() > 1 {
-        warn!("Transformation stack has more than one root!");
-    }
-
-    // Store a map of ShapeRepresentationRelationships, which some models
-    // use to map from axes to specific instances
-    let mut shape_rep_relationship: HashMap<Id<_>, Vec<Id<_>>> = HashMap::new();
-    for (r1, r2) in
-        s.0.iter()
-            .filter_map(|e| ShapeRepresentationRelationship_::try_from_entity(e))
-            .map(|e| (e.rep_1, e.rep_2))
-    {
-        shape_rep_relationship.entry(r1).or_default().push(r2);
-    }
-
-    let mut to_mesh: HashMap<Id<_>, Vec<_>> = HashMap::new();
-    while let Some((id, mat)) = todo.pop() {
-        for child in shape_rep_relationship.get(&id).unwrap_or(&vec![]) {
-            todo.push((*child, mat));
-        }
-        if let Some(children) = transform_stack.get(&id) {
-            for (child, next_mat) in children {
-                todo.push((*child, mat * next_mat));
-            }
-        } else {
-            // Bind this transform to the RepresentationItem, which is
-            // either a ManifoldSolidBrep or a ShellBasedSurfaceModel
-            let items = match &s[id] {
-                Entity::AdvancedBrepShapeRepresentation(b) => &b.items,
-                Entity::ShapeRepresentation(b) => &b.items,
-                Entity::ManifoldSurfaceShapeRepresentation(b) => &b.items,
-                e => panic!("Could not get shape from {:?}", e),
-            };
-
-            for m in items.iter() {
-                match &s[*m] {
-                    Entity::ManifoldSolidBrep(_)
-                    | Entity::BrepWithVoids(_)
-                    | Entity::ShellBasedSurfaceModel(_) => to_mesh.entry(*m).or_default().push(mat),
-                    Entity::Axis2Placement3d(_) => (),
-                    e => warn!("Skipping {:?}", e),
-                }
-            }
-        }
-    }
-    // If there are items in breps that aren't attached to a transformation
-    // chain, then draw them individually (with an identity matrix)
-    if to_mesh.is_empty() {
-        s.0.iter()
-            .enumerate()
-            .filter(|(_i, e)| match e {
-                Entity::ManifoldSolidBrep(_)
-                | Entity::BrepWithVoids(_)
-                | Entity::ShellBasedSurfaceModel(_) => true,
-                _ => false,
-            })
-            .map(|(i, _e)| Id::new(i))
-            .for_each(|i| to_mesh.entry(i).or_default().push(DMat4::identity()));
-    }
-
-    let (to_mesh_iter, empty) = {
-        #[cfg(feature = "rayon")]
-        {
-            (to_mesh.par_iter(), || (Mesh::default(), Stats::default()))
-        }
-        #[cfg(not(feature = "rayon"))]
-        {
-            (to_mesh.iter(), (Mesh::default(), Stats::default()))
-        }
-    };
-    let mesh_fold = to_mesh_iter.fold(
-        // Empty constructor
-        empty,
-        // Fold operation
-        |(mut mesh, mut stats), (id, mats)| {
-            let v_start = mesh.verts.len();
-            let t_start = mesh.triangles.len();
-            let default_color = styled_item_colors
-                .get(&id.0)
-                .copied()
-                .unwrap_or(DVec3::new(0.5, 0.5, 0.5));
-            match &s[*id] {
-                Entity::ManifoldSolidBrep(b) => closed_shell(
-                    s,
-                    b.outer,
-                    &mut mesh,
-                    &mut stats,
-                    &styled_item_colors,
-                    default_color,
-                ),
-                Entity::ShellBasedSurfaceModel(b) => {
-                    for v in &b.sbsm_boundary {
-                        shell(
-                            s,
-                            *v,
-                            &mut mesh,
-                            &mut stats,
-                            &styled_item_colors,
-                            default_color,
-                        );
-                    }
-                }
-                Entity::BrepWithVoids(b) =>
-                // TODO: handle voids
-                {
-                    closed_shell(
-                        s,
-                        b.outer,
-                        &mut mesh,
-                        &mut stats,
-                        &styled_item_colors,
-                        default_color,
-                    )
-                }
-                _ => {
-                    warn!("Skipping {:?} (not a known solid)", s[*id]);
-                    return (mesh, stats);
-                }
-            };
-
-            // Build copies of the mesh by copying and applying transforms
-            let v_end = mesh.verts.len();
-            let t_end = mesh.triangles.len();
-            for mat in &mats[1..] {
-                for v in v_start..v_end {
-                    let p = mesh.verts[v].pos;
-                    let p_h = DVec4::new(p.x, p.y, p.z, 1.0);
-                    let pos = (mat * p_h).xyz();
-
-                    let n = mesh.verts[v].norm;
-                    let norm = (mat * glm::vec3_to_vec4(&n)).xyz();
-                    let color = mesh.verts[v].color;
-
-                    mesh.verts.push(mesh::Vertex { pos, norm, color });
-                }
-                let offset = mesh.verts.len() - v_end;
-                for t in t_start..t_end {
-                    let mut tri = mesh.triangles[t];
-                    tri.verts.add_scalar_mut(offset as u32);
-                    mesh.triangles.push(tri);
-                }
-            }
-
-            // Now that we've built all of the other copies of the mesh,
-            // re-use the original mesh and apply the first transform
-            let mat = mats[0];
-            for v in v_start..v_end {
-                let p = mesh.verts[v].pos;
-                let p_h = DVec4::new(p.x, p.y, p.z, 1.0);
-                mesh.verts[v].pos = (mat * p_h).xyz();
-
-                let n = mesh.verts[v].norm;
-                mesh.verts[v].norm = (mat * glm::vec3_to_vec4(&n)).xyz();
-            }
-            (mesh, stats)
-        },
-    );
-
-    let (mesh, stats) = {
-        #[cfg(feature = "rayon")]
-        {
-            mesh_fold.reduce(empty, |a, b| {
-                (Mesh::combine(a.0, b.0), Stats::combine(a.1, b.1))
-            })
-        }
-        #[cfg(not(feature = "rayon"))]
-        {
-            mesh_fold
-        }
-    };
-
-    // Scale coordinates to millimeters based on the STEP file's length unit
-    let mut scale = detect_length_scale_to_mm(s);
-    if (scale - 1.0).abs() < 1e-10 {
-        scale = detect_length_scale_fallback(s);
-    }
-    let mut mesh = mesh;
-    if (scale - 1.0).abs() > 1e-10 {
-        info!("Applying unit scale factor: {}", scale);
-        for v in &mut mesh.verts {
-            v.pos *= scale;
-        }
-    }
-
-    info!("num_shells: {}", stats.num_shells);
-    info!("num_faces: {}", stats.num_faces);
-    info!("num_errors: {}", stats.num_errors);
-    info!("num_panics: {}", stats.num_panics);
-    (mesh, stats)
-}
-
-/// Timeout-aware triangulation entry point.
-#[cfg(feature = "timeouts")]
-pub fn triangulate_with_limits(
+fn collect_tessellation_inputs(
     s: &StepFile,
-    limits: TriangulationLimits,
-) -> Result<(Mesh, Stats), Error> {
-    let mut watchdog = TriangulationWatchdog::new(limits);
-
+) -> (HashMap<usize, DVec3>, HashMap<usize, Vec<DMat4>>) {
     let styled_items: Vec<_> = s
         .0
         .iter()
@@ -624,9 +436,8 @@ pub fn triangulate_with_limits(
         shape_rep_relationship.entry(r1).or_default().push(r2);
     }
 
-    let mut to_mesh: HashMap<Id<_>, Vec<_>> = HashMap::new();
+    let mut to_mesh: HashMap<usize, Vec<_>> = HashMap::new();
     while let Some((id, mat)) = todo.pop() {
-        watchdog.checkpoint_error()?;
         for child in shape_rep_relationship.get(&id).unwrap_or(&vec![]) {
             todo.push((*child, mat));
         }
@@ -646,7 +457,9 @@ pub fn triangulate_with_limits(
                 match &s[*m] {
                     Entity::ManifoldSolidBrep(_)
                     | Entity::BrepWithVoids(_)
-                    | Entity::ShellBasedSurfaceModel(_) => to_mesh.entry(*m).or_default().push(mat),
+                    | Entity::ShellBasedSurfaceModel(_) => {
+                        to_mesh.entry(m.0).or_default().push(mat)
+                    }
                     Entity::Axis2Placement3d(_) => (),
                     e => warn!("Skipping {:?}", e),
                 }
@@ -664,98 +477,117 @@ pub fn triangulate_with_limits(
                         | Entity::ShellBasedSurfaceModel(_)
                 )
             })
-            .map(|(i, _e)| Id::new(i))
+            .map(|(i, _e)| i)
             .for_each(|i| to_mesh.entry(i).or_default().push(DMat4::identity()));
     }
 
-    let mut mesh = Mesh::default();
-    let mut stats = Stats::default();
-    for (id, mats) in &to_mesh {
-        watchdog.checkpoint_error()?;
-        let v_start = mesh.verts.len();
-        let t_start = mesh.triangles.len();
-        let default_color = styled_item_colors
-            .get(&id.0)
-            .copied()
-            .unwrap_or(DVec3::new(0.5, 0.5, 0.5));
-        match &s[*id] {
-            Entity::ManifoldSolidBrep(b) => closed_shell_with_watchdog(
+    (styled_item_colors, to_mesh)
+}
+
+fn tessellate_mesh_entry<W: TessellationWatchdog>(
+    s: &StepFile,
+    id: usize,
+    mats: &[DMat4],
+    styled_item_colors: &HashMap<usize, DVec3>,
+    mesh: &mut Mesh,
+    stats: &mut Stats,
+    watchdog: &mut W,
+) -> Result<(), Error> {
+    watchdog.checkpoint_error()?;
+    let v_start = mesh.verts.len();
+    let t_start = mesh.triangles.len();
+    let default_color = styled_item_colors
+        .get(&id)
+        .copied()
+        .unwrap_or(DVec3::new(0.5, 0.5, 0.5));
+    match &s.0[id] {
+        Entity::ManifoldSolidBrep(b) => {
+            closed_shell(
                 s,
                 b.outer,
-                &mut mesh,
-                &mut stats,
-                &styled_item_colors,
+                mesh,
+                stats,
+                styled_item_colors,
                 default_color,
-                &mut watchdog,
-            )?,
-            Entity::ShellBasedSurfaceModel(b) => {
-                for v in &b.sbsm_boundary {
-                    shell_with_watchdog(
-                        s,
-                        *v,
-                        &mut mesh,
-                        &mut stats,
-                        &styled_item_colors,
-                        default_color,
-                        &mut watchdog,
-                    )?;
-                }
-            }
-            Entity::BrepWithVoids(b) => closed_shell_with_watchdog(
-                s,
-                b.outer,
-                &mut mesh,
-                &mut stats,
-                &styled_item_colors,
-                default_color,
-                &mut watchdog,
-            )?,
-            _ => {
-                warn!("Skipping {:?} (not a known solid)", s[*id]);
-                continue;
-            }
-        };
-
-        let v_end = mesh.verts.len();
-        let t_end = mesh.triangles.len();
-        for mat in &mats[1..] {
-            watchdog.checkpoint_error()?;
-            for (i, v) in (v_start..v_end).enumerate() {
-                if i % 1024 == 0 {
-                    watchdog.checkpoint_error()?;
-                }
-                let p = mesh.verts[v].pos;
-                let p_h = DVec4::new(p.x, p.y, p.z, 1.0);
-                let pos = (mat * p_h).xyz();
-
-                let n = mesh.verts[v].norm;
-                let norm = (mat * glm::vec3_to_vec4(&n)).xyz();
-                let color = mesh.verts[v].color;
-
-                mesh.verts.push(mesh::Vertex { pos, norm, color });
-            }
-            let offset = mesh.verts.len() - v_end;
-            for t in t_start..t_end {
-                let mut tri = mesh.triangles[t];
-                tri.verts.add_scalar_mut(offset as u32);
-                mesh.triangles.push(tri);
+                watchdog,
+            )?;
+        }
+        Entity::ShellBasedSurfaceModel(b) => {
+            for v in &b.sbsm_boundary {
+                shell(
+                    s,
+                    *v,
+                    mesh,
+                    stats,
+                    styled_item_colors,
+                    default_color,
+                    watchdog,
+                )?
             }
         }
+        Entity::BrepWithVoids(b) => {
+            closed_shell(
+                s,
+                b.outer,
+                mesh,
+                stats,
+                styled_item_colors,
+                default_color,
+                watchdog,
+            )?;
+        }
+        _ => {
+            warn!("Skipping {:?} (not a known solid)", s.0[id]);
+            return Ok(());
+        }
+    };
 
-        let mat = mats[0];
+    let v_end = mesh.verts.len();
+    let t_end = mesh.triangles.len();
+    for mat in &mats[1..] {
+        watchdog.checkpoint_error()?;
         for (i, v) in (v_start..v_end).enumerate() {
             if i % 1024 == 0 {
                 watchdog.checkpoint_error()?;
             }
             let p = mesh.verts[v].pos;
             let p_h = DVec4::new(p.x, p.y, p.z, 1.0);
-            mesh.verts[v].pos = (mat * p_h).xyz();
+            let pos = (mat * p_h).xyz();
 
             let n = mesh.verts[v].norm;
-            mesh.verts[v].norm = (mat * glm::vec3_to_vec4(&n)).xyz();
+            let norm = (mat * glm::vec3_to_vec4(&n)).xyz();
+            let color = mesh.verts[v].color;
+
+            mesh.verts.push(mesh::Vertex { pos, norm, color });
+        }
+        let offset = mesh.verts.len() - v_end;
+        for t in t_start..t_end {
+            let mut tri = mesh.triangles[t];
+            tri.verts.add_scalar_mut(offset as u32);
+            mesh.triangles.push(tri);
         }
     }
 
+    let mat = mats[0];
+    for (i, v) in (v_start..v_end).enumerate() {
+        if i % 1024 == 0 {
+            watchdog.checkpoint_error()?;
+        }
+        let p = mesh.verts[v].pos;
+        let p_h = DVec4::new(p.x, p.y, p.z, 1.0);
+        mesh.verts[v].pos = (mat * p_h).xyz();
+
+        let n = mesh.verts[v].norm;
+        mesh.verts[v].norm = (mat * glm::vec3_to_vec4(&n)).xyz();
+    }
+    Ok(())
+}
+
+fn apply_unit_scale<W: TessellationWatchdog>(
+    s: &StepFile,
+    mesh: &mut Mesh,
+    watchdog: &mut W,
+) -> Result<(), Error> {
     let mut scale = detect_length_scale_to_mm(s);
     if (scale - 1.0).abs() < 1e-10 {
         scale = detect_length_scale_fallback(s);
@@ -769,11 +601,100 @@ pub fn triangulate_with_limits(
             v.pos *= scale;
         }
     }
+    Ok(())
+}
 
+fn log_stats(stats: &Stats) {
     info!("num_shells: {}", stats.num_shells);
     info!("num_faces: {}", stats.num_faces);
     info!("num_errors: {}", stats.num_errors);
     info!("num_panics: {}", stats.num_panics);
+}
+
+pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
+    let (styled_item_colors, to_mesh) = collect_tessellation_inputs(s);
+    #[cfg(feature = "rayon")]
+    {
+        let (mut mesh, stats) = to_mesh
+            .par_iter()
+            .fold(
+                || (Mesh::default(), Stats::default()),
+                |(mut mesh, mut stats), (id, mats)| {
+                    let mut watchdog = NoopWatchdog;
+                    if let Err(err) = tessellate_mesh_entry(
+                        s,
+                        *id,
+                        mats,
+                        &styled_item_colors,
+                        &mut mesh,
+                        &mut stats,
+                        &mut watchdog,
+                    ) {
+                        error!("Unexpected non-timeout watchdog error: {err}");
+                    }
+                    (mesh, stats)
+                },
+            )
+            .reduce(
+                || (Mesh::default(), Stats::default()),
+                |a, b| (Mesh::combine(a.0, b.0), Stats::combine(a.1, b.1)),
+            );
+        let mut watchdog = NoopWatchdog;
+        apply_unit_scale(s, &mut mesh, &mut watchdog)
+            .expect("noop watchdog should not abort tessellation");
+        log_stats(&stats);
+        return (mesh, stats);
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        let mut mesh = Mesh::default();
+        let mut stats = Stats::default();
+        let mut watchdog = NoopWatchdog;
+        for (id, mats) in &to_mesh {
+            if let Err(err) = tessellate_mesh_entry(
+                s,
+                *id,
+                mats,
+                &styled_item_colors,
+                &mut mesh,
+                &mut stats,
+                &mut watchdog,
+            ) {
+                error!("Unexpected non-timeout watchdog error: {err}");
+            }
+        }
+        apply_unit_scale(s, &mut mesh, &mut watchdog)
+            .expect("noop watchdog should not abort tessellation");
+        log_stats(&stats);
+        (mesh, stats)
+    }
+}
+
+/// Timeout-aware triangulation entry point.
+#[cfg(feature = "timeouts")]
+pub fn triangulate_with_limits(
+    s: &StepFile,
+    limits: TriangulationLimits,
+) -> Result<(Mesh, Stats), Error> {
+    let mut watchdog = TriangulationWatchdog::new(limits);
+    let (styled_item_colors, to_mesh) = collect_tessellation_inputs(s);
+    let mut mesh = Mesh::default();
+    let mut stats = Stats::default();
+
+    for (id, mats) in &to_mesh {
+        tessellate_mesh_entry(
+            s,
+            *id,
+            mats,
+            &styled_item_colors,
+            &mut mesh,
+            &mut stats,
+            &mut watchdog,
+        )?;
+    }
+    apply_unit_scale(s, &mut mesh, &mut watchdog)?;
+    log_stats(&stats);
     Ok((mesh, stats))
 }
 
@@ -856,250 +777,18 @@ fn axis2_placement_3d(s: &StepFile, t: Id<Axis2Placement3d_>) -> (DVec3, DVec3, 
     (location, axis, ref_direction)
 }
 
-fn shell(
+fn shell<W: TessellationWatchdog>(
     s: &StepFile,
     c: Shell,
     mesh: &mut Mesh,
     stats: &mut Stats,
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
-) {
-    match &s[c] {
-        Entity::ClosedShell(_) => {
-            closed_shell(s, c.cast(), mesh, stats, styled_item_colors, default_color)
-        }
-        Entity::OpenShell(_) => {
-            open_shell(s, c.cast(), mesh, stats, styled_item_colors, default_color)
-        }
-        h => warn!("Skipping {:?} (unknown Shell type)", h),
-    }
-}
-
-fn open_shell(
-    s: &StepFile,
-    c: OpenShell,
-    mesh: &mut Mesh,
-    stats: &mut Stats,
-    styled_item_colors: &HashMap<usize, DVec3>,
-    default_color: DVec3,
-) {
-    let cs = s.entity(c).expect("Could not get OpenShell");
-    for face in &cs.cfs_faces {
-        if let Err(err) = advanced_face(
-            s,
-            face.cast(),
-            mesh,
-            stats,
-            styled_item_colors,
-            default_color,
-        ) {
-            error!("Failed to triangulate {:?}: {}", s[*face], err);
-        }
-    }
-    stats.num_shells += 1;
-}
-
-fn closed_shell(
-    s: &StepFile,
-    c: ClosedShell,
-    mesh: &mut Mesh,
-    stats: &mut Stats,
-    styled_item_colors: &HashMap<usize, DVec3>,
-    default_color: DVec3,
-) {
-    let cs = s.entity(c).expect("Could not get ClosedShell");
-    for face in &cs.cfs_faces {
-        if let Err(err) = advanced_face(
-            s,
-            face.cast(),
-            mesh,
-            stats,
-            styled_item_colors,
-            default_color,
-        ) {
-            error!("Failed to triangulate {:?}: {}", s[*face], err);
-        }
-    }
-    stats.num_shells += 1;
-}
-
-fn advanced_face(
-    s: &StepFile,
-    f: AdvancedFace,
-    mesh: &mut Mesh,
-    stats: &mut Stats,
-    styled_item_colors: &HashMap<usize, DVec3>,
-    default_color: DVec3,
-) -> Result<(), Error> {
-    let face = s.entity(f).expect("Could not get AdvancedFace");
-    let face_color = styled_item_colors
-        .get(&f.0)
-        .copied()
-        .unwrap_or(default_color);
-    stats.num_faces += 1;
-
-    // Grab the surface, returning early if it's unimplemented
-    let mut surf = get_surface(s, face.face_geometry)?;
-
-    // This is the starting point at which we insert new vertices
-    let offset = mesh.verts.len();
-
-    // For each contour, project from 3D down to the surface, then
-    // start collecting them as constrained edges for triangulation
-    let mut edges = Vec::new();
-    let v_start = mesh.verts.len();
-    let mut num_pts = 0;
-    for b in &face.bounds {
-        let bound_contours = face_bound(s, *b)?;
-
-        match bound_contours.len() {
-            // We should always have non-zero items in the contour
-            0 => panic!("Got empty contours for {:?}", face),
-
-            // Special case for a single-vertex point, which shows up in
-            // cones: we push it as a Steiner point, but without any
-            // associated contours.
-            1 => {
-                num_pts += 1;
-                mesh.verts.push(mesh::Vertex {
-                    pos: bound_contours[0],
-                    norm: DVec3::zeros(),
-                    color: face_color,
-                });
-            }
-
-            // Default for lists of contour points
-            _ => {
-                // Record the initial point to close the loop
-                let start = num_pts;
-                for pt in bound_contours {
-                    // The contour marches forward!
-                    edges.push((num_pts, num_pts + 1));
-
-                    // Also store this vertex in the 3D triangulation
-                    mesh.verts.push(mesh::Vertex {
-                        pos: pt,
-                        norm: DVec3::zeros(),
-                        color: face_color,
-                    });
-                    num_pts += 1;
-                }
-                // The last point is a duplicate, because it closes the
-                // contours, so we skip it here and reattach the contour to
-                // the start.
-                num_pts -= 1;
-                mesh.verts.pop();
-
-                // Close the loop by returning to the starting point
-                edges.pop();
-                edges.last_mut().unwrap().1 = start;
-            }
-        }
-    }
-
-    // We inject Stiner points based on the surface type to improve curvature,
-    // e.g. for spherical sections.  However, we don't want triagulation to
-    // _fail_ due to these points, so if that happens, we nuke the point (by
-    // assigning it to the first point in the list, which causes it to get
-    // deduplicated), then retry.
-    let mut pts = surf.lower_verts(&mut mesh.verts[v_start..])?;
-    resolve_crossing_edges(&mut pts, &mut edges, &mut mesh.verts, v_start);
-    let bonus_points = pts.len();
-    surf.add_steiner_points(&mut pts, &mut mesh.verts);
-    let result = std::panic::catch_unwind(|| {
-        // TODO: this is only needed because we use pts below to save a debug
-        // SVG if this panics.  Once we're confident in never panicking, we
-        // can remove this.
-        let mut pts = pts.clone();
-        loop {
-            let mut t = match cdt::Triangulation::new_with_edges(&pts, &edges) {
-                Err(e) => break Err(e),
-                Ok(t) => t,
-            };
-            match t.run() {
-                Ok(()) => break Ok(t),
-                // If triangulation failed due to a Steiner point on a fixed
-                // edge, then reassign that point to pts[0] (so it will be
-                // ignored as a duplicate)
-                Err(cdt::Error::PointOnFixedEdge(p)) if p >= bonus_points => {
-                    pts[p] = pts[0];
-                    continue;
-                }
-                Err(e) => {
-                    if SAVE_DEBUG_SVGS {
-                        let filename = format!("err{}.svg", face.face_geometry.0);
-                        t.save_debug_svg(&filename)
-                            .expect("Could not save debug SVG");
-                    }
-                    break Err(e);
-                }
-            }
-        }
-    });
-    match result {
-        Ok(Ok(t)) => {
-            for (a, b, c) in t.triangles() {
-                let a = (a + offset) as u32;
-                let b = (b + offset) as u32;
-                let c = (c + offset) as u32;
-                mesh.triangles.push(Triangle {
-                    verts: if face.same_sense {
-                        U32Vec3::new(a, b, c)
-                    } else {
-                        U32Vec3::new(a, c, b)
-                    },
-                });
-            }
-        }
-        Ok(Err(e)) => {
-            error!(
-                "Got error while triangulating {}: {:?}",
-                face.face_geometry.0, e
-            );
-            stats.num_errors += 1;
-        }
-        Err(e) => {
-            error!(
-                "Got panic while triangulating {}: {:?}",
-                face.face_geometry.0, e
-            );
-            if SAVE_PANIC_SVGS {
-                let filename = format!("panic{}.svg", face.face_geometry.0);
-                cdt::save_debug_panic(&pts, &edges, &filename).expect("Could not save debug SVG");
-            }
-            stats.num_panics += 1;
-        }
-    }
-    for v in &mut mesh.verts[v_start..] {
-        v.color = face_color;
-    }
-    // Flip normals of new vertices, depending on the same_sense flag
-    if !face.same_sense {
-        for v in &mut mesh.verts[v_start..] {
-            v.norm = -v.norm;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(feature = "timeouts")]
-fn is_watchdog_error(err: &Error) -> bool {
-    matches!(err, Error::Timeout | Error::WatchdogBudgetExceeded)
-}
-
-#[cfg(feature = "timeouts")]
-fn shell_with_watchdog(
-    s: &StepFile,
-    c: Shell,
-    mesh: &mut Mesh,
-    stats: &mut Stats,
-    styled_item_colors: &HashMap<usize, DVec3>,
-    default_color: DVec3,
-    watchdog: &mut TriangulationWatchdog,
+    watchdog: &mut W,
 ) -> Result<(), Error> {
     watchdog.checkpoint_error()?;
     match &s[c] {
-        Entity::ClosedShell(_) => closed_shell_with_watchdog(
+        Entity::ClosedShell(_) => closed_shell(
             s,
             c.cast(),
             mesh,
@@ -1108,7 +797,7 @@ fn shell_with_watchdog(
             default_color,
             watchdog,
         ),
-        Entity::OpenShell(_) => open_shell_with_watchdog(
+        Entity::OpenShell(_) => open_shell(
             s,
             c.cast(),
             mesh,
@@ -1124,20 +813,19 @@ fn shell_with_watchdog(
     }
 }
 
-#[cfg(feature = "timeouts")]
-fn open_shell_with_watchdog(
+fn open_shell<W: TessellationWatchdog>(
     s: &StepFile,
     c: OpenShell,
     mesh: &mut Mesh,
     stats: &mut Stats,
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
-    watchdog: &mut TriangulationWatchdog,
+    watchdog: &mut W,
 ) -> Result<(), Error> {
     let cs = s.entity(c).expect("Could not get OpenShell");
     for face in &cs.cfs_faces {
         watchdog.checkpoint_error()?;
-        if let Err(err) = advanced_face_with_watchdog(
+        if let Err(err) = advanced_face(
             s,
             face.cast(),
             mesh,
@@ -1146,7 +834,7 @@ fn open_shell_with_watchdog(
             default_color,
             watchdog,
         ) {
-            if is_watchdog_error(&err) {
+            if watchdog.should_fail_fast(&err) {
                 return Err(err);
             }
             error!("Failed to triangulate {:?}: {}", s[*face], err);
@@ -1156,20 +844,19 @@ fn open_shell_with_watchdog(
     Ok(())
 }
 
-#[cfg(feature = "timeouts")]
-fn closed_shell_with_watchdog(
+fn closed_shell<W: TessellationWatchdog>(
     s: &StepFile,
     c: ClosedShell,
     mesh: &mut Mesh,
     stats: &mut Stats,
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
-    watchdog: &mut TriangulationWatchdog,
+    watchdog: &mut W,
 ) -> Result<(), Error> {
     let cs = s.entity(c).expect("Could not get ClosedShell");
     for face in &cs.cfs_faces {
         watchdog.checkpoint_error()?;
-        if let Err(err) = advanced_face_with_watchdog(
+        if let Err(err) = advanced_face(
             s,
             face.cast(),
             mesh,
@@ -1178,7 +865,7 @@ fn closed_shell_with_watchdog(
             default_color,
             watchdog,
         ) {
-            if is_watchdog_error(&err) {
+            if watchdog.should_fail_fast(&err) {
                 return Err(err);
             }
             error!("Failed to triangulate {:?}: {}", s[*face], err);
@@ -1188,15 +875,14 @@ fn closed_shell_with_watchdog(
     Ok(())
 }
 
-#[cfg(feature = "timeouts")]
-fn advanced_face_with_watchdog(
+fn advanced_face<W: TessellationWatchdog>(
     s: &StepFile,
     f: AdvancedFace,
     mesh: &mut Mesh,
     stats: &mut Stats,
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
-    watchdog: &mut TriangulationWatchdog,
+    watchdog: &mut W,
 ) -> Result<(), Error> {
     watchdog.checkpoint_error()?;
     let face = s.entity(f).expect("Could not get AdvancedFace");
@@ -1310,7 +996,7 @@ fn advanced_face_with_watchdog(
         }
         Err(e) => {
             if e == cdt::Error::Aborted {
-                return Err(watchdog.map_cdt_error(e));
+                return Err(watchdog.map_cdt_aborted());
             }
             error!(
                 "Got error while triangulating {}: {:?}",
