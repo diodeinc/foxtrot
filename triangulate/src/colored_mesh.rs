@@ -11,8 +11,6 @@ use std::convert::TryFrom;
 use crate::mesh::Mesh;
 use crate::stats::Stats;
 use crate::triangulate::triangulate;
-#[cfg(feature = "timeouts")]
-use crate::triangulate::{triangulate_with_limits, TriangulationLimits};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -66,20 +64,6 @@ pub fn tessellate_step_bytes(
     let flattened = step::step_file::StepFile::strip_flatten(step_bytes);
     let step = step::step_file::StepFile::parse(&flattened);
     let (mesh, stats) = triangulate(&step);
-    let diag = TessellationDiagnostics::from(&stats);
-    let tess = group_mesh_by_color(&mesh)?;
-    Ok((tess, diag))
-}
-
-/// Parse and tessellate raw STEP bytes with watchdog limits.
-#[cfg(feature = "timeouts")]
-pub fn tessellate_step_bytes_with_limits(
-    step_bytes: &[u8],
-    limits: TriangulationLimits,
-) -> Result<(TessellatedMesh, TessellationDiagnostics), String> {
-    let flattened = step::step_file::StepFile::strip_flatten(step_bytes);
-    let step = step::step_file::StepFile::parse(&flattened);
-    let (mesh, stats) = triangulate_with_limits(&step, limits).map_err(|e| e.to_string())?;
     let diag = TessellationDiagnostics::from(&stats);
     let tess = group_mesh_by_color(&mesh)?;
     Ok((tess, diag))

@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 step = { path = "../step", default-features = false }
-triangulate = { path = "../triangulate", default-features = false, features = ["timeouts"] }
+triangulate = { path = "../triangulate", default-features = false, features = [] }
 console_log = "0.2"
 log = "0.4.14"
 wasm-bindgen = "0.2"
