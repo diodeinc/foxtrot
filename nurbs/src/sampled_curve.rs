@@ -1,5 +1,5 @@
-use nalgebra_glm::{dot, length, length2, DVec3};
 use crate::{abstract_curve::AbstractCurve, nd_curve::NDBSplineCurve};
+use nalgebra_glm::{dot, length, length2, DVec3};
 
 #[derive(Debug)]
 pub struct SampledCurve<const N: usize> {
@@ -8,7 +8,8 @@ pub struct SampledCurve<const N: usize> {
 }
 
 impl<const N: usize> SampledCurve<N>
-    where NDBSplineCurve<N>: AbstractCurve
+where
+    NDBSplineCurve<N>: AbstractCurve,
 {
     pub fn new(curve: NDBSplineCurve<N>) -> Self {
         const N: usize = 8;
@@ -37,7 +38,8 @@ impl<const N: usize> SampledCurve<N>
         let eps2 = 0.01; // a cosine error bound
 
         let mut u_i = u_0;
-        loop {
+        // Cap iterations so bad conditioning cannot spin forever.
+        for _ in 0..128 {
             let derivs = self.curve.derivs::<2>(u_i);
             let C = derivs[0];
             let C_p = derivs[1];
@@ -78,6 +80,7 @@ impl<const N: usize> SampledCurve<N>
 
             u_i = u_ip1;
         }
+        u_i
     }
 
     pub fn min_u(&self) -> f64 {
@@ -90,9 +93,12 @@ impl<const N: usize> SampledCurve<N>
 
     pub fn u_from_point(&self, p: DVec3) -> f64 {
         use ordered_float::OrderedFloat;
-        let best_u = self.samples.iter()
+        let best_u = self
+            .samples
+            .iter()
             .min_by_key(|(_u, pos)| OrderedFloat((pos - p).norm()))
-            .unwrap().0;
+            .unwrap()
+            .0;
         self.u_from_point_newtons_method(p, best_u)
     }
 

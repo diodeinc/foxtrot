@@ -1,9 +1,11 @@
 pub mod colored_mesh;
+pub mod curve;
 pub mod mesh;
 pub mod stats;
 pub mod surface;
+#[cfg(feature = "timeouts")]
+mod time_provider;
 pub mod triangulate;
-pub mod curve;
 
 #[derive(thiserror::Error, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -27,4 +29,12 @@ pub enum Error {
 
     #[error("Self-intersecting NURBS and b-spline curves are not implemented")]
     SelfIntersectingCurve,
+
+    #[cfg(feature = "timeouts")]
+    #[error("Tessellation timed out")]
+    Timeout,
+
+    #[cfg(feature = "timeouts")]
+    #[error("Tessellation watchdog budget exceeded")]
+    WatchdogBudgetExceeded,
 }

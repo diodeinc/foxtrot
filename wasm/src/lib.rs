@@ -1,3 +1,5 @@
+use log::Level;
+use std::time::Duration;
 /// Takes a STEP file (as an array of bytes), and returns a triangle mesh.
 ///
 /// Vertices are packed into rows of 9 floats, representing
@@ -8,7 +10,6 @@
 /// Vertices are rows of three indexes into the triangle array
 ///
 use wasm_bindgen::prelude::*;
-use log::{Level};
 
 #[wasm_bindgen]
 pub fn init_log() {
@@ -18,11 +19,40 @@ pub fn init_log() {
 #[wasm_bindgen]
 pub fn step_to_triangle_buf(data: String) -> Vec<f32> {
     use step::step_file::StepFile;
-    use triangulate::triangulate::triangulate; // lol
+    use triangulate::triangulate::{triangulate_with_limits, TriangulationLimits};
 
     let flat = StepFile::strip_flatten(data.as_bytes());
     let step = StepFile::parse(&flat);
-    let (mut mesh, _stats) = triangulate(&step);
+    let limits = TriangulationLimits::default();
+    let (mut mesh, _stats) = triangulate_with_limits(&step, limits).expect("tessellation failed");
+
+    build_triangle_buffer(&mut mesh)
+}
+
+#[wasm_bindgen]
+pub fn step_to_triangle_buf_with_timeout(
+    data: String,
+    timeout_ms: u32,
+) -> Result<Vec<f32>, JsValue> {
+    use step::step_file::StepFile;
+    use triangulate::triangulate::{triangulate_with_limits, TriangulationLimits};
+
+    let flat = StepFile::strip_flatten(data.as_bytes());
+    let step = StepFile::parse(&flat);
+    let limits = TriangulationLimits {
+        timeout: Some(Duration::from_millis(u64::from(timeout_ms))),
+        ..TriangulationLimits::default()
+    };
+    let (mut mesh, _stats) =
+        triangulate_with_limits(&step, limits).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    Ok(build_triangle_buffer(&mut mesh))
+}
+
+fn build_triangle_buffer(mesh: &mut triangulate::mesh::Mesh) -> Vec<f32> {
+    if mesh.verts.is_empty() || mesh.triangles.is_empty() {
+        return Vec::new();
+    }
 
     let (mut xmin, mut xmax) = (std::f64::INFINITY, -std::f64::INFINITY);
     let (mut ymin, mut ymax) = (std::f64::INFINITY, -std::f64::INFINITY);
@@ -45,7 +75,8 @@ pub fn step_to_triangle_buf(data: String) -> Vec<f32> {
         pos.z = (pos.z - zc) / scale * 200.0;
     }
 
-    mesh.triangles.iter()
+    mesh.triangles
+        .iter()
         .flat_map(|v| v.verts.iter())
         .map(|p| &mesh.verts[*p as usize])
         .flat_map(|v| v.pos.iter().chain(&v.norm).chain(&v.color))
