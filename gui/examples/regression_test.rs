@@ -135,8 +135,13 @@ fn print_table(results: &[FileResult]) {
 
     let (mut tt, mut tri, mut fc, mut er, mut pa) = (0.0, 0, 0, 0, 0);
     for r in results {
+        let display_name = if r.name.len() > 40 {
+            format!("{}…", &r.name[..39])
+        } else {
+            r.name.clone()
+        };
         eprintln!("{:<40} {:>8.1} {:>8} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
-            r.name, r.duration_ms, r.triangles, r.faces, r.errors, r.panics,
+            display_name, r.duration_ms, r.triangles, r.faces, r.errors, r.panics,
             r.log_info, r.log_warn, r.log_error);
         tt += r.duration_ms; tri += r.triangles; fc += r.faces;
         er += r.errors; pa += r.panics;
