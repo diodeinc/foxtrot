@@ -1277,19 +1277,19 @@ fn advanced_face_with_watchdog(
                 return Ok(());
             }
             Ok(run_status) => match run_status {
-            Ok(()) => break Ok(t),
-            Err(cdt::Error::PointOnFixedEdge(p)) if p >= bonus_points => {
-                pts[p] = pts[0];
-                continue;
-            }
-            Err(e) => {
-                if SAVE_DEBUG_SVGS {
-                    let filename = format!("err{}.svg", face.face_geometry.0);
-                    t.save_debug_svg(&filename)
-                        .expect("Could not save debug SVG");
+                Ok(()) => break Ok(t),
+                Err(cdt::Error::PointOnFixedEdge(p)) if p >= bonus_points => {
+                    pts[p] = pts[0];
+                    continue;
                 }
-                break Err(e);
-            }
+                Err(e) => {
+                    if SAVE_DEBUG_SVGS {
+                        let filename = format!("err{}.svg", face.face_geometry.0);
+                        t.save_debug_svg(&filename)
+                            .expect("Could not save debug SVG");
+                    }
+                    break Err(e);
+                }
             },
         }
     };
