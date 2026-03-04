@@ -63,6 +63,40 @@ fn transform_stack_roots<'a>(transform_stack: &TransformStack<'a>) -> Vec<Repres
         .collect()
 }
 
+/// Convert an SiUnit with name Metre to a mm scale factor.
+fn si_unit_to_mm(si: &SiUnit_) -> Option<f64> {
+    if !matches!(si.name, SiUnitName::Metre) { return None; }
+    Some(match &si.prefix {
+        Some(SiPrefix::Milli) => 1.0,
+        Some(SiPrefix::Centi) => 10.0,
+        Some(SiPrefix::Micro) => 0.001,
+        Some(SiPrefix::Nano) => 0.000_001,
+        Some(SiPrefix::Kilo) => 1_000_000.0,
+        None => 1000.0, // bare metres → mm
+        _ => 1.0,
+    })
+}
+
+/// Resolve a unit entity index to a mm scale factor.
+/// Handles both direct SiUnit entities and ComplexEntity wrappers
+/// (e.g. `(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.))`).
+fn resolve_length_unit_to_mm(s: &StepFile, idx: usize) -> Option<f64> {
+    match &s.0[idx] {
+        Entity::SiUnit(si) => si_unit_to_mm(si),
+        Entity::ComplexEntity(subs) => {
+            for sub in subs {
+                if let Some(si) = SiUnit_::try_from_entity(sub) {
+                    if let Some(scale) = si_unit_to_mm(si) {
+                        return Some(scale);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Detect the length unit in a STEP file and return a scale factor to
 /// convert coordinates to millimeters.  Returns 1.0 if the file already
 /// uses mm or if the unit cannot be determined.
@@ -70,17 +104,7 @@ fn detect_length_scale_to_mm(s: &StepFile) -> f64 {
     // Helper: given a unit entity, return the mm scale if it's a length unit
     let unit_scale = |unit_entity: &Entity| -> Option<f64> {
         match unit_entity {
-            Entity::SiUnit(si) if matches!(si.name, SiUnitName::Metre) => {
-                Some(match &si.prefix {
-                    Some(SiPrefix::Milli) => 1.0,
-                    Some(SiPrefix::Centi) => 10.0,
-                    Some(SiPrefix::Micro) => 0.001,
-                    Some(SiPrefix::Nano) => 0.000_001,
-                    Some(SiPrefix::Kilo) => 1_000_000.0,
-                    None => 1000.0, // bare metres → mm
-                    _ => 1.0,
-                })
-            },
+            Entity::SiUnit(si) => si_unit_to_mm(si),
             Entity::ConversionBasedUnit(cbu) => {
                 let name = cbu.name.0.to_uppercase();
                 if name.contains("INCH") {
@@ -88,15 +112,23 @@ fn detect_length_scale_to_mm(s: &StepFile) -> f64 {
                 } else if name.contains("FOOT") || name.contains("FT") {
                     return Some(304.8);
                 }
-                // Try to read the conversion factor
+                // Try to read the conversion factor and resolve its base unit
+                let try_mwu = |value: &MeasureValue, unit_component: &Unit| -> Option<f64> {
+                    if let MeasureValue::LengthMeasure(lm) = value {
+                        let base_scale = resolve_length_unit_to_mm(s, unit_component.0)
+                            .unwrap_or(1000.0); // fallback: assume metres
+                        return Some(lm.0 * base_scale);
+                    }
+                    None
+                };
                 if let Entity::MeasureWithUnit(mwu) = &s.0[cbu.conversion_factor.0] {
-                    if let MeasureValue::LengthMeasure(lm) = &mwu.value_component {
-                        return Some(lm.0 * 1000.0);
+                    if let Some(v) = try_mwu(&mwu.value_component, &mwu.unit_component) {
+                        return Some(v);
                     }
                 }
                 if let Entity::LengthMeasureWithUnit(lmwu) = &s.0[cbu.conversion_factor.0] {
-                    if let MeasureValue::LengthMeasure(lm) = &lmwu.value_component {
-                        return Some(lm.0 * 1000.0);
+                    if let Some(v) = try_mwu(&lmwu.value_component, &lmwu.unit_component) {
+                        return Some(v);
                     }
                 }
                 None
