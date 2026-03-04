@@ -38,8 +38,7 @@ where
         let eps2 = 0.01; // a cosine error bound
 
         let mut u_i = u_0;
-        // Cap iterations so bad conditioning cannot spin forever.
-        for _ in 0..128 {
+        for _ in 0..256 {
             let derivs = self.curve.derivs::<2>(u_i);
             let C = derivs[0];
             let C_p = derivs[1];
@@ -47,15 +46,33 @@ where
             let r = C - P;
 
             // If we are close to the point and close to the right angle, then return
-            if length(&r) <= eps1 && dot(&C_p, &r) / length(&C_p) / length(&r) <= eps2 {
-                return u_i;
+            let r_len = length(&r);
+            let cp_len = length(&C_p);
+            if r_len <= eps1 {
+                // Skip cosine check when derivative or residual is degenerate
+                // (near-zero) to avoid 0/0 = NaN causing infinite loops.
+                if cp_len < 1e-10 || r_len < 1e-10
+                    || dot(&C_p, &r) / cp_len / r_len <= eps2
+                {
+                    return u_i;
+                }
             }
 
             // calculate the next `u`
             // let f(u) = C'(u) dot (C(u) - P)
             // u_{ip1} = u_i - (f(u_i) / f'(u_i)) = u_i - (C'(u_i) dot (C(u_i) - P)) / (C''(u_i) dot (C(u_i) - P) + |C'(u_i)|^2)
-            let delta_i = -dot(&C_p, &r) / (dot(&C_pp, &r) + length2(&C_p));
+            let denom = dot(&C_pp, &r) + length2(&C_p);
+            if denom.abs() < 1e-30 {
+                // Degenerate: zero curvature and zero first derivative
+                return u_i;
+            }
+            let delta_i = -dot(&C_p, &r) / denom;
             let mut u_ip1 = u_i + delta_i;
+
+            // Handle NaN from degenerate curves
+            if u_ip1.is_nan() {
+                return u_i;
+            }
 
             // clamp the `u` onto the curve
             if u_ip1 < self.curve.min_u() {
@@ -80,6 +97,7 @@ where
 
             u_i = u_ip1;
         }
+        // Failed to converge; return best guess
         u_i
     }
 

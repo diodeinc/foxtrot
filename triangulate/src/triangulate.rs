@@ -29,8 +29,11 @@ use step::{
     step_file::{FromEntity, StepFile},
 };
 
-const SAVE_DEBUG_SVGS: bool = false;
-const SAVE_PANIC_SVGS: bool = false;
+/// Set the `SAVE_DEBUG_SVGS` environment variable to a directory path to save
+/// SVG debug output for faces that error or panic during triangulation.
+fn save_debug_svg_dir() -> Option<String> {
+    std::env::var("SAVE_DEBUG_SVGS").ok()
+}
 
 #[cfg(feature = "timeouts")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -494,6 +497,7 @@ fn tessellate_mesh_entry<W: TessellationWatchdog>(
     watchdog: &mut W,
 ) -> Result<(), Error> {
     watchdog.checkpoint_error()?;
+    info!("processing shape entity {} ({} transforms)", id, mats.len());
     let v_start = mesh.verts.len();
     let t_start = mesh.triangles.len();
     let default_color = styled_item_colors
@@ -588,10 +592,12 @@ fn apply_unit_scale<W: TessellationWatchdog>(
     mesh: &mut Mesh,
     watchdog: &mut W,
 ) -> Result<(), Error> {
+    info!("all faces done, detecting length scale...");
     let mut scale = detect_length_scale_to_mm(s);
     if (scale - 1.0).abs() < 1e-10 {
         scale = detect_length_scale_fallback(s);
     }
+    info!("length scale: {}", scale);
     if (scale - 1.0).abs() > 1e-10 {
         info!("Applying unit scale factor: {}", scale);
         for (i, v) in mesh.verts.iter_mut().enumerate() {
@@ -891,6 +897,7 @@ fn advanced_face<W: TessellationWatchdog>(
         .copied()
         .unwrap_or(default_color);
     stats.num_faces += 1;
+    info!("triangulating face {} (geometry {})", f.0, face.face_geometry.0);
 
     let mut surf = get_surface(s, face.face_geometry)?;
 
@@ -937,7 +944,13 @@ fn advanced_face<W: TessellationWatchdog>(
     resolve_crossing_edges(&mut pts, &mut edges, &mut mesh.verts, v_start);
     let bonus_points = pts.len();
     surf.add_steiner_points(&mut pts, &mut mesh.verts);
+    let face_id = face.face_geometry.0;
+    let n_steiner = pts.len() - bonus_points;
+    info!("face {} cdt input: {} pts ({} boundary, {} steiner), {} edges",
+          face_id, pts.len(), bonus_points, n_steiner, edges.len());
     let mut pts = pts.clone();
+    let max_retries = n_steiner + 1;
+    let mut retries = 0usize;
     let tri_result = loop {
         watchdog.checkpoint_error()?;
         let mut cdt_watchdog = || watchdog.checkpoint_cdt();
@@ -950,12 +963,9 @@ fn advanced_face<W: TessellationWatchdog>(
         }));
         match run_result {
             Err(e) => {
-                error!(
-                    "Got panic while triangulating {}: {:?}",
-                    face.face_geometry.0, e
-                );
-                if SAVE_PANIC_SVGS {
-                    let filename = format!("panic{}.svg", face.face_geometry.0);
+                error!("Got panic while triangulating {}: {:?}", face.face_geometry.0, e);
+                if let Some(dir) = save_debug_svg_dir() {
+                    let filename = format!("{}/panic{}.svg", dir, face.face_geometry.0);
                     cdt::save_debug_panic(&pts, &edges, &filename)
                         .expect("Could not save debug SVG");
                 }
@@ -965,12 +975,22 @@ fn advanced_face<W: TessellationWatchdog>(
             Ok(run_status) => match run_status {
                 Ok(()) => break Ok(t),
                 Err(cdt::Error::PointOnFixedEdge(p)) if p >= bonus_points => {
+                    retries += 1;
+                    info!("face {}: PointOnFixedEdge({}), retry {}/{} \
+                           ({} pts, {} edges, {} steiner)",
+                           face_id, p, retries, max_retries,
+                           pts.len(), edges.len(), n_steiner);
+                    if retries > max_retries {
+                        warn!("face {}: exceeded max retries ({}), giving up",
+                              face_id, max_retries);
+                        break Err(cdt::Error::PointOnFixedEdge(p));
+                    }
                     pts[p] = pts[0];
                     continue;
                 }
                 Err(e) => {
-                    if SAVE_DEBUG_SVGS {
-                        let filename = format!("err{}.svg", face.face_geometry.0);
+                    if let Some(dir) = save_debug_svg_dir() {
+                        let filename = format!("{}/err{}.svg", dir, face_id);
                         t.save_debug_svg(&filename)
                             .expect("Could not save debug SVG");
                     }
@@ -1005,6 +1025,8 @@ fn advanced_face<W: TessellationWatchdog>(
             stats.num_errors += 1;
         }
     }
+    info!("face {} post-cdt: applying colors/normals ({} verts from v_start)",
+          face_id, mesh.verts.len() - v_start);
     for v in &mut mesh.verts[v_start..] {
         v.color = face_color;
     }
@@ -1013,6 +1035,7 @@ fn advanced_face<W: TessellationWatchdog>(
             v.norm = -v.norm;
         }
     }
+    info!("face {} done", face_id);
     Ok(())
 }
 

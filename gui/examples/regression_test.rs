@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::{App, Arg};
 use step::step_file::StepFile;
@@ -54,6 +54,8 @@ struct FileResult {
     log_error: usize,
 }
 
+const PER_FILE_TIMEOUT: Duration = Duration::from_secs(60);
+
 fn run_tests(files: &[std::path::PathBuf]) -> Vec<FileResult> {
     let mut results = Vec::new();
 
@@ -66,19 +68,33 @@ fn run_tests(files: &[std::path::PathBuf]) -> Vec<FileResult> {
         let _ = reset_log_counts();
         let start = Instant::now();
 
-        let result = std::panic::catch_unwind(|| {
-            let data = std::fs::read(path).expect("Could not open file");
-            let flat = StepFile::strip_flatten(&data);
-            let step = StepFile::parse(&flat);
-            let (mesh, stats) = triangulate(&step);
-            (mesh.triangles.len(), stats)
+        let path_clone = path.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let inner = std::panic::catch_unwind(|| {
+                let data = std::fs::read(&path_clone).expect("Could not open file");
+                let flat = StepFile::strip_flatten(&data);
+                let step = StepFile::parse(&flat);
+                let (mesh, stats) = triangulate(&step);
+                (mesh.triangles.len(), stats)
+            });
+            let _ = tx.send(inner);
         });
+
+        let result = match rx.recv_timeout(PER_FILE_TIMEOUT) {
+            Ok(inner) => Some(inner),
+            Err(_) => {
+                // Thread is still running but we move on.  It will be
+                // cleaned up when the process exits.
+                None
+            }
+        };
 
         let duration = start.elapsed();
         let (log_info, log_warn, log_error) = reset_log_counts();
 
         match result {
-            Ok((tri_count, stats)) => {
+            Some(Ok((tri_count, stats))) => {
                 eprintln!("{:.1}ms, {} tris, {} faces, {} err, {} panic, log: {}/{}/{}",
                     duration.as_secs_f64() * 1000.0,
                     tri_count, stats.num_faces, stats.num_errors, stats.num_panics,
@@ -90,10 +106,18 @@ fn run_tests(files: &[std::path::PathBuf]) -> Vec<FileResult> {
                     log_info, log_warn, log_error,
                 });
             }
-            Err(_) => {
+            Some(Err(_)) => {
                 eprintln!("HARD PANIC!");
                 results.push(FileResult {
                     name, duration_ms: duration.as_secs_f64() * 1000.0,
+                    triangles: 0, faces: 0, errors: 0, panics: 1,
+                    log_info, log_warn, log_error,
+                });
+            }
+            None => {
+                eprintln!("TIMEOUT after {}s", PER_FILE_TIMEOUT.as_secs());
+                results.push(FileResult {
+                    name, duration_ms: PER_FILE_TIMEOUT.as_secs_f64() * 1000.0,
                     triangles: 0, faces: 0, errors: 0, panics: 1,
                     log_info, log_warn, log_error,
                 });
