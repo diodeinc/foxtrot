@@ -58,6 +58,22 @@ To regenerate, run
 cargo run --release --example gen_exp -- path/to/APs/10303-214e3-aim-long.exp step/src/ap214.rs
 ```
 
+## Regression testing
+The `test_assets/` directory contains STEP files used for tessellation
+regression testing. To add components from a KiCad board:
+```sh
+pip install zstandard  # one-time dependency
+python3 scripts/ingest_kicad_pcb.py path/to/layout.kicad_pcb
+```
+This extracts embedded 3D models, deduplicates them into `test_assets/`,
+and regenerates `test_assets/baseline.json`. You can pass multiple `.kicad_pcb`
+files at once. After running, commit the new assets and updated baseline.
+
+To run the regression suite against the baseline:
+```sh
+cargo run --release --example regression_test -- --compare test_assets/baseline.json
+```
+
 ## License
 © 2021 [Formlabs](https://formlabs.com)
 
