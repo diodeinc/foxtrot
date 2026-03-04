@@ -154,12 +154,17 @@ impl<'a, T: ParseFromChunks<'a>> Parse<'a> for T {
     }
 }
 
-// Simple struct so we can use param_from_chunks::<Derived> to parse a '*'
-// optionally followed by a comma
+// Simple struct so we can use param_from_chunks::<Derived> to parse a '*' or
+// an entity reference (#NNN), optionally followed by a comma. Some STEP files
+// use explicit DimensionalExponents references instead of '*' in complex
+// entities like NAMED_UNIT.
 pub struct Derived;
 impl<'a> Parse<'a> for Derived {
     fn parse(s: &str) -> IResult<Self> {
-        map(char('*'), |_| Derived)(s)
+        alt((
+            map(char('*'), |_| Derived),
+            map(preceded(char('#'), digit1), |_: &str| Derived),
+        ))(s)
     }
 }
 
