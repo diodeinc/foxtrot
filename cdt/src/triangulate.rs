@@ -392,9 +392,19 @@ impl Triangulation {
     /// This may return [`Error::PointOnFixedEdge`], [`Error::NoMorePoints`],
     /// or [`Error::CrossingFixedEdge`] if those error conditions are met.
     pub fn run(&mut self) -> Result<(), Error> {
+        let n = self.points.len();
+        let mut step_count = 0usize;
         while !self.done() {
+            log::trace!("CDT step {}/{} (next={:?})", step_count, n, self.next);
             self.step()?;
+            step_count += 1;
+            if step_count > n + 10 {
+                log::warn!("CDT run: {} steps for {} points, bailing out",
+                           step_count, n);
+                return Err(Error::HalfEdgeInvariant);
+            }
         }
+        log::trace!("CDT completed in {} steps for {} points", step_count, n);
         Ok(())
     }
 
@@ -898,6 +908,8 @@ impl Triangulation {
     fn walk_fill(&mut self, src: PointIndex, dst: PointIndex, mut e: EdgeIndex) -> Result<(), Error> {
         let mut steps_left = Contour::new_pos(src, ContourData::None);
         let mut steps_right = Contour::new_neg(src, ContourData::None);
+        let mut walk_iters = 0usize;
+        let walk_limit = self.points.len() * 10 + 100;
 
         /*
          * We start inside a triangle, then escape it right away:
@@ -947,6 +959,13 @@ impl Triangulation {
         e = edge_ba.buddy;
 
         loop {
+            walk_iters += 1;
+            if walk_iters > walk_limit {
+                log::warn!("walk_fill: exceeded {} iterations for src={:?}→dst={:?} \
+                           ({} points), likely infinite loop",
+                           walk_limit, src, dst, self.points.len());
+                return Err(Error::WedgeEscape);
+            }
             /*            src
                          :
                    b<--:-------a

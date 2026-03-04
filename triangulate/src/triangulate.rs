@@ -20,8 +20,11 @@ use crate::{
 };
 use nurbs::{BSplineSurface, SampledCurve, SampledSurface, NURBSSurface, KnotVector};
 
-const SAVE_DEBUG_SVGS: bool = false;
-const SAVE_PANIC_SVGS: bool = false;
+/// Set the `SAVE_DEBUG_SVGS` environment variable to a directory path to save
+/// SVG debug output for faces that error or panic during triangulation.
+fn save_debug_svg_dir() -> Option<String> {
+    std::env::var("SAVE_DEBUG_SVGS").ok()
+}
 
 /// `TransformStack` is a mapping of representations to transformed children.
 type TransformStack<'a> =
@@ -348,6 +351,8 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
 
             // Fold operation
             |(mut mesh, mut stats), (id, mats)| {
+                info!("processing shape entity {} ({} transforms)", id.0,
+                      mats.len());
                 let v_start = mesh.verts.len();
                 let t_start = mesh.triangles.len();
                 let default_color = styled_item_colors.get(&id.0)
@@ -420,10 +425,12 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
     };
 
     // Scale coordinates to millimeters based on the STEP file's length unit
+    info!("all faces done, detecting length scale...");
     let mut scale = detect_length_scale_to_mm(s);
     if (scale - 1.0).abs() < 1e-10 {
         scale = detect_length_scale_fallback(s);
     }
+    info!("length scale: {}", scale);
     let mut mesh = mesh;
     if (scale - 1.0).abs() > 1e-10 {
         info!("Applying unit scale factor: {}", scale);
@@ -608,6 +615,7 @@ fn advanced_face(
     let face = s.entity(f).expect("Could not get AdvancedFace");
     let face_color = styled_item_colors.get(&f.0).copied().unwrap_or(default_color);
     stats.num_faces += 1;
+    info!("triangulating face {} (geometry {})", f.0, face.face_geometry.0);
 
     // Grab the surface, returning early if it's unimplemented
     let mut surf = get_surface(s, face.face_geometry)?;
@@ -677,11 +685,17 @@ fn advanced_face(
     resolve_crossing_edges(&mut pts, &mut edges, &mut mesh.verts, v_start);
     let bonus_points = pts.len();
     surf.add_steiner_points(&mut pts, &mut mesh.verts);
+    let face_id = face.face_geometry.0;
+    let n_steiner = pts.len() - bonus_points;
+    info!("face {} cdt input: {} pts ({} boundary, {} steiner), {} edges",
+          face_id, pts.len(), bonus_points, n_steiner, edges.len());
     let result = std::panic::catch_unwind(|| {
         // TODO: this is only needed because we use pts below to save a debug
         // SVG if this panics.  Once we're confident in never panicking, we
         // can remove this.
         let mut pts = pts.clone();
+        let max_retries = n_steiner + 1;
+        let mut retries = 0usize;
         loop {
             let mut t = match cdt::Triangulation::new_with_edges(&pts, &edges) {
                 Err(e) => break Err(e),
@@ -693,12 +707,22 @@ fn advanced_face(
                 // edge, then reassign that point to pts[0] (so it will be
                 // ignored as a duplicate)
                 Err(cdt::Error::PointOnFixedEdge(p)) if p >= bonus_points => {
+                    retries += 1;
+                    info!("face {}: PointOnFixedEdge({}), retry {}/{} \
+                           ({} pts, {} edges, {} steiner)",
+                           face_id, p, retries, max_retries,
+                           pts.len(), edges.len(), n_steiner);
+                    if retries > max_retries {
+                        warn!("face {}: exceeded max retries ({}), giving up",
+                              face_id, max_retries);
+                        break Err(cdt::Error::PointOnFixedEdge(p));
+                    }
                     pts[p] = pts[0];
                     continue;
                 },
                 Err(e) => {
-                    if SAVE_DEBUG_SVGS {
-                        let filename = format!("err{}.svg", face.face_geometry.0);
+                    if let Some(dir) = save_debug_svg_dir() {
+                        let filename = format!("{}/err{}.svg", dir, face_id);
                         t.save_debug_svg(&filename)
                             .expect("Could not save debug SVG");
                     }
@@ -730,14 +754,16 @@ fn advanced_face(
         Err(e) => {
             error!("Got panic while triangulating {}: {:?}",
                    face.face_geometry.0, e);
-            if SAVE_PANIC_SVGS {
-                let filename = format!("panic{}.svg", face.face_geometry.0);
+            if let Some(dir) = save_debug_svg_dir() {
+                let filename = format!("{}/panic{}.svg", dir, face.face_geometry.0);
                 cdt::save_debug_panic(&pts, &edges, &filename)
                     .expect("Could not save debug SVG");
             }
             stats.num_panics += 1;
         }
     }
+    info!("face {} post-cdt: applying colors/normals ({} verts from v_start)",
+          face_id, mesh.verts.len() - v_start);
     for v in &mut mesh.verts[v_start..] {
         v.color = face_color;
     }
@@ -747,6 +773,7 @@ fn advanced_face(
             v.norm = -v.norm;
         }
     }
+    info!("face {} done", face_id);
     Ok(())
 }
 
