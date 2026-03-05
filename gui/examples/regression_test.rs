@@ -244,10 +244,11 @@ fn main() {
     log::set_max_level(max_level);
 
     // Find test assets
-    let patterns = &[
-        "test_assets/*.step", "test_assets/*.STEP",
-        "test_assets/*.stp", "test_assets/*.STP",
-    ];
+    let assets_dir = std::env::var("TEST_ASSETS_DIR").unwrap_or_else(|_| "test_assets".into());
+    let patterns: Vec<String> = ["*.step", "*.STEP", "*.stp", "*.STP"]
+        .iter()
+        .map(|ext| format!("{}/{}", assets_dir, ext))
+        .collect();
     let mut files: Vec<_> = patterns.iter()
         .flat_map(|p| glob::glob(p).expect("Failed to glob pattern"))
         .filter_map(|r| r.ok())
@@ -256,11 +257,11 @@ fn main() {
     files.dedup();
 
     if files.is_empty() {
-        eprintln!("No STEP files found in test_assets/. Run scripts/extract_test_assets.sh first.");
+        eprintln!("No STEP files found in {}/ — set TEST_ASSETS_DIR to override.", assets_dir);
         std::process::exit(1);
     }
 
-    eprintln!("Found {} STEP files in test_assets/\n", files.len());
+    eprintln!("Found {} STEP files in {}/\n", files.len(), assets_dir);
 
     let results = run_tests(&files);
     print_table(&results);
