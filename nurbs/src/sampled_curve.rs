@@ -33,11 +33,19 @@ impl<const N: usize> SampledCurve<N>
 
     // Section 6.1 (start middle page 232)
     pub fn u_from_point_newtons_method(&self, P: DVec3, u_0: f64) -> f64 {
+        const BASE_NEWTON_ITERS: usize = 128;
+        const MAX_NEWTON_ITERS: usize = 256;
+        const EXTRA_ITERS_RESIDUAL_GATE: f64 = 2.0;
+        const EXTRA_ITERS_MIN_REL_PROGRESS: f64 = 0.005;
+        const EXTRA_ITERS_MAX_STALL: usize = 4;
         let eps1 = 0.01; // a Euclidean distance error bound
         let eps2 = 0.01; // a cosine error bound
 
         let mut u_i = u_0;
-        for _ in 0..256 {
+        let mut max_iters = BASE_NEWTON_ITERS;
+        let mut prev_r_len = f64::INFINITY;
+        let mut extra_stall_iters = 0usize;
+        for iter in 0..MAX_NEWTON_ITERS {
             let derivs = self.curve.derivs::<2>(u_i);
             let C = derivs[0];
             let C_p = derivs[1];
@@ -90,10 +98,41 @@ impl<const N: usize> SampledCurve<N>
             }
 
             // if the point didnt move much, return
-            if length(&((u_ip1 - u_i) * C_p)) <= eps1 {
+            let step_len = length(&((u_ip1 - u_i) * C_p));
+            if step_len <= eps1 {
                 return u_ip1;
             }
 
+            // Most inputs converge quickly; only spend the extra budget when
+            // already close enough that more Newton steps are likely useful.
+            if iter + 1 == BASE_NEWTON_ITERS {
+                if r_len <= eps1 * EXTRA_ITERS_RESIDUAL_GATE
+                    || step_len <= eps1 * EXTRA_ITERS_RESIDUAL_GATE
+                {
+                    max_iters = MAX_NEWTON_ITERS;
+                } else {
+                    return u_ip1;
+                }
+            } else if iter + 1 > BASE_NEWTON_ITERS {
+                let rel_progress = if prev_r_len.is_finite() && prev_r_len > 0.0 {
+                    (prev_r_len - r_len) / prev_r_len
+                } else {
+                    1.0
+                };
+                if rel_progress < EXTRA_ITERS_MIN_REL_PROGRESS {
+                    extra_stall_iters += 1;
+                } else {
+                    extra_stall_iters = 0;
+                }
+                if extra_stall_iters >= EXTRA_ITERS_MAX_STALL {
+                    return u_ip1;
+                }
+            }
+            if iter + 1 >= max_iters {
+                return u_ip1;
+            }
+
+            prev_r_len = r_len;
             u_i = u_ip1;
         }
         // Failed to converge; return best guess
