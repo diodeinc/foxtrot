@@ -41,9 +41,21 @@ fn build_transform_stack<'a>(s: &'a StepFile, flip: bool) -> TransformStack<'a> 
         } else {
             (r.rep_1, r.rep_2)
         };
-        let mut mat = item_defined_transformation(s, r.transformation_operator.cast());
+        let mut mat = match item_defined_transformation(s, r.transformation_operator.cast()) {
+            Ok(mat) => mat,
+            Err(err) => {
+                warn!("Skipping transform relationship {:?}: {}", r, err);
+                continue;
+            }
+        };
         if flip {
-            mat = mat.try_inverse().expect("Could not invert transform matrix");
+            mat = match mat.try_inverse() {
+                Some(inv) => inv,
+                None => {
+                    warn!("Skipping non-invertible transform relationship {:?}", r);
+                    continue;
+                }
+            };
         }
 
         transform_stack.entry(b)
@@ -306,7 +318,10 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                 Entity::AdvancedBrepShapeRepresentation(b) => &b.items,
                 Entity::ShapeRepresentation(b) => &b.items,
                 Entity::ManifoldSurfaceShapeRepresentation(b) => &b.items,
-                e => panic!("Could not get shape from {:?}", e),
+                e => {
+                    warn!("Skipping {:?} (not a supported representation)", e);
+                    continue;
+                },
             };
 
             for m in items.iter() {
@@ -446,24 +461,26 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
     (mesh, stats)
 }
 
-fn item_defined_transformation(s: &StepFile, t: Id<ItemDefinedTransformation_>) -> DMat4 {
-    let i = s.entity(t).expect("Could not get ItemDefinedTransform");
+fn item_defined_transformation(s: &StepFile, t: Id<ItemDefinedTransformation_>)
+    -> Result<DMat4, Error>
+{
+    let i = s.entity(t).ok_or(Error::InvalidStepEntity("ItemDefinedTransformation"))?;
 
-    let (location, axis, ref_direction) = axis2_placement_3d(s,
-        i.transform_item_1.cast());
+    let (location, axis, ref_direction) = axis2_placement_3d(s, i.transform_item_1.cast())?;
     let t1 = Surface::make_affine_transform(axis,
         ref_direction,
         axis.cross(&ref_direction),
         location);
 
-    let (location, axis, ref_direction) = axis2_placement_3d(s,
-        i.transform_item_2.cast());
+    let (location, axis, ref_direction) = axis2_placement_3d(s, i.transform_item_2.cast())?;
     let t2 = Surface::make_affine_transform(axis,
         ref_direction,
         axis.cross(&ref_direction),
         location);
 
-    t2 * t1.try_inverse().expect("Could not invert transform matrix")
+    let t1i = t1.try_inverse()
+        .ok_or(Error::SingularTransform("item-defined transformation"))?;
+    Ok(t2 * t1i)
 }
 
 fn presentation_style_color(s: &StepFile, p: PresentationStyleAssignment)
@@ -491,8 +508,8 @@ fn presentation_style_color(s: &StepFile, p: PresentationStyleAssignment)
             } else {
                 s.entity(surf.styles[0].cast::<SurfaceStyleFillArea_>())
             })
-        .map(|surf: &SurfaceStyleFillArea_|
-            s.entity(surf.fill_area).expect("Could not get fill_area"))
+        .and_then(|surf: &SurfaceStyleFillArea_|
+            s.entity(surf.fill_area))
         .and_then(|fill: &FillAreaStyle_| if fill.fill_styles.len() != 1 {
                 None
             } else {
@@ -503,28 +520,36 @@ fn presentation_style_color(s: &StepFile, p: PresentationStyleAssignment)
         .map(|c| DVec3::new(c.red, c.green, c.blue))
 }
 
-fn cartesian_point(s: &StepFile, a: Id<CartesianPoint_>) -> DVec3 {
-    let p = s.entity(a).expect("Could not get cartesian point");
-    DVec3::new(p.coordinates[0].0, p.coordinates[1].0, p.coordinates[2].0)
+fn cartesian_point(s: &StepFile, a: Id<CartesianPoint_>) -> Result<DVec3, Error> {
+    let p = s.entity(a).ok_or(Error::InvalidStepEntity("CartesianPoint"))?;
+    if p.coordinates.len() < 3 {
+        return Err(Error::InvalidGeometry("cartesian point has fewer than 3 coordinates"));
+    }
+    Ok(DVec3::new(p.coordinates[0].0, p.coordinates[1].0, p.coordinates[2].0))
 }
 
-fn direction(s: &StepFile, a: Direction) -> DVec3 {
-    let p = s.entity(a).expect("Could not get cartesian point");
-    DVec3::new(p.direction_ratios[0],
+fn direction(s: &StepFile, a: Direction) -> Result<DVec3, Error> {
+    let p = s.entity(a).ok_or(Error::InvalidStepEntity("Direction"))?;
+    if p.direction_ratios.len() < 3 {
+        return Err(Error::InvalidGeometry("direction has fewer than 3 ratios"));
+    }
+    Ok(DVec3::new(p.direction_ratios[0],
                p.direction_ratios[1],
-               p.direction_ratios[2])
+               p.direction_ratios[2]))
 }
 
-fn axis2_placement_3d(s: &StepFile, t: Id<Axis2Placement3d_>) -> (DVec3, DVec3, DVec3) {
-    let a = s.entity(t).expect("Could not get Axis2Placement3d");
-    let location = cartesian_point(s, a.location);
+fn axis2_placement_3d(s: &StepFile, t: Id<Axis2Placement3d_>)
+    -> Result<(DVec3, DVec3, DVec3), Error>
+{
+    let a = s.entity(t).ok_or(Error::InvalidStepEntity("Axis2Placement3d"))?;
+    let location = cartesian_point(s, a.location)?;
     // TODO: this doesn't necessarily match the behavior of `build_axes`
-    let axis = direction(s, a.axis.expect("Missing axis"));
+    let axis = direction(s, a.axis.ok_or(Error::MissingStepField("Axis2Placement3d.axis"))?)?;
     let ref_direction = match a.ref_direction {
         None => DVec3::new(1.0, 0.0, 0.0),
-        Some(r) => direction(s, r),
+        Some(r) => direction(s, r)?,
     };
-    (location, axis, ref_direction)
+    Ok((location, axis, ref_direction))
 }
 
 fn shell(
@@ -564,7 +589,11 @@ fn open_shell(
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
 ) {
-    let cs = s.entity(c).expect("Could not get OpenShell");
+    let Some(cs) = s.entity(c) else {
+        error!("Failed to get OpenShell {:?}", c);
+        stats.num_errors += 1;
+        return;
+    };
     for face in &cs.cfs_faces {
         if let Err(err) = advanced_face(
             s,
@@ -588,7 +617,11 @@ fn closed_shell(
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
 ) {
-    let cs = s.entity(c).expect("Could not get ClosedShell");
+    let Some(cs) = s.entity(c) else {
+        error!("Failed to get ClosedShell {:?}", c);
+        stats.num_errors += 1;
+        return;
+    };
     for face in &cs.cfs_faces {
         if let Err(err) = advanced_face(
             s,
@@ -612,7 +645,7 @@ fn advanced_face(
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
 ) -> Result<(), Error> {
-    let face = s.entity(f).expect("Could not get AdvancedFace");
+    let face = s.entity(f).ok_or(Error::InvalidStepEntity("AdvancedFace"))?;
     let face_color = styled_item_colors.get(&f.0).copied().unwrap_or(default_color);
     stats.num_faces += 1;
     info!("triangulating face {} (geometry {})", f.0, face.face_geometry.0);
@@ -633,7 +666,7 @@ fn advanced_face(
 
         match bound_contours.len() {
             // We should always have non-zero items in the contour
-            0 => panic!("Got empty contours for {:?}", face),
+            0 => return Err(Error::InvalidGeometry("face bound produced empty contour")),
 
             // Special case for a single-vertex point, which shows up in
             // cones: we push it as a Steiner point, but without any
@@ -671,7 +704,9 @@ fn advanced_face(
 
                 // Close the loop by returning to the starting point
                 edges.pop();
-                edges.last_mut().unwrap().1 = start;
+                let last = edges.last_mut()
+                    .ok_or(Error::InvalidGeometry("contour loop had no edges"))?;
+                last.1 = start;
             }
         }
     }
@@ -723,8 +758,9 @@ fn advanced_face(
                 Err(e) => {
                     if let Some(dir) = save_debug_svg_dir() {
                         let filename = format!("{}/err{}.svg", dir, face_id);
-                        t.save_debug_svg(&filename)
-                            .expect("Could not save debug SVG");
+                        if let Err(err) = t.save_debug_svg(&filename) {
+                            warn!("Could not save debug SVG {}: {}", filename, err);
+                        }
                     }
                     break Err(e)
                 },
@@ -751,15 +787,16 @@ fn advanced_face(
                    face.face_geometry.0, e);
             stats.num_errors += 1;
         },
-        Err(e) => {
-            error!("Got panic while triangulating {}: {:?}",
-                   face.face_geometry.0, e);
+        Err(_) => {
+            error!("Got panic while triangulating {}", face.face_geometry.0);
             if let Some(dir) = save_debug_svg_dir() {
                 let filename = format!("{}/panic{}.svg", dir, face.face_geometry.0);
-                cdt::save_debug_panic(&pts, &edges, &filename)
-                    .expect("Could not save debug SVG");
+                if let Err(err) = cdt::save_debug_panic(&pts, &edges, &filename) {
+                    warn!("Could not save debug SVG {}: {}", filename, err);
+                }
             }
-            stats.num_panics += 1;
+            stats.num_errors += 1;
+            return Err(Error::TriangulationPanic);
         }
     }
     info!("face {} post-cdt: applying colors/normals ({} verts from v_start)",
@@ -780,54 +817,54 @@ fn advanced_face(
 fn get_surface(s: &StepFile, surf: ap214::Surface) -> Result<Surface, Error> {
     match &s[surf] {
         Entity::CylindricalSurface(c) => {
-            let (location, axis, ref_direction) = axis2_placement_3d(s, c.position);
-            Ok(Surface::new_cylinder(axis, ref_direction, location, c.radius.0.0.0))
+            let (location, axis, ref_direction) = axis2_placement_3d(s, c.position)?;
+            Surface::new_cylinder(axis, ref_direction, location, c.radius.0.0.0)
         },
         Entity::ToroidalSurface(c) => {
-            let (location, axis, _ref_direction) = axis2_placement_3d(s, c.position);
-            Ok(Surface::new_torus(location, axis, c.major_radius.0.0.0, c.minor_radius.0.0.0))
+            let (location, axis, _ref_direction) = axis2_placement_3d(s, c.position)?;
+            Surface::new_torus(location, axis, c.major_radius.0.0.0, c.minor_radius.0.0.0)
         },
         Entity::Plane(p) => {
             // We'll ignore axis and ref_direction in favor of building an
             // orthonormal basis later on
-            let (location, axis, ref_direction) = axis2_placement_3d(s, p.position);
-            Ok(Surface::new_plane(axis, ref_direction, location))
+            let (location, axis, ref_direction) = axis2_placement_3d(s, p.position)?;
+            Surface::new_plane(axis, ref_direction, location)
         },
         // We treat cones like planes, since that's a valid mapping into 2D
         Entity::ConicalSurface(c) => {
-            let (location, axis, ref_direction) = axis2_placement_3d(s, c.position);
-            Ok(Surface::new_cone(axis, ref_direction, location, c.semi_angle.0))
+            let (location, axis, ref_direction) = axis2_placement_3d(s, c.position)?;
+            Surface::new_cone(axis, ref_direction, location, c.semi_angle.0)
         },
         Entity::SphericalSurface(c) => {
             // We'll ignore axis and ref_direction in favor of building an
             // orthonormal basis later on
-            let (location, _axis, _ref_direction) = axis2_placement_3d(s, c.position);
-            Ok(Surface::new_sphere(location, c.radius.0.0.0))
+            let (location, _axis, _ref_direction) = axis2_placement_3d(s, c.position)?;
+            Surface::new_sphere(location, c.radius.0.0.0)
         },
         Entity::BSplineSurfaceWithKnots(b) =>
         {
             // TODO: make KnotVector::from_multiplicies accept iterators?
             let u_knots: Vec<f64> = b.u_knots.iter().map(|k| k.0).collect();
             let u_multiplicities: Vec<usize> = b.u_multiplicities.iter()
-                .map(|&k| k.try_into().expect("Got negative multiplicity"))
-                .collect();
+                .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative u multiplicity")))
+                .collect::<Result<_, _>>()?;
             let u_knot_vec = KnotVector::from_multiplicities(
-                b.u_degree.try_into().expect("Got negative degree"),
+                b.u_degree.try_into().map_err(|_| Error::NumericConversion("negative u degree"))?,
                 &u_knots, &u_multiplicities);
 
             let v_knots: Vec<f64> = b.v_knots.iter().map(|k| k.0).collect();
             let v_multiplicities: Vec<usize> = b.v_multiplicities.iter()
-                .map(|&k| k.try_into().expect("Got negative multiplicity"))
-                .collect();
+                .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative v multiplicity")))
+                .collect::<Result<_, _>>()?;
             let v_knot_vec = KnotVector::from_multiplicities(
-                b.v_degree.try_into().expect("Got negative degree"),
+                b.v_degree.try_into().map_err(|_| Error::NumericConversion("negative v degree"))?,
                 &v_knots, &v_multiplicities);
 
-            let control_points_list = control_points_2d(s, &b.control_points_list);
+            let control_points_list = control_points_2d(s, &b.control_points_list)?;
 
             let surf = BSplineSurface::new(
-                b.u_closed.0.unwrap() == false,
-                b.v_closed.0.unwrap() == false,
+                b.u_closed.0 != Some(true),
+                b.v_closed.0 != Some(true),
                 u_knot_vec,
                 v_knot_vec,
                 control_points_list,
@@ -851,22 +888,22 @@ fn get_surface(s: &StepFile, surf: ap214::Surface) -> Result<Surface, Error> {
             // TODO: make KnotVector::from_multiplicies accept iterators?
             let u_knots: Vec<f64> = bspline.u_knots.iter().map(|k| k.0).collect();
             let u_multiplicities: Vec<usize> = bspline.u_multiplicities.iter()
-                .map(|&k| k.try_into().expect("Got negative multiplicity"))
-                .collect();
+                .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative u multiplicity")))
+                .collect::<Result<_, _>>()?;
             let u_knot_vec = KnotVector::from_multiplicities(
-                bspline.u_degree.try_into().expect("Got negative degree"),
+                bspline.u_degree.try_into().map_err(|_| Error::NumericConversion("negative u degree"))?,
                 &u_knots, &u_multiplicities);
 
             let v_knots: Vec<f64> = bspline.v_knots.iter().map(|k| k.0).collect();
             let v_multiplicities: Vec<usize> = bspline.v_multiplicities.iter()
-                .map(|&k| k.try_into().expect("Got negative multiplicity"))
-                .collect();
+                .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative v multiplicity")))
+                .collect::<Result<_, _>>()?;
             let v_knot_vec = KnotVector::from_multiplicities(
-                bspline.v_degree.try_into().expect("Got negative degree"),
+                bspline.v_degree.try_into().map_err(|_| Error::NumericConversion("negative v degree"))?,
                 &v_knots, &v_multiplicities);
 
             let control_points_list = control_points_2d(
-                    s, &bspline.control_points_list)
+                    s, &bspline.control_points_list)?
                 .into_iter()
                 .zip(rational.weights_data.iter())
                 .map(|(ctrl, weight)|
@@ -877,8 +914,8 @@ fn get_surface(s: &StepFile, surf: ap214::Surface) -> Result<Surface, Error> {
                 .collect();
 
             let surf = NURBSSurface::new(
-                bspline.u_closed.0.unwrap() == false,
-                bspline.v_closed.0.unwrap() == false,
+                bspline.u_closed.0 != Some(true),
+                bspline.v_closed.0 != Some(true),
                 u_knot_vec,
                 v_knot_vec,
                 control_points_list,
@@ -893,11 +930,11 @@ fn get_surface(s: &StepFile, surf: ap214::Surface) -> Result<Surface, Error> {
     }
 }
 
-fn control_points_1d(s: &StepFile, row: &Vec<CartesianPoint>) -> Vec<DVec3> {
+fn control_points_1d(s: &StepFile, row: &Vec<CartesianPoint>) -> Result<Vec<DVec3>, Error> {
     row.iter().map(|p| cartesian_point(s, *p)).collect()
 }
 
-fn control_points_2d(s: &StepFile, rows: &Vec<Vec<CartesianPoint>>) -> Vec<Vec<DVec3>> {
+fn control_points_2d(s: &StepFile, rows: &Vec<Vec<CartesianPoint>>) -> Result<Vec<Vec<DVec3>>, Error> {
     rows.iter()
         .map(|row| control_points_1d(s, row))
         .collect()
@@ -907,7 +944,7 @@ fn face_bound(s: &StepFile, b: FaceBound) -> Result<Vec<DVec3>, Error> {
     let (bound, orientation) = match &s[b] {
         Entity::FaceBound(b) => (b.bound, b.orientation),
         Entity::FaceOuterBound(b) => (b.bound, b.orientation),
-        e => panic!("Could not get bound from {:?} at {:?}", e, b),
+        _ => return Err(Error::InvalidStepEntity("FaceBound")),
     };
     match &s[bound] {
         Entity::EdgeLoop(e) => {
@@ -920,9 +957,9 @@ fn face_bound(s: &StepFile, b: FaceBound) -> Result<Vec<DVec3>, Error> {
         Entity::VertexLoop(v) => {
             // This is an "edge loop" with a single vertex, which is
             // used for cones and not really anything else.
-            Ok(vec![vertex_point(s, v.loop_vertex)])
+            Ok(vec![vertex_point(s, v.loop_vertex)?])
         }
-        e => panic!("{:?} is not an EdgeLoop", e),
+        _ => Err(Error::InvalidStepEntity("FaceBound.bound")),
     }
 }
 
@@ -936,7 +973,7 @@ fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge])
         if i > 0 {
             out.pop();
         }
-        let edge = s.entity(*e).expect("Could not get OrientedEdge");
+        let edge = s.entity(*e).ok_or(Error::InvalidStepEntity("OrientedEdge"))?;
         let o = edge_curve(s, edge.edge_element.cast(), edge.orientation)?;
         out.extend(o.into_iter());
     }
@@ -944,7 +981,7 @@ fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge])
 }
 
 fn edge_curve(s: &StepFile, e: EdgeCurve, orientation: bool) -> Result<Vec<DVec3>, Error> {
-    let edge_curve = s.entity(e).expect("Could not get EdgeCurve");
+    let edge_curve = s.entity(e).ok_or(Error::InvalidStepEntity("EdgeCurve"))?;
     let curve = curve(s, edge_curve, edge_curve.edge_geometry, orientation)?;
 
     let (start, end) = if orientation {
@@ -953,9 +990,9 @@ fn edge_curve(s: &StepFile, e: EdgeCurve, orientation: bool) -> Result<Vec<DVec3
         (edge_curve.edge_end, edge_curve.edge_start)
     };
     let is_loop = edge_curve.edge_start == edge_curve.edge_end;
-    let u = vertex_point(s, start);
-    let v = vertex_point(s, end);
-    Ok(curve.build(u, v, is_loop))
+    let u = vertex_point(s, start)?;
+    let v = vertex_point(s, end)?;
+    curve.build(u, v, is_loop)
 }
 
 fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
@@ -963,32 +1000,31 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
 {
     Ok(match &s[curve_id] {
         Entity::Circle(c) => {
-            let (location, axis, ref_direction) = axis2_placement_3d(s, c.position.cast());
+            let (location, axis, ref_direction) = axis2_placement_3d(s, c.position.cast())?;
             Curve::new_circle(location, axis, ref_direction, c.radius.0.0.0,
                               edge_curve.edge_start == edge_curve.edge_end,
-                              edge_curve.same_sense ^ !orientation)
+                              edge_curve.same_sense ^ !orientation)?
         },
         Entity::Ellipse(c) => {
-            let (location, axis, ref_direction) = axis2_placement_3d(s, c.position.cast());
+            let (location, axis, ref_direction) = axis2_placement_3d(s, c.position.cast())?;
             Curve::new_ellipse(location, axis, ref_direction,
                                c.semi_axis_1.0.0.0, c.semi_axis_2.0.0.0,
                                edge_curve.edge_start == edge_curve.edge_end,
-                               edge_curve.same_sense ^ !orientation)
+                               edge_curve.same_sense ^ !orientation)?
         },
         Entity::BSplineCurveWithKnots(c) => {
             if c.self_intersect.0 == Some(true) {
                 return Err(Error::SelfIntersectingCurve);
             }
 
-            let control_points_list = control_points_1d(
-                s, &c.control_points_list);
+            let control_points_list = control_points_1d(s, &c.control_points_list)?;
 
             let knots: Vec<f64> = c.knots.iter().map(|k| k.0).collect();
             let multiplicities: Vec<usize> = c.knot_multiplicities.iter()
-                .map(|&k| k.try_into().expect("Got negative multiplicity"))
-                .collect();
+                .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative curve multiplicity")))
+                .collect::<Result<_, _>>()?;
             let knot_vec = KnotVector::from_multiplicities(
-                c.degree.try_into().expect("Got negative degree"),
+                c.degree.try_into().map_err(|_| Error::NumericConversion("negative curve degree"))?,
                 &knots, &multiplicities);
 
             let open = c.closed_curve.0 != Some(true);
@@ -1014,14 +1050,13 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
             };
             let knots: Vec<f64> = bspline.knots.iter().map(|k| k.0).collect();
             let multiplicities: Vec<usize> = bspline.knot_multiplicities.iter()
-                .map(|&k| k.try_into().expect("Got negative multiplicity"))
-                .collect();
+                .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative curve multiplicity")))
+                .collect::<Result<_, _>>()?;
             let knot_vec = KnotVector::from_multiplicities(
-                bspline.degree.try_into().expect("Got negative degree"),
+                bspline.degree.try_into().map_err(|_| Error::NumericConversion("negative curve degree"))?,
                 &knots, &multiplicities);
 
-            let control_points_list = control_points_1d(
-                    s, &bspline.control_points_list)
+            let control_points_list = control_points_1d(s, &bspline.control_points_list)?
                 .into_iter()
                 .zip(rational.weights_data.iter())
                 .map(|(p, w)| DVec4::new(p.x * w, p.y * w, p.z * w, *w))
@@ -1050,12 +1085,10 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
     })
 }
 
-fn vertex_point(s: &StepFile, v: Vertex) -> DVec3 {
-    cartesian_point(s,
-        s.entity(v.cast::<VertexPoint_>())
-            .expect("Could not get VertexPoint")
-            .vertex_geometry
-            .cast())
+fn vertex_point(s: &StepFile, v: Vertex) -> Result<DVec3, Error> {
+    let v = s.entity(v.cast::<VertexPoint_>())
+        .ok_or(Error::InvalidStepEntity("VertexPoint"))?;
+    cartesian_point(s, v.vertex_geometry.cast())
 }
 
 /// Compute intersection parameters (t, s) for segments A-B and C-D.

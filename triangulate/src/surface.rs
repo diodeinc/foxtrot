@@ -47,52 +47,60 @@ pub enum Surface {
 }
 
 impl Surface {
-    pub fn new_sphere(location: DVec3, radius: f64) -> Self {
-        Surface::Sphere {
+    pub fn new_sphere(location: DVec3, radius: f64) -> Result<Self, Error> {
+        Ok(Surface::Sphere {
             // mat and mat_i are built in prepare()
             mat: DMat4::identity(),
             mat_i: DMat4::identity(),
             location, radius,
-        }
+        })
     }
-    pub fn new_cylinder(axis: DVec3, ref_direction: DVec3, location: DVec3, radius: f64) -> Self {
+    pub fn new_cylinder(axis: DVec3, ref_direction: DVec3, location: DVec3, radius: f64)
+        -> Result<Self, Error>
+    {
         let mat = Self::make_rigid_transform(axis, ref_direction, location);
-        Surface::Cylinder {
+        let mat_i = mat.try_inverse()
+            .ok_or(Error::SingularTransform("cylinder transform"))?;
+        Ok(Surface::Cylinder {
             mat,
-            mat_i: mat.try_inverse().expect("Could not invert"),
+            mat_i,
             axis, radius, location,
             z_min: 0.0,
             z_max: 0.0,
-        }
+        })
     }
 
     pub fn new_torus(location: DVec3, axis: DVec3,
-                     major_radius: f64, minor_radius: f64) -> Self
+                     major_radius: f64, minor_radius: f64) -> Result<Self, Error>
     {
-        Surface::Torus {
+        Ok(Surface::Torus {
             // mat and mat_i are built in prepare()
             mat: DMat4::identity(),
             mat_i: DMat4::identity(),
             location, axis, major_radius, minor_radius
-        }
+        })
     }
 
-    pub fn new_plane(axis: DVec3, ref_direction: DVec3, location: DVec3) -> Self {
-        Surface::Plane {
+    pub fn new_plane(axis: DVec3, ref_direction: DVec3, location: DVec3) -> Result<Self, Error> {
+        Ok(Surface::Plane {
             mat_i: Self::make_rigid_transform(axis, ref_direction, location)
                 .try_inverse()
-                .expect("Could not invert"),
+                .ok_or(Error::SingularTransform("plane transform"))?,
             normal: axis,
-        }
+        })
     }
 
-    pub fn new_cone(axis: DVec3, ref_direction: DVec3, location: DVec3, angle: f64) -> Self {
+    pub fn new_cone(axis: DVec3, ref_direction: DVec3, location: DVec3, angle: f64)
+        -> Result<Self, Error>
+    {
         let mat = Self::make_rigid_transform(axis, ref_direction, location);
-        Surface::Cone {
+        let mat_i = mat.try_inverse()
+            .ok_or(Error::SingularTransform("cone transform"))?;
+        Ok(Surface::Cone {
             mat,
-            mat_i: mat.try_inverse().expect("Could not invert"),
+            mat_i,
             angle,
-        }
+        })
     }
 
     pub fn make_affine_transform(z_world: DVec3, x_world: DVec3, y_world: DVec3, origin_world: DVec3) -> DMat4 {
@@ -101,7 +109,7 @@ impl Surface {
         mat.set_column(1, &glm::vec3_to_vec4(&y_world));
         mat.set_column(2, &glm::vec3_to_vec4(&z_world));
         mat.set_column(3, &glm::vec3_to_vec4(&origin_world));
-        *mat.get_mut((3, 3)).unwrap() =  1.0;
+        mat[(3, 3)] = 1.0;
         mat
     }
 
@@ -111,7 +119,7 @@ impl Surface {
         mat.set_column(1, &glm::vec3_to_vec4(&z_world.cross(&x_world)));
         mat.set_column(2, &glm::vec3_to_vec4(&z_world));
         mat.set_column(3, &glm::vec3_to_vec4(&origin_world));
-        *mat.get_mut((3, 3)).unwrap() =  1.0;
+        mat[(3, 3)] = 1.0;
         mat
     }
 
@@ -143,7 +151,11 @@ impl Surface {
                 // around awkwardly).
 
                 // Scale from radius=1 to radius=0.5 based on Z
-                let z = (p.z - z_min) / (z_max - z_min);
+                let dz = z_max - z_min;
+                if dz.abs() < EPSILON {
+                    return Err(Error::InvalidGeometry("cylinder has zero height"));
+                }
+                let z = (p.z - z_min) / dz;
                 let scale = 1.0 / (1.0 + z);
                 Ok(DVec2::new(p.x * scale, p.y * scale))
             },
@@ -170,7 +182,7 @@ impl Surface {
                 let new_mat = Self::make_rigid_transform(
                     z, DVec3::new(1.0, 0.0, 0.0), z * *major_radius);
                 let new_mat_i = new_mat.try_inverse()
-                    .expect("Could not invert");
+                    .ok_or(Error::SingularTransform("torus lowering transform"))?;
                 let new_p = new_mat_i * DVec4::new(p.x, p.y, p.z, 1.0);
 
                 let minor_angle = new_p.x.atan2(new_p.z);
@@ -206,7 +218,10 @@ impl Surface {
         }
     }
 
-    fn prepare(&mut self, verts: &[Vertex]) {
+    fn prepare(&mut self, verts: &[Vertex]) -> Result<(), Error> {
+        if verts.is_empty() {
+            return Err(Error::InvalidGeometry("surface has no vertices"));
+        }
         match self {
             Surface::Cylinder { mat_i, z_min, z_max, .. } => {
                 *z_min = std::f64::INFINITY;
@@ -223,14 +238,14 @@ impl Surface {
             },
             Surface::Sphere { mat, mat_i, location, .. } => {
                 let ref_direction = (verts[0].pos - *location).normalize();
-                let d1 = (verts.last().unwrap().pos - *location).normalize();
+                let d1 = (verts[verts.len() - 1].pos - *location).normalize();
                 let axis = ref_direction.cross(&d1).normalize();
 
                 *mat = Self::make_rigid_transform(
                         axis, ref_direction, *location);
                 *mat_i = mat
                     .try_inverse()
-                    .expect("Could not invert");
+                    .ok_or(Error::SingularTransform("sphere transform"))?;
             },
             Surface::Torus { axis, mat, mat_i, location, .. } => {
                 let mean_dir = verts.iter()
@@ -242,16 +257,17 @@ impl Surface {
                     mean_perp_dir, *axis, *location);
                 *mat_i = mat
                     .try_inverse()
-                    .expect("Could not invert");
+                    .ok_or(Error::SingularTransform("torus transform"))?;
             },
             _ => (),
         }
+        Ok(())
     }
 
     pub fn lower_verts(&mut self, verts: &mut [Vertex])
         -> Result<Vec<(f64, f64)>, Error>
     {
-        self.prepare(verts);
+        self.prepare(verts)?;
         let mut pts = Vec::with_capacity(verts.len());
         for v in verts {
             // Project to the 2D subspace for triangulation
@@ -317,7 +333,7 @@ impl Surface {
 
                 Some((mat * p).xyz())
             },
-            _ => unimplemented!(),
+            _ => None,
         }
     }
 

@@ -10,6 +10,24 @@ pub enum Error {
     #[error("Could not lower point to 2D for triangulation")]
     CouldNotLower,
 
+    #[error("Invalid geometry: {0}")]
+    InvalidGeometry(&'static str),
+
+    #[error("Invalid STEP entity: {0}")]
+    InvalidStepEntity(&'static str),
+
+    #[error("Missing STEP field: {0}")]
+    MissingStepField(&'static str),
+
+    #[error("Could not invert transform: {0}")]
+    SingularTransform(&'static str),
+
+    #[error("Numeric conversion failed: {0}")]
+    NumericConversion(&'static str),
+
+    #[error("Triangulation panicked")]
+    TriangulationPanic,
+
     #[error("Could not convert into a Surface")]
     UnknownSurfaceType,
 

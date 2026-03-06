@@ -1,6 +1,7 @@
 use nalgebra_glm as glm;
 use glm::{DVec3, DVec4, DMat4};
 
+use crate::Error;
 use nurbs::{AbstractCurve, NDBSplineCurve, SampledCurve};
 use crate::surface::Surface;
 
@@ -21,7 +22,7 @@ pub enum Curve {
 impl Curve {
     pub fn new_ellipse(location: DVec3, axis: DVec3, ref_direction: DVec3,
                        radius1: f64, radius2: f64, closed: bool, dir: bool)
-        -> Self
+        -> Result<Self, Error>
     {
         // Build a rotation matrix to go from flat (XY) to 3D space
         let world_from_eplane = Surface::make_affine_transform(axis,
@@ -30,16 +31,16 @@ impl Curve {
             location);
         let eplane_from_world = world_from_eplane
             .try_inverse()
-            .expect("Could not invert");
-        Self::Ellipse {
+            .ok_or(Error::SingularTransform("ellipse transform"))?;
+        Ok(Self::Ellipse {
             world_from_eplane,
             eplane_from_world,
             closed, dir
-        }
+        })
     }
 
     pub fn new_circle(location: DVec3, axis: DVec3, ref_direction: DVec3,
-                      radius: f64, closed: bool, dir: bool) -> Self {
+                      radius: f64, closed: bool, dir: bool) -> Result<Self, Error> {
         Self::new_ellipse(location, axis, ref_direction,
                           radius, radius, closed, dir)
     }
@@ -49,7 +50,7 @@ impl Curve {
     }
 
     fn curve_points<const N: usize>(u: DVec3, v: DVec3, curve: &SampledCurve<N>,
-                                     is_loop: bool) -> Vec<DVec3>
+                                     is_loop: bool) -> Result<Vec<DVec3>, Error>
         where NDBSplineCurve<N>: AbstractCurve
     {
         let (t_start, t_end) = if is_loop {
@@ -59,14 +60,19 @@ impl Curve {
             (curve.u_from_point(u), curve.u_from_point(v))
         };
         let mut c = curve.as_polyline(t_start, t_end, 8);
+        if c.is_empty() {
+            return Err(Error::InvalidGeometry("curve polyline is empty"));
+        }
         c[0] = u;
-        *c.last_mut().unwrap() = v;
-        c
+        if let Some(last) = c.last_mut() {
+            *last = v;
+        }
+        Ok(c)
     }
 
-    pub fn build(&self, u: DVec3, v: DVec3, is_loop: bool) -> Vec<DVec3> {
+    pub fn build(&self, u: DVec3, v: DVec3, is_loop: bool) -> Result<Vec<DVec3>, Error> {
         match self {
-            Self::Line => vec![u, v],
+            Self::Line => Ok(vec![u, v]),
             Self::BSplineCurveWithKnots(curve) => Self::curve_points(u, v, curve, is_loop),
             Self::NURBSCurve(curve) => Self::curve_points(u, v, curve, is_loop),
             Self::Ellipse {
@@ -113,7 +119,7 @@ impl Curve {
                     out_world.push(glm::vec4_to_vec3(&p));
                 }
                 out_world.push(v);
-                out_world
+                Ok(out_world)
             }
         }
     }
