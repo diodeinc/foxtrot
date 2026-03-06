@@ -1,4 +1,4 @@
-use crate::indexes::{PointIndex, EdgeIndex, EdgeVec, EMPTY_EDGE};
+use crate::{Error, indexes::{PointIndex, EdgeIndex, EdgeVec, EMPTY_EDGE}};
 
 /// Represents a directed edge in a triangle graph.
 #[derive(Copy, Clone, Debug)]
@@ -95,21 +95,25 @@ impl Half {
         self.edges[e]
     }
 
-    fn push_edge(&mut self, edge: Edge) {
+    fn push_edge(&mut self, edge: Edge) -> Result<(), Error> {
         let mut index = self.edges.push(edge);
 
         // Link against a buddy if present, copying its fixed value
         if edge.buddy != EMPTY_EDGE {
             self.edges[index].sign = self.edges[edge.buddy].sign;
             std::mem::swap(&mut self.edges[edge.buddy].buddy, &mut index);
-            assert!(index == EMPTY_EDGE);
+            if index != EMPTY_EDGE {
+                return Err(Error::HalfEdgeInvariant);
+            }
         }
+        Ok(())
     }
 
     /// Inserts a new triangle into the edge map, based on three points
     /// and optional paired edges.  Returns the new edge index `a → b`
     pub fn insert(&mut self, a: PointIndex, b: PointIndex, c: PointIndex,
-                  e_cb: EdgeIndex, e_ac: EdgeIndex, e_ba: EdgeIndex) -> EdgeIndex
+                  e_cb: EdgeIndex, e_ac: EdgeIndex, e_ba: EdgeIndex)
+        -> Result<EdgeIndex, Error>
     {
         let e_ab = self.edges.next_index();
         let e_bc = e_ab + 1usize;
@@ -119,21 +123,21 @@ impl Half {
             prev: e_ca, next: e_bc,
             buddy: e_ba,
             sign: None,
-        });
+        })?;
         self.push_edge(Edge {
             src: b, dst: c,
             prev: e_ab, next: e_ca,
             buddy: e_cb,
             sign: None,
-        });
+        })?;
         self.push_edge(Edge {
             src: c, dst: a,
             prev: e_bc, next: e_ab,
             buddy: e_ac,
             sign: None,
-        });
+        })?;
 
-        e_ab
+        Ok(e_ab)
     }
 
     pub fn iter_edges(&self) -> impl Iterator<Item=(PointIndex, PointIndex, bool)> + '_ {
@@ -164,8 +168,10 @@ impl Half {
     /// triangulation.  Every triangle outside the boundary is removed,
     /// using odd-even counting (i.e. we switch from outside to inside every
     /// time we cross a fixed edge).
-    pub fn flood_erase_from(&mut self, e: EdgeIndex) {
-        assert!(self.edge(e).buddy == EMPTY_EDGE);
+    pub fn flood_erase_from(&mut self, e: EdgeIndex) -> Result<(), Error> {
+        if self.edge(e).buddy != EMPTY_EDGE {
+            return Err(Error::HalfEdgeInvariant);
+        }
         let mut seen = EdgeVec::of(vec![false; self.edges.len()]);
         let mut todo = vec![(e, self.edge(e).fixed())];
         while let Some((e, inside)) = todo.pop() {
@@ -174,8 +180,9 @@ impl Half {
             }
             let edge = self.edge(e);
 
-            assert!(!seen[edge.next]);
-            assert!(!seen[edge.prev]);
+            if seen[edge.next] || seen[edge.prev] {
+                return Err(Error::HalfEdgeInvariant);
+            }
             seen[e] = true;
             seen[edge.next] = true;
             seen[edge.prev] = true;
@@ -188,6 +195,7 @@ impl Half {
                 self.erase(e);
             }
         }
+        Ok(())
     }
 
     /// Sanity-checks the structure's invariants, raising an assertion if
@@ -234,10 +242,10 @@ impl Half {
     }
 
     /// Swaps the target edge, which must be have a matched pair.
-    pub fn swap(&mut self, e_ba: EdgeIndex) {
+    pub fn swap(&mut self, e_ba: EdgeIndex) -> Result<(), Error> {
         // We refuse to swap fixed edges, though the caller may ask for it
         if self.edges[e_ba].fixed() {
-            return;
+            return Ok(());
         }
         /* Before:
          *           a
@@ -253,9 +261,11 @@ impl Half {
          *         \ || /
          *          V|V/
          *           b
-         */
+        */
         let edge = self.edge(e_ba);
-        assert!(edge.buddy != EMPTY_EDGE);
+        if edge.buddy == EMPTY_EDGE {
+            return Err(Error::HalfEdgeInvariant);
+        }
 
         let e_ac = self.next(e_ba);
         let e_cb = self.prev(e_ba);
@@ -309,6 +319,7 @@ impl Half {
         self.edges[e_bd].next = e_ab;
         self.edges[e_da].prev = e_ba;
         self.edges[e_da].next = e_ac;
+        Ok(())
     }
 
     /// Erases a triangle, clearing its neighbors buddies
@@ -348,7 +359,7 @@ impl Half {
     ///
     /// # Panics
     /// Panics if the edges are not compatible or already have buddies.
-    pub fn link_new(&mut self, old: EdgeIndex, new: EdgeIndex) {
+    pub fn link_new(&mut self, old: EdgeIndex, new: EdgeIndex) -> Result<(), Error> {
         self.edges[new].sign = self.edges[old].sign;
         self.link(old, new)
     }
@@ -359,14 +370,19 @@ impl Half {
     ///
     /// # Panics
     /// Panics if the edges are not compatible or already have buddies.
-    pub fn link(&mut self, a: EdgeIndex, b: EdgeIndex) {
-        assert!(self.edges[a].buddy == EMPTY_EDGE);
-        assert!(self.edges[b].buddy == EMPTY_EDGE);
-        assert!(self.edges[a].fixed() == self.edges[b].fixed());
-        assert!(self.edges[a].src == self.edges[b].dst);
-        assert!(self.edges[a].dst == self.edges[b].src);
+    pub fn link(&mut self, a: EdgeIndex, b: EdgeIndex) -> Result<(), Error> {
+        if self.edges[a].buddy != EMPTY_EDGE || self.edges[b].buddy != EMPTY_EDGE {
+            return Err(Error::HalfEdgeInvariant);
+        }
+        if self.edges[a].fixed() != self.edges[b].fixed() {
+            return Err(Error::HalfEdgeInvariant);
+        }
+        if self.edges[a].src != self.edges[b].dst || self.edges[a].dst != self.edges[b].src {
+            return Err(Error::HalfEdgeInvariant);
+        }
 
         self.edges[a].buddy = b;
         self.edges[b].buddy = a;
+        Ok(())
     }
 }

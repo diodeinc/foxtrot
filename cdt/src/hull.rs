@@ -1,4 +1,4 @@
-use crate::{
+use crate::{Error,
     indexes::{PointVec, PointIndex, HullVec, HullIndex, EdgeIndex, EMPTY_HULL},
 };
 
@@ -60,7 +60,7 @@ impl Hull {
 
     // Inserts the first point, along with its associated edge, tied into
     // a tiny loop with itself
-    pub fn initialize(&mut self, p: PointIndex, angle: f64, edge: EdgeIndex) {
+    pub fn initialize(&mut self, p: PointIndex, angle: f64, edge: EdgeIndex) -> Result<(), Error> {
         let h = self.data.push(Node {
             angle,
             left: self.data.next_index(),
@@ -72,8 +72,11 @@ impl Hull {
         }
 
         let b = self.bucket(angle);
-        assert!(self.buckets[b] == EMPTY_HULL);
+        if self.buckets[b] != EMPTY_HULL {
+            return Err(Error::HalfEdgeInvariant);
+        }
         self.buckets[b] = h;
+        Ok(())
     }
 
     pub fn update(&mut self, h: HullIndex, e: EdgeIndex) {
@@ -82,7 +85,7 @@ impl Hull {
 
     /// For a given point, returns the HullIndex which will be split when this
     /// point is inserted.  Use `Hull::edge` to get the associated EdgeIndex.
-    pub fn get(&self, angle: f64) -> HullIndex {
+    pub fn get(&self, angle: f64) -> Result<HullIndex, Error> {
         let b = self.bucket(angle);
 
         // If the target bucket is empty, then we should search for the
@@ -117,19 +120,21 @@ impl Hull {
                 }
             }
         }
-        assert!(h != EMPTY_HULL);
+        if h == EMPTY_HULL {
+            return Err(Error::HalfEdgeInvariant);
+        }
 
         // Walk backwards one step to return the HullIndex which will be split
         // by this new point being inserted
-        self.data[h].left
+        Ok(self.data[h].left)
     }
 
-    pub fn start(&self) -> HullIndex {
+    pub fn start(&self) -> Result<HullIndex, Error> {
         self.buckets.iter()
             .filter(|b| **b != EMPTY_HULL)
             .copied()
             .next()
-            .unwrap()
+            .ok_or(Error::HalfEdgeInvariant)
     }
 
     /// Sanity-checks invariants of the data structure, raising an assertion
@@ -191,13 +196,18 @@ impl Hull {
     }
 
     /// Returns the hull index associated with the given point
-    pub fn index_of(&self, p: PointIndex) -> HullIndex {
-        assert!(!self.points.is_empty());
+    pub fn index_of(&self, p: PointIndex) -> Result<HullIndex, Error> {
+        if self.points.is_empty() {
+            return Err(Error::HalfEdgeInvariant);
+        }
         let h = self.points[p];
-        assert!(h != EMPTY_HULL);
-        assert!(self.data[h].left != EMPTY_HULL ||
-                self.data[h].right != EMPTY_HULL);
-        h
+        if h == EMPTY_HULL {
+            return Err(Error::HalfEdgeInvariant);
+        }
+        if self.data[h].left == EMPTY_HULL && self.data[h].right == EMPTY_HULL {
+            return Err(Error::HalfEdgeInvariant);
+        }
+        Ok(h)
     }
 
     /// Transitions the point -> hull random lookup from `old` to `new`.  This
@@ -211,9 +221,10 @@ impl Hull {
 
     /// Inserts a point without a hint
     pub fn insert_bare(&mut self, angle: f64, point: PointIndex, e: EdgeIndex)
-        -> HullIndex
+        -> Result<HullIndex, Error>
     {
-        self.insert(self.get(angle), angle, point, e)
+        let left = self.get(angle)?;
+        Ok(self.insert(left, angle, point, e))
     }
 
     /// Insert a new Point-Edge pair into the hull, using a hint to save time
@@ -281,28 +292,31 @@ impl Hull {
     }
 
     /// Iterates over all edges stored in the Hull, in order
-    pub fn values(&self) -> impl Iterator<Item=EdgeIndex> + '_ {
+    pub fn values(&self) -> std::vec::IntoIter<EdgeIndex> {
         // Find the first non-empty bucket to use as our starting point for
         // walking around the hull's linked list.
         let mut point: HullIndex = self.buckets.iter()
             .filter(|b| **b != EMPTY_HULL)
             .copied()
             .next()
-            .unwrap();
+            .unwrap_or(EMPTY_HULL);
+        if point == EMPTY_HULL {
+            return Vec::new().into_iter();
+        }
         // Then, walk the linked list until we hit the starting point again,
         // returning the associated edges at each point.
         let start = point;
         let mut started = false;
-        std::iter::from_fn(move || {
-            let out = self.data[point].edge;
+        let mut out = Vec::new();
+        loop {
             if point == start && started {
-                None
-            } else {
-                point = self.data[point].right;
-                started = true;
-                Some(out)
+                break;
             }
-        })
+            out.push(self.data[point].edge);
+            point = self.data[point].right;
+            started = true;
+        }
+        out.into_iter()
     }
 
     pub fn bucket_h(&self, h: HullIndex) -> usize {

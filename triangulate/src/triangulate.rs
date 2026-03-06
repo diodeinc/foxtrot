@@ -724,10 +724,7 @@ fn advanced_face(
     let n_steiner = pts.len() - bonus_points;
     info!("face {} cdt input: {} pts ({} boundary, {} steiner), {} edges",
           face_id, pts.len(), bonus_points, n_steiner, edges.len());
-    let result = std::panic::catch_unwind(|| {
-        // TODO: this is only needed because we use pts below to save a debug
-        // SVG if this panics.  Once we're confident in never panicking, we
-        // can remove this.
+    let result = {
         let mut pts = pts.clone();
         let max_retries = n_steiner + 1;
         let mut retries = 0usize;
@@ -738,9 +735,6 @@ fn advanced_face(
             };
             match t.run() {
                 Ok(()) => break Ok(t),
-                // If triangulation failed due to a Steiner point on a fixed
-                // edge, then reassign that point to pts[0] (so it will be
-                // ignored as a duplicate)
                 Err(cdt::Error::PointOnFixedEdge(p)) if p >= bonus_points => {
                     retries += 1;
                     info!("face {}: PointOnFixedEdge({}), retry {}/{} \
@@ -766,9 +760,9 @@ fn advanced_face(
                 },
             }
         }
-    });
+    };
     match result {
-        Ok(Ok(t)) => {
+        Ok(t) => {
             for (a, b, c) in t.triangles() {
                 let a = (a + offset) as u32;
                 let b = (b + offset) as u32;
@@ -782,22 +776,11 @@ fn advanced_face(
                 });
             }
         },
-        Ok(Err(e)) => {
+        Err(e) => {
             error!("Got error while triangulating {}: {:?}",
                    face.face_geometry.0, e);
             stats.num_errors += 1;
         },
-        Err(_) => {
-            error!("Got panic while triangulating {}", face.face_geometry.0);
-            if let Some(dir) = save_debug_svg_dir() {
-                let filename = format!("{}/panic{}.svg", dir, face.face_geometry.0);
-                if let Err(err) = cdt::save_debug_panic(&pts, &edges, &filename) {
-                    warn!("Could not save debug SVG {}: {}", filename, err);
-                }
-            }
-            stats.num_errors += 1;
-            return Err(Error::TriangulationPanic);
-        }
     }
     info!("face {} post-cdt: applying colors/normals ({} verts from v_start)",
           face_id, mesh.verts.len() - v_start);
