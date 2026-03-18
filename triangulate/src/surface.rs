@@ -47,6 +47,15 @@ pub enum Surface {
 }
 
 impl Surface {
+    fn fallback_perpendicular(axis: DVec3) -> DVec3 {
+        let candidate = if axis.x.abs() < 0.9 {
+            DVec3::new(1.0, 0.0, 0.0)
+        } else {
+            DVec3::new(0.0, 1.0, 0.0)
+        };
+        (candidate - axis * candidate.dot(&axis)).normalize()
+    }
+
     pub fn new_sphere(location: DVec3, radius: f64) -> Result<Self, Error> {
         Ok(Surface::Sphere {
             // mat and mat_i are built in prepare()
@@ -114,13 +123,23 @@ impl Surface {
     }
 
     fn make_rigid_transform(z_world: DVec3, x_world: DVec3, origin_world: DVec3) -> DMat4 {
-        let mut mat = DMat4::identity();
-        mat.set_column(0, &glm::vec3_to_vec4(&x_world));
-        mat.set_column(1, &glm::vec3_to_vec4(&z_world.cross(&x_world)));
-        mat.set_column(2, &glm::vec3_to_vec4(&z_world));
-        mat.set_column(3, &glm::vec3_to_vec4(&origin_world));
-        mat[(3, 3)] = 1.0;
-        mat
+        // STEP inputs are not always perfectly orthogonal, and some models
+        // include degenerate ref-directions. Build a stable orthonormal basis
+        // so downstream lowering/inversion does not fail on slightly bad input.
+        let z = if z_world.norm_squared() > EPSILON {
+            z_world.normalize()
+        } else {
+            DVec3::new(0.0, 0.0, 1.0)
+        };
+        let x_proj = x_world - z * x_world.dot(&z);
+        let x = if x_proj.norm_squared() > EPSILON {
+            x_proj.normalize()
+        } else {
+            Self::fallback_perpendicular(z)
+        };
+        let y = z.cross(&x).normalize();
+        let x = y.cross(&z).normalize();
+        Self::make_affine_transform(z, x, y, origin_world)
     }
 
     fn surf_lower<const N: usize>(p: DVec3, surf: &SampledSurface<N>) -> Result<DVec2, Error>
