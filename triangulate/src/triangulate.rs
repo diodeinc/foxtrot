@@ -3,7 +3,7 @@ use std::convert::TryInto;
 
 use nalgebra_glm as glm;
 use glm::{DVec3, DVec4, DMat4, U32Vec3};
-use log::{info, warn, error};
+use log::{debug, error, info, warn};
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
@@ -458,6 +458,12 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
     info!("num_faces: {}", stats.num_faces);
     info!("num_errors: {}", stats.num_errors);
     info!("num_panics: {}", stats.num_panics);
+    if stats.num_errors > 0 || stats.num_panics > 0 {
+        warn!(
+            "triangulation finished with {} face errors and {} panics",
+            stats.num_errors, stats.num_panics
+        );
+    }
     (mesh, stats)
 }
 
@@ -777,8 +783,11 @@ fn advanced_face(
             }
         },
         Err(e) => {
-            error!("Got error while triangulating {}: {:?}",
-                   face.face_geometry.0, e);
+            debug!(
+                "Got error while triangulating {}: {:?}",
+                face.face_geometry.0,
+                e
+            );
             stats.num_errors += 1;
         },
     }
