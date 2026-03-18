@@ -732,8 +732,7 @@ fn advanced_face(
           face_id, pts.len(), bonus_points, n_steiner, edges.len());
     let result = {
         let mut pts = pts.clone();
-        let max_retries = n_steiner + 1;
-        let mut retries = 0usize;
+        let mut retried_without_steiner = false;
         loop {
             let mut t = match cdt::Triangulation::new_with_edges(&pts, &edges) {
                 Err(e) => break Err(e),
@@ -742,17 +741,26 @@ fn advanced_face(
             match t.run() {
                 Ok(()) => break Ok(t),
                 Err(cdt::Error::PointOnFixedEdge(p)) if p >= bonus_points => {
-                    retries += 1;
-                    info!("face {}: PointOnFixedEdge({}), retry {}/{} \
-                           ({} pts, {} edges, {} steiner)",
-                           face_id, p, retries, max_retries,
-                           pts.len(), edges.len(), n_steiner);
-                    if retries > max_retries {
-                        warn!("face {}: exceeded max retries ({}), giving up",
-                              face_id, max_retries);
+                    if retried_without_steiner || n_steiner == 0 {
+                        warn!(
+                            "face {}: PointOnFixedEdge({}) after dropping steiner points",
+                            face_id,
+                            p
+                        );
                         break Err(cdt::Error::PointOnFixedEdge(p));
                     }
-                    pts[p] = pts[0];
+                    info!(
+                        "face {}: PointOnFixedEdge({}), retrying without {} steiner points \
+                         ({} pts, {} edges)",
+                        face_id,
+                        p,
+                        n_steiner,
+                        pts.len(),
+                        edges.len()
+                    );
+                    pts.truncate(bonus_points);
+                    mesh.verts.truncate(v_start + bonus_points);
+                    retried_without_steiner = true;
                     continue;
                 },
                 Err(e) => {

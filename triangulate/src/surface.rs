@@ -374,7 +374,10 @@ impl Surface {
         let (xmin, xmax, ymin, ymax) = Self::bbox(&pts);
         let num_pts = match self {
             Surface::Sphere { .. }   => 6,
-            Surface::Torus { .. } => 32,
+            // A dense fixed torus grid explodes on connector-style models in
+            // wasm. A smaller lattice still preserves curvature but avoids
+            // 1024 extra points per face.
+            Surface::Torus { .. } => 8,
             _ => 0,
         };
 
