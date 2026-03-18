@@ -5,6 +5,9 @@ use crate::Error;
 use nurbs::{AbstractCurve, NDBSplineCurve, SampledCurve};
 use crate::surface::Surface;
 
+const BSPLINE_POINTS_PER_KNOT: usize = 4;
+const ELLIPSE_SAMPLES_PER_REV: usize = 32;
+
 #[derive(Debug)]
 pub enum Curve {
     // TODO: move this to a standalone struct?
@@ -59,7 +62,7 @@ impl Curve {
         } else {
             (curve.u_from_point(u), curve.u_from_point(v))
         };
-        let mut c = curve.as_polyline(t_start, t_end, 8);
+        let mut c = curve.as_polyline(t_start, t_end, BSPLINE_POINTS_PER_KNOT);
         if c.is_empty() {
             return Err(Error::InvalidGeometry("curve polyline is empty"));
         }
@@ -101,9 +104,8 @@ impl Curve {
                     v_ang -= PI2;
                 }
 
-                const N: usize = 64;
                 let count = 4.max(
-                    (N as f64 * (u_ang - v_ang).abs() /
+                    (ELLIPSE_SAMPLES_PER_REV as f64 * (u_ang - v_ang).abs() /
                     (2.0 * std::f64::consts::PI)).round() as usize);
 
                 let mut out_world = vec![u];
