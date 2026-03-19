@@ -29,20 +29,12 @@ fn save_debug_svg_dir() -> Option<String> {
 /// `TransformStack` is a mapping of representations to transformed children.
 type TransformStack<'a> =
     HashMap<Representation<'a>, Vec<(Representation<'a>, DMat4)>>;
-
-fn entity_members<'a>(entity: &'a Entity<'a>) -> &'a [Entity<'a>] {
-    match entity {
-        Entity::ComplexEntity(v) => v,
-        _ => std::slice::from_ref(entity),
-    }
-}
-
 fn build_transform_stack<'a>(s: &'a StepFile, flip: bool) -> TransformStack<'a> {
     // Store a map of parent -> (child, transform)
     let mut transform_stack: HashMap<_, Vec<_>> = HashMap::new();
     for r in s.0.iter()
-        .flat_map(entity_members)
-        .filter_map(RepresentationRelationshipWithTransformation_::try_from_entity)
+        .filter_map(|e|
+            RepresentationRelationshipWithTransformation_::try_from_entity(e))
     {
         let (a, b) = if flip {
             (r.rep_2, r.rep_1)
@@ -84,66 +76,6 @@ fn transform_stack_roots<'a>(transform_stack: &TransformStack<'a>) -> Vec<Repres
         .filter(|k| !children.contains(k))
         .copied()
         .collect()
-}
-
-fn bind_representation_meshes<'a>(
-    s: &'a StepFile,
-    transform_stack: &TransformStack<'a>,
-    shape_rep_relationship: &HashMap<Representation<'a>, Vec<Representation<'a>>>,
-) -> HashMap<RepresentationItem<'a>, Vec<DMat4>> {
-    let roots = transform_stack_roots(transform_stack);
-    let mut todo: Vec<_> = roots.into_iter().map(|v| (v, DMat4::identity())).collect();
-    if todo.len() > 1 {
-        info!("Transformation stack has {} roots", todo.len());
-    }
-
-    let mut to_mesh: HashMap<RepresentationItem<'a>, Vec<DMat4>> = HashMap::new();
-    while let Some((id, mat)) = todo.pop() {
-        if let Some(children) = shape_rep_relationship.get(&id) {
-            for child in children {
-                todo.push((*child, mat));
-            }
-        }
-        if let Some(children) = transform_stack.get(&id) {
-            for (child, next_mat) in children {
-                todo.push((*child, mat * next_mat));
-            }
-            continue;
-        }
-
-        let items = match &s[id] {
-            Entity::AdvancedBrepShapeRepresentation(b) => &b.items,
-            Entity::ShapeRepresentation(b) => &b.items,
-            Entity::ManifoldSurfaceShapeRepresentation(b) => &b.items,
-            e => {
-                warn!("Skipping {:?} (not a supported representation)", e);
-                continue;
-            },
-        };
-
-        for m in items.iter() {
-            match &s[*m] {
-                Entity::ManifoldSolidBrep(_)
-                | Entity::BrepWithVoids(_)
-                | Entity::ShellBasedSurfaceModel(_) => {
-                    to_mesh.entry(*m).or_default().push(mat);
-                }
-                Entity::Axis2Placement3d(_) => (),
-                e => warn!("Skipping {:?}", e),
-            }
-        }
-    }
-    to_mesh
-}
-
-fn complex_entity_member<'a, T: FromEntity<'a>>(
-    members: &'a [Entity<'a>],
-    name: &'static str,
-) -> Result<&'a T, Error> {
-    members.iter().find_map(T::try_from_entity).ok_or_else(|| {
-        warn!("Could not get {name} from complex entity: {:?}", members);
-        Error::InvalidStepEntity(name)
-    })
 }
 
 /// Convert an SiUnit with name Metre to a mm scale factor.
@@ -341,23 +273,68 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
             })
         .collect();
 
+    // Store a map of parent -> (child, transform)
+    let mut transform_stack = build_transform_stack(s, false);
+    let mut roots = transform_stack_roots(&transform_stack);
+    // The transformation graph isn't directional (because STEP is a Good File
+    // Format), so if it's got more than one root, assume it's backwards.  We
+    // are assuming that directions in the graph are consistent within the file,
+    // until we find a counterexample.
+    if roots.len() > 1 {
+        info!("Flipping transform stack");
+        transform_stack = build_transform_stack(s, true);
+        roots = transform_stack_roots(&transform_stack);
+    }
+    let mut todo: Vec<_> = roots.into_iter()
+        .map(|v| (v, DMat4::identity()))
+        .collect();
+    if todo.len() > 1 {
+        warn!("Transformation stack has more than one root!");
+    }
+
     // Store a map of ShapeRepresentationRelationships, which some models
     // use to map from axes to specific instances
     let mut shape_rep_relationship: HashMap<Id<_>, Vec<Id<_>>> = HashMap::new();
     for (r1, r2) in s.0.iter()
-        .flat_map(entity_members)
-        .filter_map(ShapeRepresentationRelationship_::try_from_entity)
+        .filter_map(|e| ShapeRepresentationRelationship_::try_from_entity(e))
         .map(|e| (e.rep_1, e.rep_2))
     {
         shape_rep_relationship.entry(r1).or_default().push(r2);
     }
 
-    let transform_stack = build_transform_stack(s, false);
-    let mut to_mesh = bind_representation_meshes(s, &transform_stack, &shape_rep_relationship);
-    if to_mesh.is_empty() {
-        info!("Flipping transform stack after empty initial binding");
-        let flipped = build_transform_stack(s, true);
-        to_mesh = bind_representation_meshes(s, &flipped, &shape_rep_relationship);
+    let mut to_mesh: HashMap<Id<_>, Vec<_>> = HashMap::new();
+    while let Some((id, mat)) = todo.pop() {
+        for child in shape_rep_relationship.get(&id).unwrap_or(&vec![]) {
+            todo.push((*child, mat));
+        }
+        if let Some(children) = transform_stack.get(&id) {
+            for (child, next_mat) in children {
+                todo.push((*child, mat * next_mat));
+            }
+        } else {
+            // Bind this transform to the RepresentationItem, which is
+            // either a ManifoldSolidBrep or a ShellBasedSurfaceModel
+            let items = match &s[id] {
+                Entity::AdvancedBrepShapeRepresentation(b) => &b.items,
+                Entity::ShapeRepresentation(b) => &b.items,
+                Entity::ManifoldSurfaceShapeRepresentation(b) => &b.items,
+                e => {
+                    warn!("Skipping {:?} (not a supported representation)", e);
+                    continue;
+                },
+            };
+
+            for m in items.iter() {
+                match &s[*m] {
+                    Entity::ManifoldSolidBrep(_)
+                    | Entity::BrepWithVoids(_)
+                    | Entity::ShellBasedSurfaceModel(_) =>
+                        to_mesh.entry(*m).or_default().push(mat),
+                    Entity::Axis2Placement3d(_) => (),
+                    e => warn!("Skipping {:?}", e),
+                }
+            }
+        }
     }
     // If there are items in breps that aren't attached to a transformation
     // chain, then draw them individually (with an identity matrix)
@@ -894,11 +871,19 @@ fn get_surface(s: &StepFile, surf: ap214::Surface) -> Result<Surface, Error> {
             );
             Ok(Surface::BSpline(SampledSurface::new(surf)))
         },
-        Entity::ComplexEntity(v) => {
-            let bspline: &BSplineSurfaceWithKnots_ =
-                complex_entity_member(v, "BSplineSurfaceWithKnots")?;
-            let rational: &RationalBSplineSurface_ =
-                complex_entity_member(v, "RationalBSplineSurface")?;
+        Entity::ComplexEntity(v) if v.len() == 2 => {
+            let bspline = if let Entity::BSplineSurfaceWithKnots(b) = &v[0] {
+                b
+            } else {
+                warn!("Could not get BSplineCurveWithKnots from {:?}", v[0]);
+                return Err(Error::UnknownCurveType)
+            };
+            let rational = if let Entity::RationalBSplineSurface(b) = &v[1] {
+                b
+            } else {
+                warn!("Could not get RationalBSplineCurve from {:?}", v[1]);
+                return Err(Error::UnknownCurveType)
+            };
 
             // TODO: make KnotVector::from_multiplicies accept iterators?
             let u_knots: Vec<f64> = bspline.u_knots.iter().map(|k| k.0).collect();
@@ -1050,11 +1035,19 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
             );
             Curve::BSplineCurveWithKnots(SampledCurve::new(curve))
         },
-        Entity::ComplexEntity(v) => {
-            let bspline: &BSplineCurveWithKnots_ =
-                complex_entity_member(v, "BSplineCurveWithKnots")?;
-            let rational: &RationalBSplineCurve_ =
-                complex_entity_member(v, "RationalBSplineCurve")?;
+        Entity::ComplexEntity(v) if v.len() == 2 => {
+            let bspline = if let Entity::BSplineCurveWithKnots(b) = &v[0] {
+                b
+            } else {
+                warn!("Could not get BSplineCurveWithKnots from {:?}", v[0]);
+                return Err(Error::UnknownCurveType)
+            };
+            let rational = if let Entity::RationalBSplineCurve(b) = &v[1] {
+                b
+            } else {
+                warn!("Could not get RationalBSplineCurve from {:?}", v[1]);
+                return Err(Error::UnknownCurveType)
+            };
             let knots: Vec<f64> = bspline.knots.iter().map(|k| k.0).collect();
             let multiplicities: Vec<usize> = bspline.knot_multiplicities.iter()
                 .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative curve multiplicity")))
