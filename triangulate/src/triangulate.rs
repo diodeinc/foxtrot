@@ -136,6 +136,116 @@ fn bind_representation_meshes<'a>(
     to_mesh
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct TransformBindingStats {
+    roots: usize,
+    items: usize,
+    bindings: usize,
+    transformed_bindings: usize,
+    transform_signal: f64,
+}
+
+fn matrix_is_effectively_identity(mat: &DMat4) -> bool {
+    const EPS: f64 = 1e-9;
+
+    for row in 0..4 {
+        for col in 0..4 {
+            let expected = if row == col { 1.0 } else { 0.0 };
+            if (mat[(row, col)] - expected).abs() > EPS {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn matrix_transform_signal(mat: &DMat4) -> f64 {
+    let translation = (mat[(0, 3)].powi(2) + mat[(1, 3)].powi(2) + mat[(2, 3)].powi(2)).sqrt();
+    let linear_delta = (0..3)
+        .flat_map(|row| (0..3).map(move |col| (row, col)))
+        .map(|(row, col)| {
+            let expected = if row == col { 1.0 } else { 0.0 };
+            (mat[(row, col)] - expected).abs()
+        })
+        .sum::<f64>();
+    translation + linear_delta
+}
+
+fn summarize_bindings<'a>(
+    transform_stack: &TransformStack<'a>,
+    to_mesh: &HashMap<RepresentationItem<'a>, Vec<DMat4>>,
+) -> TransformBindingStats {
+    let roots = transform_stack_roots(transform_stack).len();
+    let mut stats = TransformBindingStats {
+        roots,
+        items: to_mesh.len(),
+        ..Default::default()
+    };
+    for mats in to_mesh.values() {
+        stats.bindings += mats.len();
+        for mat in mats {
+            if !matrix_is_effectively_identity(mat) {
+                stats.transformed_bindings += 1;
+                stats.transform_signal += matrix_transform_signal(mat);
+            }
+        }
+    }
+    stats
+}
+
+fn prefer_flipped_transform_stack(
+    forward: &TransformBindingStats,
+    flipped: &TransformBindingStats,
+) -> bool {
+    if forward.bindings == 0 {
+        return flipped.bindings > 0;
+    }
+    if flipped.bindings == 0 {
+        return false;
+    }
+    if flipped.transformed_bindings != forward.transformed_bindings {
+        return flipped.transformed_bindings > forward.transformed_bindings;
+    }
+    if (flipped.transform_signal - forward.transform_signal).abs() > 1e-6 {
+        return flipped.transform_signal > forward.transform_signal;
+    }
+    if flipped.items != forward.items {
+        return flipped.items > forward.items;
+    }
+    flipped.roots < forward.roots
+}
+
+fn choose_transform_bindings<'a>(
+    s: &'a StepFile,
+    shape_rep_relationship: &HashMap<Representation<'a>, Vec<Representation<'a>>>,
+) -> HashMap<RepresentationItem<'a>, Vec<DMat4>> {
+    let forward_stack = build_transform_stack(s, false);
+    let forward = bind_representation_meshes(s, &forward_stack, shape_rep_relationship);
+    let forward_stats = summarize_bindings(&forward_stack, &forward);
+
+    if forward_stats.roots <= 1 && forward_stats.bindings > 0 {
+        return forward;
+    }
+
+    let flipped_stack = build_transform_stack(s, true);
+    let flipped = bind_representation_meshes(s, &flipped_stack, shape_rep_relationship);
+    let flipped_stats = summarize_bindings(&flipped_stack, &flipped);
+
+    if prefer_flipped_transform_stack(&forward_stats, &flipped_stats) {
+        info!(
+            "Flipping transform stack after evaluating both directions: forward={:?}, flipped={:?}",
+            forward_stats, flipped_stats
+        );
+        flipped
+    } else {
+        info!(
+            "Keeping forward transform stack after evaluating both directions: forward={:?}, flipped={:?}",
+            forward_stats, flipped_stats
+        );
+        forward
+    }
+}
+
 fn complex_entity_member<'a, T: FromEntity<'a>>(
     members: &'a [Entity<'a>],
     name: &'static str,
@@ -352,13 +462,7 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
         shape_rep_relationship.entry(r1).or_default().push(r2);
     }
 
-    let transform_stack = build_transform_stack(s, false);
-    let mut to_mesh = bind_representation_meshes(s, &transform_stack, &shape_rep_relationship);
-    if to_mesh.is_empty() {
-        info!("Flipping transform stack after empty initial binding");
-        let flipped = build_transform_stack(s, true);
-        to_mesh = bind_representation_meshes(s, &flipped, &shape_rep_relationship);
-    }
+    let mut to_mesh = choose_transform_bindings(s, &shape_rep_relationship);
     // If there are items in breps that aren't attached to a transformation
     // chain, then draw them individually (with an identity matrix)
     if to_mesh.is_empty() {
@@ -1179,5 +1283,48 @@ fn resolve_crossing_edges(
         let (c, d) = edges[j];
         edges[j] = (c, new_idx);
         edges.push((new_idx, d));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{prefer_flipped_transform_stack, TransformBindingStats};
+
+    #[test]
+    fn prefers_orientation_with_more_transformed_bindings() {
+        let forward = TransformBindingStats {
+            roots: 2,
+            items: 15,
+            bindings: 15,
+            transformed_bindings: 0,
+            transform_signal: 0.0,
+        };
+        let flipped = TransformBindingStats {
+            roots: 1,
+            items: 15,
+            bindings: 15,
+            transformed_bindings: 15,
+            transform_signal: 420.0,
+        };
+        assert!(prefer_flipped_transform_stack(&forward, &flipped));
+    }
+
+    #[test]
+    fn keeps_forward_when_flipped_loses_coverage() {
+        let forward = TransformBindingStats {
+            roots: 2,
+            items: 12,
+            bindings: 12,
+            transformed_bindings: 12,
+            transform_signal: 180.0,
+        };
+        let flipped = TransformBindingStats {
+            roots: 1,
+            items: 8,
+            bindings: 8,
+            transformed_bindings: 8,
+            transform_signal: 120.0,
+        };
+        assert!(!prefer_flipped_transform_stack(&forward, &flipped));
     }
 }
