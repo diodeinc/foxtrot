@@ -871,6 +871,116 @@ fn advanced_face(
             }
         }
     });
+    // If the CDT failed with a non-recoverable error, try rotating the 2D
+    // coordinates by a small angle to break near-degenerate configurations.
+    let should_retry_rotated = matches!(&result,
+        Ok(Err(cdt::Error::CrossingFixedEdge))
+        | Ok(Err(cdt::Error::WedgeEscape))
+        | Ok(Err(cdt::Error::HalfEdgeInvariant))
+    );
+    let result = if should_retry_rotated {
+        // Try multiple rotation angles to find one that works
+        let angles = [0.123_f64, 0.347, 0.789, 1.234];
+        let mut best_result = None;
+        for &angle in &angles {
+        warn!("face {}: CDT failed, retrying with rotation angle {:.3}", face_id, angle);
+        let (sin_a, cos_a) = angle.sin_cos();
+        let mut rotated_pts = pts.clone();
+        for p in rotated_pts.iter_mut() {
+            let (x, y) = *p;
+            p.0 = x * cos_a - y * sin_a;
+            p.1 = x * sin_a + y * cos_a;
+        }
+        let mut rotated_edges = edges.clone();
+        let rot_boundary = rotated_pts.len();
+        dedup_close_points(&mut rotated_pts, &mut rotated_edges, rot_boundary);
+        // Resolve crossing edges in rotated coordinates.  Rotation can
+        // turn previously-parallel edges into crossing edges.  We can't
+        // add new 3D vertices (no access to verts here), so we just
+        // remove the shorter edge in each crossing pair.
+        remove_crossing_edges(&rotated_pts, &mut rotated_edges);
+        // Also resolve T-intersections in rotated coordinates
+        {
+            let diag = {
+                let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
+                let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
+                for &(x, y) in rotated_pts.iter() {
+                    xmin = xmin.min(x); xmax = xmax.max(x);
+                    ymin = ymin.min(y); ymax = ymax.max(y);
+                }
+                ((xmax - xmin).powi(2) + (ymax - ymin).powi(2)).sqrt()
+            };
+            let t_eps = if diag > 1e-15 { diag * 1e-7 } else { 1e-12 };
+            for _ in 0..200 {
+                let mut found = None;
+                'outer_rot: for ei in 0..rotated_edges.len() {
+                    let (a, b) = rotated_edges[ei];
+                    for pi in 0..rot_boundary {
+                        if pi == a || pi == b { continue; }
+                        if let Some(t) = point_near_segment(
+                            rotated_pts[pi], rotated_pts[a], rotated_pts[b], t_eps
+                        ) {
+                            found = Some((ei, pi, t));
+                            break 'outer_rot;
+                        }
+                    }
+                }
+                match found {
+                    Some((ei, pi, _)) => {
+                        let (a, b) = rotated_edges[ei];
+                        rotated_edges[ei] = (a, pi);
+                        rotated_edges.push((pi, b));
+                    },
+                    None => break,
+                }
+            }
+            rotated_edges.retain(|e| e.0 != e.1);
+            let mut seen = std::collections::HashSet::new();
+            rotated_edges.retain(|e| {
+                let c = if e.0 <= e.1 { (e.0, e.1) } else { (e.1, e.0) };
+                seen.insert(c)
+            });
+        }
+        let retry_result = std::panic::catch_unwind(|| {
+            let mut pts = rotated_pts;
+            let mut edges = rotated_edges;
+            let max_retries = n_steiner + 1;
+            let mut retries = 0usize;
+            loop {
+                let mut t = match cdt::Triangulation::new_with_edges(&pts, &edges) {
+                    Err(e) => break Err(e),
+                    Ok(t) => t,
+                };
+                match t.run() {
+                    Ok(()) => break Ok(t),
+                    Err(cdt::Error::PointOnFixedEdge(p)) if p >= bonus_points => {
+                        retries += 1;
+                        if retries > max_retries { break Err(cdt::Error::PointOnFixedEdge(p)); }
+                        pts[p] = pts[0];
+                        continue;
+                    },
+                    Err(e) => break Err(e),
+                }
+            }
+        });
+        match &retry_result {
+            Ok(Ok(_)) => {
+                info!("face {}: rotation retry succeeded (angle={:.3})!", face_id, angle);
+                best_result = Some(retry_result);
+                break;
+            },
+            Ok(Err(ref e)) => {
+                warn!("face {}: rotation angle {:.3} failed ({:?})", face_id, angle, e);
+            },
+            Err(_) => {
+                warn!("face {}: rotation angle {:.3} panicked", face_id, angle);
+            }
+        }
+        } // end for angle
+        best_result.unwrap_or(result)
+    } else {
+        result
+    };
     match result {
         Ok(Ok(t)) => {
             for (a, b, c) in t.triangles() {
@@ -1297,71 +1407,51 @@ fn dedup_close_points(
     edges.retain(|e| e.0 != e.1);
 }
 
-/// Detect boundary points that are nearly collinear with a non-adjacent edge
-/// and perturb them slightly perpendicular to that edge.  This prevents the
-/// CDT's exact predicates from seeing exact collinearity, which causes
-/// PointOnFixedEdge or HalfEdgeInvariant errors.
-fn perturb_collinear_points(
-    pts: &mut Vec<(f64, f64)>,
-    edges: &[(usize, usize)],
+/// Remove crossing edges by dropping the shorter edge in each crossing pair.
+/// This is a lossy fallback used when we can't add new 3D vertices (e.g., in
+/// the rotation retry path).
+fn remove_crossing_edges(
+    pts: &[(f64, f64)],
+    edges: &mut Vec<(usize, usize)>,
 ) {
-    let n = pts.len();
-    if n < 4 { return; }
-
-    // Compute bounding box diagonal for relative perturbation size
-    let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
-    let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
-    for &(x, y) in pts.iter() {
-        xmin = xmin.min(x); xmax = xmax.max(x);
-        ymin = ymin.min(y); ymax = ymax.max(y);
-    }
-    let diag = ((xmax - xmin).powi(2) + (ymax - ymin).powi(2)).sqrt();
-    if diag < 1e-15 { return; }
-
-    // Collinearity threshold: points within this distance of an edge line
-    // are considered collinear.  Use a generous threshold to catch cases
-    // where CDT exact predicates detect collinearity that float comparison misses.
-    let col_eps = diag * 1e-6;
-    // Perturbation magnitude: small enough not to change geometry visually,
-    // large enough to break exact collinearity
-    let perturb_mag = diag * 1e-6;
-    let mut perturb_count = 0usize;
-
-    for ei in 0..edges.len() {
-        let (a, b) = edges[ei];
-        let ab = (pts[b].0 - pts[a].0, pts[b].1 - pts[a].1);
-        let ab_len2 = ab.0 * ab.0 + ab.1 * ab.1;
-        if ab_len2 < 1e-30 { continue; }
-        let ab_len = ab_len2.sqrt();
-
-        // Normal to the edge (perpendicular direction)
-        let normal = (-ab.1 / ab_len, ab.0 / ab_len);
-
-        for pi in 0..n {
-            if pi == a || pi == b { continue; }
-
-            let ap = (pts[pi].0 - pts[a].0, pts[pi].1 - pts[a].1);
-            let t = (ap.0 * ab.0 + ap.1 * ab.1) / ab_len2;
-            // Only care about points that project onto the interior of the edge
-            if t <= 0.005 || t >= 0.995 { continue; }
-
-            let cross = (ap.0 * ab.1 - ap.1 * ab.0).abs();
-            let dist = cross / ab_len;
-
-            if dist < col_eps {
-                // Point is nearly collinear — perturb it perpendicular to the
-                // edge by an amount that varies with its position along the
-                // edge, so multiple collinear points don't end up on the same
-                // new line.
-                let scale = perturb_mag * (1.0 + t * 0.5);
-                pts[pi].0 += normal.0 * scale;
-                pts[pi].1 += normal.1 * scale;
-                perturb_count += 1;
+    for _ in 0..500 {
+        let mut found = None;
+        'outer_rc: for i in 0..edges.len() {
+            for j in (i + 1)..edges.len() {
+                if edges[i].0 == edges[j].0 || edges[i].0 == edges[j].1
+                || edges[i].1 == edges[j].0 || edges[i].1 == edges[j].1 {
+                    continue;
+                }
+                if segment_intersection_params(
+                    pts[edges[i].0], pts[edges[i].1],
+                    pts[edges[j].0], pts[edges[j].1],
+                ).is_some() {
+                    found = Some((i, j));
+                    break 'outer_rc;
+                }
             }
         }
-    }
-    if perturb_count > 0 {
-        info!("perturbed {} nearly-collinear points (diag={:.4e})", perturb_count, diag);
+        match found {
+            Some((i, j)) => {
+                // Remove the shorter edge
+                let len_i = {
+                    let (ax, ay) = pts[edges[i].0];
+                    let (bx, by) = pts[edges[i].1];
+                    (bx - ax).powi(2) + (by - ay).powi(2)
+                };
+                let len_j = {
+                    let (ax, ay) = pts[edges[j].0];
+                    let (bx, by) = pts[edges[j].1];
+                    (bx - ax).powi(2) + (by - ay).powi(2)
+                };
+                if len_i < len_j {
+                    edges.remove(i);
+                } else {
+                    edges.remove(j);
+                }
+            },
+            None => break,
+        }
     }
 }
 
@@ -1445,11 +1535,13 @@ fn resolve_crossing_edges(
     // Phase 2: resolve T-intersections where a vertex lies very close to
     // an edge but is not an endpoint.  The CDT uses exact predicates, so
     // even tiny proximity can cause CrossingFixedEdge.
-    for _ in 0..200 {
+    // Check ALL points (including those added by Phase 1) against all edges.
+    let total_points = pts.len();
+    for _ in 0..500 {
         let mut found = None;
         'outer2: for ei in 0..edges.len() {
             let (a, b) = edges[ei];
-            for pi in 0..boundary_count {
+            for pi in 0..total_points {
                 if pi == a || pi == b {
                     continue;
                 }
@@ -1472,4 +1564,13 @@ fn resolve_crossing_edges(
 
     // Remove degenerate edges after all splits
     edges.retain(|e| e.0 != e.1);
+
+    // Remove duplicate edges (same endpoints in either order)
+    {
+        let mut seen = std::collections::HashSet::new();
+        edges.retain(|e| {
+            let canonical = if e.0 <= e.1 { (e.0, e.1) } else { (e.1, e.0) };
+            seen.insert(canonical)
+        });
+    }
 }
