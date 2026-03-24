@@ -1000,12 +1000,14 @@ impl Triangulation {
                         ContourData::Hull(h, edge_bc.sign)
                     } else {
                         ContourData::Buddy(edge_bc.buddy)
-                    }).expect("Failed to create fixed edge");
+                    }).ok_or(Error::HalfEdgeInvariant)?;
 
                 // This better have terminated the triangulation of
                 // the upper contour with a dst-src edge
-                assert!(self.half.edge(e_dst_src).dst == src);
-                assert!(self.half.edge(e_dst_src).src == dst);
+                if self.half.edge(e_dst_src).dst != src
+                    || self.half.edge(e_dst_src).src != dst {
+                    return Err(Error::HalfEdgeInvariant);
+                }
 
                 // The other contour will finish up with the other
                 // half of the fixed edge as its buddy.  This edge
@@ -1014,17 +1016,21 @@ impl Triangulation {
                 let e_src_dst = steps_right.push(self, c,
                     if edge_ca.buddy == EMPTY_EDGE {
                         let h = self.hull.index_of(edge_ca.dst);
-                        assert!(self.hull.edge(h) == e_ca);
+                        if self.hull.edge(h) != e_ca {
+                            return Err(Error::HalfEdgeInvariant);
+                        }
                         ContourData::Hull(h, edge_ca.sign)
                     } else {
                         ContourData::Buddy(edge_ca.buddy)
                     })
-                    .expect("Failed to create second fixed edge");
+                    .ok_or(Error::HalfEdgeInvariant)?;
 
                 // Similarly, this better have terminated the
                 // triangulation of the lower contour.
-                assert!(self.half.edge(e_src_dst).src == src);
-                assert!(self.half.edge(e_src_dst).dst == dst);
+                if self.half.edge(e_src_dst).src != src
+                    || self.half.edge(e_src_dst).dst != dst {
+                    return Err(Error::HalfEdgeInvariant);
+                }
 
                 self.half.link(e_src_dst, e_dst_src);
                 self.half.toggle_lock_sign(e_src_dst); // locks both sides
@@ -1078,7 +1084,9 @@ impl Triangulation {
                 if edge_ca.fixed() {
                     return Err(Error::CrossingFixedEdge);
                 }
-                assert!(edge_ca.buddy != EMPTY_EDGE);
+                if edge_ca.buddy == EMPTY_EDGE {
+                    return Err(Error::HalfEdgeInvariant);
+                }
                 edge_ca.buddy
             } else {
                 // c is collinear with src→dst.  Close the contours here
@@ -1087,20 +1095,24 @@ impl Triangulation {
                 let e_c_src = steps_left.push(self, c,
                     if edge_bc.buddy == EMPTY_EDGE {
                         let h = self.hull.index_of(edge_bc.dst);
-                        assert!(self.hull.edge(h) == e_bc);
+                        if self.hull.edge(h) != e_bc {
+                            return Err(Error::HalfEdgeInvariant);
+                        }
                         ContourData::Hull(h, edge_bc.sign)
                     } else {
                         ContourData::Buddy(edge_bc.buddy)
-                    }).expect("Failed to create fixed edge at collinear split");
+                    }).ok_or(Error::HalfEdgeInvariant)?;
 
                 let e_src_c = steps_right.push(self, c,
                     if edge_ca.buddy == EMPTY_EDGE {
                         let h = self.hull.index_of(edge_ca.dst);
-                        assert!(self.hull.edge(h) == e_ca);
+                        if self.hull.edge(h) != e_ca {
+                            return Err(Error::HalfEdgeInvariant);
+                        }
                         ContourData::Hull(h, edge_ca.sign)
                     } else {
                         ContourData::Buddy(edge_ca.buddy)
-                    }).expect("Failed to create fixed edge at collinear split (right)");
+                    }).ok_or(Error::HalfEdgeInvariant)?;
 
                 self.half.link(e_src_c, e_c_src);
                 self.half.toggle_lock_sign(e_src_c);
