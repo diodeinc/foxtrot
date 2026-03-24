@@ -722,6 +722,17 @@ fn advanced_face(
     surf.add_steiner_points(&mut pts, &mut mesh.verts);
     let face_id = face.face_geometry.0;
     let n_steiner = pts.len() - bonus_points;
+    // Compute snap epsilon for boundary point splitting in error recovery
+    let snap_eps = {
+        let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
+        for &(x, y) in pts.iter().take(bonus_points) {
+            xmin = xmin.min(x); xmax = xmax.max(x);
+            ymin = ymin.min(y); ymax = ymax.max(y);
+        }
+        let diag = ((xmax - xmin).powi(2) + (ymax - ymin).powi(2)).sqrt();
+        if diag > 1e-15 { diag * 1e-7 } else { 1e-12 }
+    };
     info!("face {} cdt input: {} pts ({} boundary, {} steiner), {} edges",
           face_id, pts.len(), bonus_points, n_steiner, edges.len());
     let result = std::panic::catch_unwind(|| {
@@ -729,6 +740,7 @@ fn advanced_face(
         // SVG if this panics.  Once we're confident in never panicking, we
         // can remove this.
         let mut pts = pts.clone();
+        let mut edges = edges.clone();
         let max_retries = n_steiner + 1;
         let mut retries = 0usize;
         loop {
@@ -743,7 +755,7 @@ fn advanced_face(
                 // ignored as a duplicate)
                 Err(cdt::Error::PointOnFixedEdge(p)) if p >= bonus_points => {
                     retries += 1;
-                    info!("face {}: PointOnFixedEdge({}), retry {}/{} \
+                    info!("face {}: PointOnFixedEdge({}) (steiner), retry {}/{} \
                            ({} pts, {} edges, {} steiner)",
                            face_id, p, retries, max_retries,
                            pts.len(), edges.len(), n_steiner);
@@ -753,6 +765,64 @@ fn advanced_face(
                         break Err(cdt::Error::PointOnFixedEdge(p));
                     }
                     pts[p] = pts[0];
+                    continue;
+                },
+                // If a boundary point lies on a fixed edge, split that
+                // edge at the point.  This resolves cases where the
+                // surface lowering maps distinct 3D boundary points onto
+                // the same line in 2D.
+                Err(cdt::Error::PointOnFixedEdge(p)) if p < bonus_points => {
+                    retries += 1;
+                    info!("face {}: PointOnFixedEdge({}) (boundary), \
+                           splitting edges, retry {}/{}",
+                           face_id, p, retries, max_retries + bonus_points);
+                    if retries > max_retries + bonus_points {
+                        break Err(cdt::Error::PointOnFixedEdge(p));
+                    }
+                    // Find the edge that point p lies on and split it
+                    let mut split_done = false;
+                    let pp = pts[p];
+                    for ei in 0..edges.len() {
+                        let (a, b) = edges[ei];
+                        if a == p || b == p {
+                            continue;
+                        }
+                        if let Some(_t) = point_near_segment(
+                            pts[p], pts[a], pts[b], snap_eps,
+                        ) {
+                            edges[ei] = (a, p);
+                            edges.push((p, b));
+                            split_done = true;
+                            break;
+                        }
+                    }
+                    if !split_done {
+                        // Couldn't find the edge with normal epsilon — try a
+                        // much more generous epsilon and also relax endpoint
+                        // margin to catch nearly-collinear cases
+                        let big_eps = snap_eps * 1000.0;
+                        for ei in 0..edges.len() {
+                            let (a, b) = edges[ei];
+                            if a == p || b == p { continue; }
+                            let ab = (pts[b].0 - pts[a].0, pts[b].1 - pts[a].1);
+                            let ab_len2 = ab.0 * ab.0 + ab.1 * ab.1;
+                            if ab_len2 < 1e-30 { continue; }
+                            let ap = (pp.0 - pts[a].0, pp.1 - pts[a].1);
+                            let t = (ap.0 * ab.0 + ap.1 * ab.1) / ab_len2;
+                            if t <= 0.0 || t >= 1.0 { continue; }
+                            let cross = (ap.0 * ab.1 - ap.1 * ab.0).abs();
+                            let dist = cross / ab_len2.sqrt();
+                            if dist < big_eps {
+                                edges[ei] = (a, p);
+                                edges.push((p, b));
+                                split_done = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !split_done {
+                        break Err(cdt::Error::PointOnFixedEdge(p));
+                    }
                     continue;
                 },
                 Err(e) => {

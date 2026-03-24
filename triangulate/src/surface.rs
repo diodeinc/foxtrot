@@ -18,6 +18,9 @@ pub enum Surface {
         radius: f64,
         z_min: f64,
         z_max: f64,
+        /// True when the face covers a small angular range on the cylinder,
+        /// in which case we use theta-z lowering instead of scaled-XY.
+        narrow: bool,
     },
     Plane {
         normal: DVec3,
@@ -67,6 +70,7 @@ impl Surface {
             axis, radius, location,
             z_min: 0.0,
             z_max: 0.0,
+            narrow: false,
         })
     }
 
@@ -143,21 +147,30 @@ impl Surface {
                 Ok(DVec2::new(-xy.x, xy.y))
             },
 
-            Surface::Cylinder { mat_i, z_min, z_max, .. } => {
+            Surface::Cylinder { mat_i, z_min, z_max, narrow, .. } => {
                 let p = mat_i * p_;
-                // We convert the Z coordinates to either add or subtract from
-                // the radius, so that we maintain the right topology (instead
-                // of doing something like theta-z coordinates, which wrap
-                // around awkwardly).
-
-                // Scale from radius=1 to radius=0.5 based on Z
                 let dz = z_max - z_min;
                 if dz.abs() < EPSILON {
                     return Err(Error::InvalidGeometry("cylinder has zero height"));
                 }
-                let z = (p.z - z_min) / dz;
-                let scale = 1.0 / (1.0 + z);
-                Ok(DVec2::new(p.x * scale, p.y * scale))
+
+                if *narrow {
+                    // For narrow cylinder faces (small angular span), use
+                    // theta-z coordinates.  This avoids the degenerate case
+                    // where scaled-XY puts all points on nearly the same line.
+                    let theta = p.y.atan2(p.x);
+                    Ok(DVec2::new(theta, p.z))
+                } else {
+                    // We convert the Z coordinates to either add or subtract from
+                    // the radius, so that we maintain the right topology (instead
+                    // of doing something like theta-z coordinates, which wrap
+                    // around awkwardly).
+
+                    // Scale from radius=1 to radius=0.5 based on Z
+                    let z = (p.z - z_min) / dz;
+                    let scale = 1.0 / (1.0 + z);
+                    Ok(DVec2::new(p.x * scale, p.y * scale))
+                }
             },
             Surface::Torus { mat_i, major_radius, minor_radius, .. } => {
                 let p = mat_i * p_;
@@ -223,9 +236,11 @@ impl Surface {
             return Err(Error::InvalidGeometry("surface has no vertices"));
         }
         match self {
-            Surface::Cylinder { mat_i, z_min, z_max, .. } => {
+            Surface::Cylinder { mat_i, z_min, z_max, narrow, .. } => {
                 *z_min = std::f64::INFINITY;
                 *z_max = -std::f64::INFINITY;
+                let mut angle_min = std::f64::INFINITY;
+                let mut angle_max = -std::f64::INFINITY;
                 for v in verts {
                     let p = (*mat_i) * DVec4::new(v.pos.x, v.pos.y, v.pos.z, 1.0);
                     if p.z < *z_min {
@@ -234,7 +249,15 @@ impl Surface {
                     if p.z > *z_max {
                         *z_max = p.z;
                     }
+                    let angle = p.y.atan2(p.x);
+                    angle_min = angle_min.min(angle);
+                    angle_max = angle_max.max(angle);
                 }
+                // If the face subtends less than ~30 degrees, the scaled-XY
+                // projection degenerates (points become nearly collinear).
+                // Switch to theta-z lowering which works well for narrow strips.
+                let angular_span = angle_max - angle_min;
+                *narrow = angular_span < PI / 6.0;
             },
             Surface::Sphere { mat, mat_i, location, .. } => {
                 let ref_direction = (verts[0].pos - *location).normalize();
