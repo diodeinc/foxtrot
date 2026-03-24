@@ -718,6 +718,40 @@ fn advanced_face(
     // deduplicated), then retry.
     let mut pts = surf.lower_verts(&mut mesh.verts[v_start..])?;
     resolve_crossing_edges(&mut pts, &mut edges, &mut mesh.verts, v_start);
+    // Normalize extreme aspect ratios to prevent CDT issues with thin faces.
+    // When one axis is much shorter than the other, points become nearly
+    // collinear and the CDT's exact predicates can flag false crossings.
+    let aspect_scale = {
+        let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
+        for &(x, y) in pts.iter() {
+            xmin = xmin.min(x); xmax = xmax.max(x);
+            ymin = ymin.min(y); ymax = ymax.max(y);
+        }
+        let dx = xmax - xmin;
+        let dy = ymax - ymin;
+        if dx > 1e-15 && dy > 1e-15 {
+            let ratio = dx / dy;
+            if ratio < 0.04 {
+                // X axis is extremely thin — scale it up to equalize.
+                // Cap the scale to avoid over-amplifying noise.
+                let target_ratio = 0.5;
+                let scale = (target_ratio * dy / dx).min(100.0);
+                for p in pts.iter_mut() { p.0 *= scale; }
+                Some(('x', scale))
+            } else if ratio > 25.0 {
+                // Y axis is extremely thin — scale it up to equalize
+                let target_ratio = 2.0;
+                let scale = (target_ratio * dx / dy).min(100.0);
+                for p in pts.iter_mut() { p.1 *= scale; }
+                Some(('y', scale))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
     let bonus_points = pts.len();
     surf.add_steiner_points(&mut pts, &mut mesh.verts);
     let face_id = face.face_geometry.0;
@@ -1261,6 +1295,74 @@ fn dedup_close_points(
 
     // Remove degenerate edges (where src == dst after remapping)
     edges.retain(|e| e.0 != e.1);
+}
+
+/// Detect boundary points that are nearly collinear with a non-adjacent edge
+/// and perturb them slightly perpendicular to that edge.  This prevents the
+/// CDT's exact predicates from seeing exact collinearity, which causes
+/// PointOnFixedEdge or HalfEdgeInvariant errors.
+fn perturb_collinear_points(
+    pts: &mut Vec<(f64, f64)>,
+    edges: &[(usize, usize)],
+) {
+    let n = pts.len();
+    if n < 4 { return; }
+
+    // Compute bounding box diagonal for relative perturbation size
+    let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &(x, y) in pts.iter() {
+        xmin = xmin.min(x); xmax = xmax.max(x);
+        ymin = ymin.min(y); ymax = ymax.max(y);
+    }
+    let diag = ((xmax - xmin).powi(2) + (ymax - ymin).powi(2)).sqrt();
+    if diag < 1e-15 { return; }
+
+    // Collinearity threshold: points within this distance of an edge line
+    // are considered collinear.  Use a generous threshold to catch cases
+    // where CDT exact predicates detect collinearity that float comparison misses.
+    let col_eps = diag * 1e-6;
+    // Perturbation magnitude: small enough not to change geometry visually,
+    // large enough to break exact collinearity
+    let perturb_mag = diag * 1e-6;
+    let mut perturb_count = 0usize;
+
+    for ei in 0..edges.len() {
+        let (a, b) = edges[ei];
+        let ab = (pts[b].0 - pts[a].0, pts[b].1 - pts[a].1);
+        let ab_len2 = ab.0 * ab.0 + ab.1 * ab.1;
+        if ab_len2 < 1e-30 { continue; }
+        let ab_len = ab_len2.sqrt();
+
+        // Normal to the edge (perpendicular direction)
+        let normal = (-ab.1 / ab_len, ab.0 / ab_len);
+
+        for pi in 0..n {
+            if pi == a || pi == b { continue; }
+
+            let ap = (pts[pi].0 - pts[a].0, pts[pi].1 - pts[a].1);
+            let t = (ap.0 * ab.0 + ap.1 * ab.1) / ab_len2;
+            // Only care about points that project onto the interior of the edge
+            if t <= 0.005 || t >= 0.995 { continue; }
+
+            let cross = (ap.0 * ab.1 - ap.1 * ab.0).abs();
+            let dist = cross / ab_len;
+
+            if dist < col_eps {
+                // Point is nearly collinear — perturb it perpendicular to the
+                // edge by an amount that varies with its position along the
+                // edge, so multiple collinear points don't end up on the same
+                // new line.
+                let scale = perturb_mag * (1.0 + t * 0.5);
+                pts[pi].0 += normal.0 * scale;
+                pts[pi].1 += normal.1 * scale;
+                perturb_count += 1;
+            }
+        }
+    }
+    if perturb_count > 0 {
+        info!("perturbed {} nearly-collinear points (diag={:.4e})", perturb_count, diag);
+    }
 }
 
 /// Pre-process edges to resolve any crossings before feeding them to the CDT.
