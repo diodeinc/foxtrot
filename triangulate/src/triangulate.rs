@@ -26,56 +26,250 @@ fn save_debug_svg_dir() -> Option<String> {
     std::env::var("SAVE_DEBUG_SVGS").ok()
 }
 
-/// `TransformStack` is a mapping of representations to transformed children.
-type TransformStack<'a> =
-    HashMap<Representation<'a>, Vec<(Representation<'a>, DMat4)>>;
-fn build_transform_stack<'a>(s: &'a StepFile, flip: bool) -> TransformStack<'a> {
-    // Store a map of parent -> (child, transform)
-    let mut transform_stack: HashMap<_, Vec<_>> = HashMap::new();
-    for r in s.0.iter()
-        .filter_map(|e|
-            RepresentationRelationshipWithTransformation_::try_from_entity(e))
-    {
-        let (a, b) = if flip {
-            (r.rep_2, r.rep_1)
-        } else {
-            (r.rep_1, r.rep_2)
+#[derive(Copy, Clone, Debug)]
+struct OccurrenceInstance<'a> {
+    child_product: ProductDefinition<'a>,
+    parent_rep: Representation<'a>,
+    child_rep: Representation<'a>,
+    transform: DMat4,
+}
+
+fn transformed_representation_relationship<'a>(
+    s: &'a StepFile,
+    id: ShapeRepresentationRelationship<'a>,
+) -> Option<&'a RepresentationRelationshipWithTransformation_<'a>> {
+    match &s.0[id.0] {
+        Entity::RepresentationRelationshipWithTransformation(rel) => Some(rel),
+        Entity::ComplexEntity(subs) => subs.iter()
+            .find_map(|sub| RepresentationRelationshipWithTransformation_::try_from_entity(sub)),
+        _ => None,
+    }
+}
+
+fn collect_shape_instances<'a>(
+    s: &'a StepFile,
+    rep_instances: &HashMap<Representation<'a>, Vec<DMat4>>,
+    shape_rep_relationship: &HashMap<Representation<'a>, Vec<Representation<'a>>>,
+) -> HashMap<RepresentationItem<'a>, Vec<DMat4>> {
+    let mut todo: Vec<_> = rep_instances
+        .iter()
+        .flat_map(|(rep, mats)| mats.iter().copied().map(move |mat| (*rep, mat)))
+        .collect();
+    let mut to_mesh: HashMap<RepresentationItem<'a>, Vec<DMat4>> = HashMap::new();
+
+    while let Some((id, mat)) = todo.pop() {
+        if let Some(children) = shape_rep_relationship.get(&id) {
+            for child in children {
+                todo.push((*child, mat));
+            }
+        }
+        // Bind this transform to the RepresentationItem, which is
+        // either a ManifoldSolidBrep or a ShellBasedSurfaceModel
+        let items = match &s[id] {
+            Entity::AdvancedBrepShapeRepresentation(b) => &b.items,
+            Entity::ShapeRepresentation(b) => &b.items,
+            Entity::ManifoldSurfaceShapeRepresentation(b) => &b.items,
+            e => {
+                warn!("Skipping {:?} (not a supported representation)", e);
+                continue;
+            },
         };
-        let mut mat = match item_defined_transformation(s, r.transformation_operator.cast()) {
+
+        for m in items.iter() {
+            match &s[*m] {
+                Entity::ManifoldSolidBrep(_)
+                | Entity::BrepWithVoids(_)
+                | Entity::ShellBasedSurfaceModel(_) => {
+                    to_mesh.entry(*m).or_default().push(mat);
+                }
+                Entity::Axis2Placement3d(_) | Entity::MappedItem(_) => (),
+                e => warn!("Skipping {:?}", e),
+            }
+        }
+    }
+
+    if to_mesh.is_empty() {
+        s.0.iter()
+            .enumerate()
+            .filter(|(_i, e)|
+                match e {
+                    Entity::ManifoldSolidBrep(_)
+                    | Entity::BrepWithVoids(_)
+                    | Entity::ShellBasedSurfaceModel(_) => true,
+                    _ => false,
+                }
+            )
+            .map(|(i, _e)| Id::new(i))
+            .for_each(|i| {
+                to_mesh.entry(i).or_default().push(DMat4::identity());
+            });
+    }
+
+    to_mesh
+}
+
+fn collect_product_roots(s: &StepFile) -> HashSet<usize> {
+    let all_products: HashSet<_> = s.0.iter()
+        .enumerate()
+        .filter(|(_i, e)| matches!(e, Entity::ProductDefinition(_)))
+        .map(|(i, _)| i)
+        .collect();
+    let child_products: HashSet<_> = s.0.iter()
+        .filter_map(|e| NextAssemblyUsageOccurrence_::try_from_entity(e))
+        .map(|rel| rel.related_product_definition.0)
+        .collect();
+    all_products.into_iter()
+        .filter(|idx| !child_products.contains(idx))
+        .collect()
+}
+
+fn collect_product_representations<'a>(
+    s: &'a StepFile,
+) -> HashMap<ProductDefinition<'a>, Vec<Representation<'a>>> {
+    let mut reps: HashMap<ProductDefinition<'a>, Vec<Representation<'a>>> = HashMap::new();
+    for sdr in s.0.iter()
+        .filter_map(|e| ShapeDefinitionRepresentation_::try_from_entity(e))
+    {
+        let Some(pds) = s.entity::<ProductDefinitionShape_>(sdr.definition.cast()) else {
+            continue;
+        };
+        let Some(_product) = s.entity::<ProductDefinition_>(pds.definition.cast()) else {
+            continue;
+        };
+        reps.entry(pds.definition.cast())
+            .or_default()
+            .push(sdr.used_representation);
+    }
+
+    for reps in reps.values_mut() {
+        reps.sort_by_key(|rep| rep.0);
+        reps.dedup();
+    }
+    reps
+}
+
+fn collect_occurrence_instances<'a>(
+    s: &'a StepFile,
+    product_reps: &HashMap<ProductDefinition<'a>, Vec<Representation<'a>>>,
+) -> HashMap<ProductDefinition<'a>, Vec<OccurrenceInstance<'a>>> {
+    let occurrence_shape_defs: HashMap<_, _> = s.0.iter()
+        .enumerate()
+        .filter_map(|(idx, e)| {
+            let pds = ProductDefinitionShape_::try_from_entity(e)?;
+            s.entity::<NextAssemblyUsageOccurrence_>(pds.definition.cast())
+                .map(|occ| (Id::new(idx), occ))
+        })
+        .collect();
+
+    let mut occurrences: HashMap<ProductDefinition<'a>, Vec<OccurrenceInstance<'a>>> = HashMap::new();
+    for cdsr in s.0.iter()
+        .filter_map(|e| ContextDependentShapeRepresentation_::try_from_entity(e))
+    {
+        let Some(occ) = occurrence_shape_defs.get(&cdsr.represented_product_relation) else {
+            continue;
+        };
+        let Some(rel) = transformed_representation_relationship(s, cdsr.representation_relation) else {
+            warn!(
+                "Skipping context-dependent shape representation {:?}: expected transformed representation relationship",
+                cdsr
+            );
+            continue;
+        };
+        let transform = match item_defined_transformation(s, rel.transformation_operator.cast()) {
             Ok(mat) => mat,
             Err(err) => {
-                warn!("Skipping transform relationship {:?}: {}", r, err);
+                warn!("Skipping transform relationship {:?}: {}", rel, err);
                 continue;
             }
         };
-        if flip {
-            mat = match mat.try_inverse() {
-                Some(inv) => inv,
-                None => {
-                    warn!("Skipping non-invertible transform relationship {:?}", r);
-                    continue;
-                }
-            };
-        }
 
-        transform_stack.entry(b)
+        let parent_reps = product_reps
+            .get(&occ.relating_product_definition)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let child_reps = product_reps
+            .get(&occ.related_product_definition)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+
+        let rep1_is_parent = parent_reps.contains(&rel.rep_1);
+        let rep2_is_parent = parent_reps.contains(&rel.rep_2);
+        let rep1_is_child = child_reps.contains(&rel.rep_1);
+        let rep2_is_child = child_reps.contains(&rel.rep_2);
+
+        let oriented = if rep1_is_child && rep2_is_parent {
+            Some((rel.rep_2, rel.rep_1, transform))
+        } else if rep1_is_parent && rep2_is_child {
+            let Some(inv) = transform.try_inverse() else {
+                warn!("Skipping non-invertible transform relationship {:?}", rel);
+                continue;
+            };
+            Some((rel.rep_1, rel.rep_2, inv))
+        } else {
+            None
+        };
+
+        let Some((parent_rep, child_rep, transform)) = oriented else {
+            warn!(
+                "Skipping occurrence parent_product=#{} child_product=#{} rel reps (#{} -> #{}) due to ambiguous ownership",
+                occ.relating_product_definition.0,
+                occ.related_product_definition.0,
+                rel.rep_1.0,
+                rel.rep_2.0,
+            );
+            continue;
+        };
+
+        occurrences.entry(occ.relating_product_definition)
             .or_default()
-            .push((a, mat));
+            .push(OccurrenceInstance {
+                child_product: occ.related_product_definition,
+                parent_rep,
+                child_rep,
+                transform,
+            });
     }
-    transform_stack
+    occurrences
 }
 
-fn transform_stack_roots<'a>(transform_stack: &TransformStack<'a>) -> Vec<Representation<'a>> {
-    let children: HashSet<_> = transform_stack
-        .values()
-        .flat_map(|v| v.iter())
-        .map(|v| v.0)
-        .collect();
-    transform_stack
-        .keys()
-        .filter(|k| !children.contains(k))
-        .copied()
-        .collect()
+fn collect_rep_instances<'a>(s: &'a StepFile) -> HashMap<Representation<'a>, Vec<DMat4>> {
+    let product_roots = collect_product_roots(s);
+    let product_reps = collect_product_representations(s);
+    let occurrences = collect_occurrence_instances(s, &product_reps);
+
+    let mut todo = Vec::new();
+    for product_idx in product_roots {
+        let product = Id::new(product_idx);
+        if let Some(reps) = product_reps.get(&product) {
+            todo.extend(
+                reps.iter()
+                    .copied()
+                    .map(|rep| (product, rep, DMat4::identity()))
+            );
+        }
+    }
+
+    let mut rep_instances: HashMap<Representation<'a>, Vec<DMat4>> = HashMap::new();
+    while let Some((product, rep, mat)) = todo.pop() {
+        rep_instances.entry(rep).or_default().push(mat);
+        if let Some(children) = occurrences.get(&product) {
+            for occ in children {
+                if occ.parent_rep != rep {
+                    continue;
+                }
+                todo.push((
+                    occ.child_product,
+                    occ.child_rep,
+                    mat * occ.transform,
+                ));
+            }
+        }
+    }
+
+    for mats in rep_instances.values_mut() {
+        mats.shrink_to_fit();
+    }
+    rep_instances
 }
 
 /// Convert an SiUnit with name Metre to a mm scale factor.
@@ -273,25 +467,6 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
             })
         .collect();
 
-    // Store a map of parent -> (child, transform)
-    let mut transform_stack = build_transform_stack(s, false);
-    let mut roots = transform_stack_roots(&transform_stack);
-    // The transformation graph isn't directional (because STEP is a Good File
-    // Format), so if it's got more than one root, assume it's backwards.  We
-    // are assuming that directions in the graph are consistent within the file,
-    // until we find a counterexample.
-    if roots.len() > 1 {
-        info!("Flipping transform stack");
-        transform_stack = build_transform_stack(s, true);
-        roots = transform_stack_roots(&transform_stack);
-    }
-    let mut todo: Vec<_> = roots.into_iter()
-        .map(|v| (v, DMat4::identity()))
-        .collect();
-    if todo.len() > 1 {
-        warn!("Transformation stack has more than one root!");
-    }
-
     // Store a map of ShapeRepresentationRelationships, which some models
     // use to map from axes to specific instances
     let mut shape_rep_relationship: HashMap<Id<_>, Vec<Id<_>>> = HashMap::new();
@@ -302,56 +477,17 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
         shape_rep_relationship.entry(r1).or_default().push(r2);
     }
 
-    let mut to_mesh: HashMap<Id<_>, Vec<_>> = HashMap::new();
-    while let Some((id, mat)) = todo.pop() {
-        for child in shape_rep_relationship.get(&id).unwrap_or(&vec![]) {
-            todo.push((*child, mat));
-        }
-        if let Some(children) = transform_stack.get(&id) {
-            for (child, next_mat) in children {
-                todo.push((*child, mat * next_mat));
-            }
-        } else {
-            // Bind this transform to the RepresentationItem, which is
-            // either a ManifoldSolidBrep or a ShellBasedSurfaceModel
-            let items = match &s[id] {
-                Entity::AdvancedBrepShapeRepresentation(b) => &b.items,
-                Entity::ShapeRepresentation(b) => &b.items,
-                Entity::ManifoldSurfaceShapeRepresentation(b) => &b.items,
-                e => {
-                    warn!("Skipping {:?} (not a supported representation)", e);
-                    continue;
-                },
-            };
-
-            for m in items.iter() {
-                match &s[*m] {
-                    Entity::ManifoldSolidBrep(_)
-                    | Entity::BrepWithVoids(_)
-                    | Entity::ShellBasedSurfaceModel(_) =>
-                        to_mesh.entry(*m).or_default().push(mat),
-                    Entity::Axis2Placement3d(_) => (),
-                    e => warn!("Skipping {:?}", e),
-                }
-            }
-        }
+    let rep_instances = collect_rep_instances(s);
+    if rep_instances.is_empty() {
+        warn!("No semantic representation instances found");
+    } else {
+        info!("Semantic representation instances: {}", rep_instances.len());
     }
-    // If there are items in breps that aren't attached to a transformation
-    // chain, then draw them individually (with an identity matrix)
-    if to_mesh.is_empty() {
-        s.0.iter()
-            .enumerate()
-            .filter(|(_i, e)|
-                match e {
-                    Entity::ManifoldSolidBrep(_)
-                    | Entity::BrepWithVoids(_)
-                    | Entity::ShellBasedSurfaceModel(_) => true,
-                    _ => false,
-                }
-            )
-            .map(|(i, _e)| Id::new(i))
-            .for_each(|i| to_mesh.entry(i).or_default().push(DMat4::identity()));
-    }
+    let to_mesh = collect_shape_instances(
+        s,
+        &rep_instances,
+        &shape_rep_relationship,
+    );
 
     let (to_mesh_iter, empty) = {
         #[cfg(feature = "rayon")]
