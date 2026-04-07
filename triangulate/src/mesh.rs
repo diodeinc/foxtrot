@@ -1,5 +1,5 @@
-use std::convert::TryInto;
 use nalgebra_glm::{DVec3, U32Vec3};
+use std::convert::TryInto;
 
 #[derive(Copy, Clone, Debug)]
 pub struct Vertex {
@@ -24,19 +24,21 @@ impl Mesh {
     pub fn combine(mut a: Self, b: Self) -> Self {
         let dv = a.verts.len().try_into().expect("too many triangles");
         a.verts.extend(b.verts);
-        a.triangles.extend(b.triangles.into_iter()
-            .map(|t| Triangle { verts: t.verts.add_scalar(dv) }));
+        a.triangles
+            .extend(b.triangles.into_iter().map(|t| Triangle {
+                verts: t.verts.add_scalar(dv),
+            }));
         a
     }
 
     /// Writes the triangulation to a STL, for debugging
     pub fn save_stl(&self, filename: &str) -> std::io::Result<()> {
         let mut out: Vec<u8> = Vec::new();
-        for _ in 0..80 { // header
+        for _ in 0..80 {
+            // header
             out.push('x' as u8);
         }
-        let u: u32 = self.triangles.len().try_into()
-            .expect("Too many triangles");
+        let u: u32 = self.triangles.len().try_into().expect("Too many triangles");
         out.extend(&u.to_le_bytes());
         for t in self.triangles.iter() {
             out.extend(std::iter::repeat(0).take(12)); // normal

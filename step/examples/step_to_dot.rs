@@ -1,4 +1,4 @@
-use clap::{Arg, App};
+use clap::{App, Arg};
 use step::step_file::StepFile;
 
 pub fn to_dot(s: &StepFile) -> String {
@@ -20,25 +20,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = App::new("step_to_dot2")
         .author("Matt Keeter <matt@formlabs.com>")
         .about("Converts a STEP file to a dot file")
-        .arg(Arg::with_name("output")
-            .short("o")
-            .long("out")
-            .help("dot file to target")
-            .takes_value(true))
-        .arg(Arg::with_name("input")
-            .takes_value(true)
-            .required(true))
+        .arg(
+            Arg::with_name("output")
+                .short("o")
+                .long("out")
+                .help("dot file to target")
+                .takes_value(true),
+        )
+        .arg(Arg::with_name("input").takes_value(true).required(true))
         .get_matches();
-    let input = matches.value_of("input")
-        .expect("Could not get input file");
+    let input = matches.value_of("input").expect("Could not get input file");
 
     let start = std::time::SystemTime::now();
     let data = std::fs::read(input)?;
     let flat = StepFile::strip_flatten(&data);
     let entities = StepFile::parse(&flat);
     let end = std::time::SystemTime::now();
-    let since_the_epoch = end.duration_since(start)
-        .expect("Time went backwards");
+    let since_the_epoch = end.duration_since(start).expect("Time went backwards");
     println!("Loaded + parsed in {:?}", since_the_epoch);
 
     let dot = to_dot(&entities);
@@ -49,4 +47,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
-

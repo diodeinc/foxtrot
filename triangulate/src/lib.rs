@@ -1,9 +1,9 @@
 pub mod colored_mesh;
+pub mod curve;
 pub mod mesh;
 pub mod stats;
 pub mod surface;
 pub mod triangulate;
-pub mod curve;
 
 #[derive(thiserror::Error, Debug, Eq, PartialEq)]
 pub enum Error {

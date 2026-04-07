@@ -1,5 +1,5 @@
-use clap::{Arg, App};
-use rusttype::{point, Font, Scale, OutlineBuilder};
+use clap::{App, Arg};
+use rusttype::{point, Font, OutlineBuilder, Scale};
 
 const BEZIER_RESOLUTION: usize = 4;
 
@@ -7,8 +7,10 @@ const BEZIER_RESOLUTION: usize = 4;
 struct Builder {
     points: Vec<(f64, f64)>,
     contours: Vec<Vec<usize>>,
-    x: f32, y: f32,
-    dx: f32, dy: f32,
+    x: f32,
+    y: f32,
+    dx: f32,
+    dy: f32,
 }
 
 impl Builder {
@@ -20,7 +22,8 @@ impl Builder {
     fn set_position(&mut self, x: f32, y: f32) {
         self.x = x;
         self.y = -y;
-        self.points.push(((x + self.dx) as f64, (self.dy - y) as f64));
+        self.points
+            .push(((x + self.dx) as f64, (self.dy - y) as f64));
     }
 }
 
@@ -52,8 +55,7 @@ impl OutlineBuilder for Builder {
         let y0 = -self.y;
         for i in 1..=BEZIER_RESOLUTION {
             let t = i as f32 / (BEZIER_RESOLUTION as f32);
-            let f = |a, b, c| (1.0 - t).powf(2.0) * a +
-                               2.0 * (1.0 - t) * t * b + t.powf(2.0) * c;
+            let f = |a, b, c| (1.0 - t).powf(2.0) * a + 2.0 * (1.0 - t) * t * b + t.powf(2.0) * c;
             self.line_to(f(x0, x1, x2), f(y0, y1, y2));
         }
     }
@@ -64,12 +66,13 @@ impl OutlineBuilder for Builder {
 
         for i in 1..=BEZIER_RESOLUTION {
             let t = i as f32 / (BEZIER_RESOLUTION as f32);
-            let f = |a, b, c, d|
-                (1.0 - t).powf(3.0) * a +
-                3.0 * (1.0 - t).powf(2.0) * t * b +
-                3.0 * (1.0 - t) * t.powf(2.0) * c +
-                t.powf(3.0) * d;
-                self.line_to(f(x0, x1, x2, x3), f(y0, y1, y2, y3));
+            let f = |a, b, c, d| {
+                (1.0 - t).powf(3.0) * a
+                    + 3.0 * (1.0 - t).powf(2.0) * t * b
+                    + 3.0 * (1.0 - t) * t.powf(2.0) * c
+                    + t.powf(3.0) * d
+            };
+            self.line_to(f(x0, x1, x2, x3), f(y0, y1, y2, y3));
         }
     }
 }
@@ -78,28 +81,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = App::new("font")
         .author("Matt Keeter <matt.j.keeter@gmail.com>")
         .about("Triangulates a few characters from a font")
-        .arg(Arg::with_name("font")
-            .short("f")
-            .long("font")
-            .help("path to the font TTF")
-            .takes_value(true))
-        .arg(Arg::with_name("output")
-            .short("o")
-            .long("out")
-            .help("svg file to target")
-            .takes_value(true))
-        .arg(Arg::with_name("check")
-            .short("c")
-            .long("check")
-            .help("check invariants after each step (slow)"))
-        .arg(Arg::with_name("text")
-            .short("t")
-            .long("text")
-            .help("text to triangulate")
-            .takes_value(true))
+        .arg(
+            Arg::with_name("font")
+                .short("f")
+                .long("font")
+                .help("path to the font TTF")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("output")
+                .short("o")
+                .long("out")
+                .help("svg file to target")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("check")
+                .short("c")
+                .long("check")
+                .help("check invariants after each step (slow)"),
+        )
+        .arg(
+            Arg::with_name("text")
+                .short("t")
+                .long("text")
+                .help("text to triangulate")
+                .takes_value(true),
+        )
         .get_matches();
 
-    let font_path = matches.value_of("font")
+    let font_path = matches
+        .value_of("font")
         .unwrap_or("/Library/Fonts/Georgia.ttf");
     let font = {
         let data = std::fs::read(&font_path)?;
@@ -119,9 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Then, do the work of triangulation
     let now = std::time::Instant::now();
-    let mut t = cdt::Triangulation::new_from_contours(
-        &builder.points,
-        &builder.contours)?;
+    let mut t = cdt::Triangulation::new_from_contours(&builder.points, &builder.contours)?;
     while !t.done() {
         t.step()?;
         if matches.is_present("check") {

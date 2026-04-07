@@ -17,12 +17,12 @@ impl<T> Id<T> {
 // conservative derives: https://github.com/rust-lang/rust/issues/26925
 unsafe impl<T> Sync for Id<T> {}
 unsafe impl<T> Send for Id<T> {}
-impl <T> Clone for Id<T> {
+impl<T> Clone for Id<T> {
     fn clone(&self) -> Self {
         Self::new(self.0)
     }
 }
-impl <T> Copy for Id<T> {}
+impl<T> Copy for Id<T> {}
 impl<T> PartialEq for Id<T> {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
@@ -65,14 +65,18 @@ impl<T: HasId> HasId for Option<T> {
     }
 }
 impl HasId for i64 {
-    fn append_ids(&self, _v: &mut Vec<usize>) { /* Nothing to do here */ }
+    fn append_ids(&self, _v: &mut Vec<usize>) { /* Nothing to do here */
+    }
 }
 impl HasId for f64 {
-    fn append_ids(&self, _v: &mut Vec<usize>) { /* Nothing to do here */ }
+    fn append_ids(&self, _v: &mut Vec<usize>) { /* Nothing to do here */
+    }
 }
 impl HasId for &str {
-    fn append_ids(&self, _v: &mut Vec<usize>) { /* Nothing to do here */ }
+    fn append_ids(&self, _v: &mut Vec<usize>) { /* Nothing to do here */
+    }
 }
 impl HasId for bool {
-    fn append_ids(&self, _v: &mut Vec<usize>) { /* Nothing to do here */ }
+    fn append_ids(&self, _v: &mut Vec<usize>) { /* Nothing to do here */
+    }
 }

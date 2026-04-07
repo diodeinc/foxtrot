@@ -1,7 +1,7 @@
-use std::iter::repeat_with;
 use rand::{Rng, SeedableRng};
+use std::iter::repeat_with;
 
-use clap::{Arg, App};
+use clap::{App, Arg};
 use itertools::Itertools;
 
 const N: usize = 64;
@@ -10,27 +10,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = App::new("fuzz")
         .author("Matt Keeter <matt.j.keeter@gmail.com>")
         .about("Fuzzes the triangulator")
-        .arg(Arg::with_name("num")
-            .short("n")
-            .long("num")
-            .help("number of points")
-            .takes_value(true))
-        .arg(Arg::with_name("output")
-            .short("o")
-            .long("out")
-            .help("svg file to target")
-            .takes_value(true))
-        .arg(Arg::with_name("check")
-            .short("c")
-            .long("check")
-            .help("check invariants after each step (slow)"))
-        .arg(Arg::with_name("lock")
-            .short("l")
-            .long("lock")
-            .help("lock three edges to test constrained triangulation"))
+        .arg(
+            Arg::with_name("num")
+                .short("n")
+                .long("num")
+                .help("number of points")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("output")
+                .short("o")
+                .long("out")
+                .help("svg file to target")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("check")
+                .short("c")
+                .long("check")
+                .help("check invariants after each step (slow)"),
+        )
+        .arg(
+            Arg::with_name("lock")
+                .short("l")
+                .long("lock")
+                .help("lock three edges to test constrained triangulation"),
+        )
         .get_matches();
 
-    let num = matches.value_of("num")
+    let num = matches
+        .value_of("num")
         .map(|s| s.parse())
         .unwrap_or(Ok(N))?;
 
@@ -57,11 +66,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect();
 
         // Generator to build the triangulation
-        let gen = || if matches.is_present("lock") {
-            cdt::Triangulation::new_with_edges(&points,
-                &[(0, 1), (1, 2), (2, 0)])
-        } else {
-            cdt::Triangulation::new(&points)
+        let gen = || {
+            if matches.is_present("lock") {
+                cdt::Triangulation::new_with_edges(&points, &[(0, 1), (1, 2), (2, 0)])
+            } else {
+                cdt::Triangulation::new(&points)
+            }
         };
 
         let mut t = gen()?;
@@ -107,7 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", t.to_svg(true));
             }
             eprintln!("Crashed with seed: {}", seed);
-            break Ok(())
+            break Ok(());
         }
     }
 }

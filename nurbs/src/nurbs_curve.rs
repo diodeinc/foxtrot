@@ -1,5 +1,5 @@
-use nalgebra_glm::{DVec3};
-use crate::{nd_curve::NDBSplineCurve, abstract_curve::AbstractCurve};
+use crate::{abstract_curve::AbstractCurve, nd_curve::NDBSplineCurve};
+use nalgebra_glm::DVec3;
 
 pub type NURBSCurve = NDBSplineCurve<4>;
 
@@ -31,4 +31,3 @@ impl AbstractCurve for NURBSCurve {
         CK
     }
 }
-

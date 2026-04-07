@@ -1,7 +1,7 @@
-use std::iter::repeat_with;
 use rand::{Rng, SeedableRng};
+use std::iter::repeat_with;
 
-use clap::{Arg, App};
+use clap::{App, Arg};
 use itertools::Itertools;
 
 const N: usize = 1_000_000;
@@ -10,31 +10,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = App::new("triangulate")
         .author("Matt Keeter <matt.j.keeter@gmail.com>")
         .about("Triangulates random points")
-        .arg(Arg::with_name("num")
-            .short("n")
-            .long("num")
-            .help("number of points")
-            .takes_value(true))
-        .arg(Arg::with_name("output")
-            .short("o")
-            .long("out")
-            .help("svg file to target")
-            .takes_value(true))
-        .arg(Arg::with_name("check")
-            .short("c")
-            .long("check")
-            .help("check invariants after each step (slow)"))
-        .arg(Arg::with_name("seed")
-            .short("s")
-            .long("seed")
-            .help("seed for RNG")
-            .takes_value(true))
+        .arg(
+            Arg::with_name("num")
+                .short("n")
+                .long("num")
+                .help("number of points")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("output")
+                .short("o")
+                .long("out")
+                .help("svg file to target")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("check")
+                .short("c")
+                .long("check")
+                .help("check invariants after each step (slow)"),
+        )
+        .arg(
+            Arg::with_name("seed")
+                .short("s")
+                .long("seed")
+                .help("seed for RNG")
+                .takes_value(true),
+        )
         .get_matches();
 
-    let num = matches.value_of("num")
+    let num = matches
+        .value_of("num")
         .map(|s| s.parse())
         .unwrap_or(Ok(N))?;
-    let seed: u64 = matches.value_of("seed")
+    let seed: u64 = matches
+        .value_of("seed")
         .map(|s| s.parse())
         .unwrap_or_else(|| Ok(rand::thread_rng().gen()))?;
 

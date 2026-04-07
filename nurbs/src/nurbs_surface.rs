@@ -1,5 +1,5 @@
-use nalgebra_glm::{DVec2, DVec3};
 use crate::{abstract_surface::AbstractSurface, nd_surface::NDBSplineSurface, VecF};
+use nalgebra_glm::{DVec2, DVec3};
 
 pub type NURBSSurface = NDBSplineSurface<4>;
 
@@ -8,9 +8,7 @@ impl AbstractSurface for NURBSSurface {
         let p = self.surface_point(uv);
         p.xyz() / p.w
     }
-    fn point_from_basis(&self, uspan: usize, Nu: &VecF,
-                               vspan: usize, Nv: &VecF) -> DVec3
-    {
+    fn point_from_basis(&self, uspan: usize, Nu: &VecF, vspan: usize, Nv: &VecF) -> DVec3 {
         let p = self.surface_point_from_basis(uspan, Nu, vspan, Nv);
         p.xyz() / p.w
     }
@@ -39,4 +37,3 @@ impl AbstractSurface for NURBSSurface {
         SKL
     }
 }
-

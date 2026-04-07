@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 use winit::{
-    event::{Event},
+    event::Event,
     event_loop::{ControlFlow, EventLoop},
     window::Window,
 };
@@ -13,9 +13,12 @@ pub(crate) mod model;
 use crate::app::App;
 use triangulate::mesh::Mesh;
 
-async fn run(start: SystemTime, event_loop: EventLoop<()>, window: Window,
-             loader: std::thread::JoinHandle<Mesh>)
-{
+async fn run(
+    start: SystemTime,
+    event_loop: EventLoop<()>,
+    window: Window,
+    loader: std::thread::JoinHandle<Mesh>,
+) {
     let size = window.inner_size();
     let (surface, adapter) = {
         let instance = wgpu::Instance::new(wgpu::BackendBit::all());
@@ -53,13 +56,17 @@ async fn run(start: SystemTime, event_loop: EventLoop<()>, window: Window,
             Event::WindowEvent { event, .. } => match app.window_event(event) {
                 Reply::Continue => (),
                 Reply::Quit => *control_flow = ControlFlow::Exit,
-                Reply::Redraw => if app.redraw(&queue) {
+                Reply::Redraw => {
+                    if app.redraw(&queue) {
+                        window.request_redraw();
+                    }
+                }
+            },
+            Event::RedrawRequested(_) => {
+                if app.redraw(&queue) {
                     window.request_redraw();
-                },
-            },
-            Event::RedrawRequested(_) => if app.redraw(&queue) {
-                window.request_redraw();
-            },
+                }
+            }
             Event::DeviceEvent { event, .. } => app.device_event(event),
             _ => (),
         }
@@ -73,11 +80,14 @@ fn main() {
     let matches = clap::App::new("gui")
         .author("Matt Keeter <matt@formlabs.com>")
         .about("Renders a STEP file")
-        .arg(clap::Arg::with_name("input")
-            .takes_value(true)
-            .required(true))
+        .arg(
+            clap::Arg::with_name("input")
+                .takes_value(true)
+                .required(true),
+        )
         .get_matches();
-    let input = matches.value_of("input")
+    let input = matches
+        .value_of("input")
         .expect("Could not get input file")
         .to_owned();
 

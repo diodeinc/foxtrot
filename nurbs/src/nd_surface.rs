@@ -1,6 +1,6 @@
-use std::cmp::min;
-use nalgebra_glm::{DVec2, DVec3, TVec};
 use crate::{KnotVector, VecF};
+use nalgebra_glm::{DVec2, DVec3, TVec};
+use std::cmp::min;
 
 #[derive(Debug, Clone)]
 pub struct NDBSplineSurface<const D: usize> {
@@ -56,10 +56,13 @@ impl<const D: usize> NDBSplineSurface<D> {
         self.surface_point_from_basis(uspan, &Nu, vspan, &Nv)
     }
 
-    pub fn surface_point_from_basis(&self,
-        uspan: usize, Nu: &VecF,
-        vspan: usize, Nv: &VecF) -> TVec<f64, D>
-    {
+    pub fn surface_point_from_basis(
+        &self,
+        uspan: usize,
+        Nu: &VecF,
+        vspan: usize,
+        Nv: &VecF,
+    ) -> TVec<f64, D> {
         let p = self.u_knots.degree();
         let q = self.v_knots.degree();
 
@@ -132,12 +135,10 @@ impl<const D: usize> NDBSplineSurface<D> {
         for i in 0..self.control_points.len() {
             for j in 0..self.control_points[i].len() {
                 if i > 0 {
-                    v_sum += distance(self.control_points[i - 1][j],
-                                      self.control_points[i][j]);
+                    v_sum += distance(self.control_points[i - 1][j], self.control_points[i][j]);
                 }
                 if j > 0 {
-                    u_sum += distance(self.control_points[i][j - 1],
-                                      self.control_points[i][j]);
+                    u_sum += distance(self.control_points[i][j - 1], self.control_points[i][j]);
                 }
             }
         }

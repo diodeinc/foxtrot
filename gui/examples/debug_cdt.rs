@@ -1,10 +1,10 @@
-use step::step_file::StepFile;
+use glm::DVec3;
+use nalgebra_glm as glm;
+use nurbs::KnotVector;
 use step::ap214::*;
+use step::step_file::StepFile;
 use triangulate::surface::Surface;
 use triangulate::triangulate::*;
-use nalgebra_glm as glm;
-use glm::DVec3;
-use nurbs::KnotVector;
 
 fn main() {
     env_logger::init();
@@ -21,7 +21,11 @@ fn main() {
         if let Entity::AdvancedFace(face) = entity {
             if face.face_geometry.0 == target_surf {
                 eprintln!("Found face #{} for surface #{}", i, target_surf);
-                eprintln!("same_sense: {}, bounds: {}", face.same_sense, face.bounds.len());
+                eprintln!(
+                    "same_sense: {}, bounds: {}",
+                    face.same_sense,
+                    face.bounds.len()
+                );
 
                 // Build the surface
                 let surf = get_surface_for_debug(&step, face.face_geometry);
@@ -38,7 +42,9 @@ fn main() {
 
                 for b in &face.bounds {
                     let bound_contours = face_bound_3d(&step, *b);
-                    if bound_contours.is_empty() { continue; }
+                    if bound_contours.is_empty() {
+                        continue;
+                    }
                     if bound_contours.len() == 1 {
                         verts.push(triangulate::mesh::Vertex {
                             pos: bound_contours[0],
@@ -82,7 +88,7 @@ fn main() {
                     Ok(t) => {
                         let tris: Vec<_> = t.triangles().collect();
                         eprintln!("Success: {} triangles", tris.len());
-                    },
+                    }
                     Err(e) => {
                         eprintln!("Error: {:?}", e);
                     }
@@ -100,60 +106,102 @@ fn get_surface_for_debug(s: &StepFile, surf: step::ap214::Surface) -> Option<Sur
         Entity::Plane(p) => {
             let (location, axis, ref_direction) = axis2_placement_3d_debug(s, p.position);
             Some(Surface::new_plane(axis, ref_direction, location))
-        },
+        }
         Entity::CylindricalSurface(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d_debug(s, c.position);
-            Some(Surface::new_cylinder(axis, ref_direction, location, c.radius.0.0.0))
-        },
+            Some(Surface::new_cylinder(
+                axis,
+                ref_direction,
+                location,
+                c.radius.0 .0 .0,
+            ))
+        }
         Entity::BSplineSurfaceWithKnots(b) => {
             let u_knots: Vec<f64> = b.u_knots.iter().map(|k| k.0).collect();
-            let u_multiplicities: Vec<usize> = b.u_multiplicities.iter()
+            let u_multiplicities: Vec<usize> = b
+                .u_multiplicities
+                .iter()
                 .map(|&k| k.try_into().unwrap())
                 .collect();
             let u_knot_vec = KnotVector::from_multiplicities(
                 b.u_degree.try_into().unwrap(),
-                &u_knots, &u_multiplicities);
+                &u_knots,
+                &u_multiplicities,
+            );
             let v_knots: Vec<f64> = b.v_knots.iter().map(|k| k.0).collect();
-            let v_multiplicities: Vec<usize> = b.v_multiplicities.iter()
+            let v_multiplicities: Vec<usize> = b
+                .v_multiplicities
+                .iter()
                 .map(|&k| k.try_into().unwrap())
                 .collect();
             let v_knot_vec = KnotVector::from_multiplicities(
                 b.v_degree.try_into().unwrap(),
-                &v_knots, &v_multiplicities);
-            let control_points: Vec<Vec<DVec3>> = b.control_points_list.iter()
-                .map(|row| row.iter().map(|cp| {
-                    if let Entity::CartesianPoint(p) = &s.0[cp.0] {
-                        DVec3::new(p.coordinates[0].0, p.coordinates[1].0, p.coordinates[2].0)
-                    } else { panic!("Expected CartesianPoint") }
-                }).collect())
+                &v_knots,
+                &v_multiplicities,
+            );
+            let control_points: Vec<Vec<DVec3>> = b
+                .control_points_list
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|cp| {
+                            if let Entity::CartesianPoint(p) = &s.0[cp.0] {
+                                DVec3::new(
+                                    p.coordinates[0].0,
+                                    p.coordinates[1].0,
+                                    p.coordinates[2].0,
+                                )
+                            } else {
+                                panic!("Expected CartesianPoint")
+                            }
+                        })
+                        .collect()
+                })
                 .collect();
-            let bspline = nurbs::BSplineSurface::new(
-                u_knot_vec, v_knot_vec, control_points);
+            let bspline = nurbs::BSplineSurface::new(u_knot_vec, v_knot_vec, control_points);
             let sampled = nurbs::SampledSurface::new(bspline);
             Some(Surface::BSpline(sampled))
-        },
+        }
         _ => {
-            eprintln!("Surface type not handled: {:?}", std::mem::discriminant(&s[surf]));
+            eprintln!(
+                "Surface type not handled: {:?}",
+                std::mem::discriminant(&s[surf])
+            );
             None
         }
     }
 }
 
-fn axis2_placement_3d_debug(s: &StepFile, a: step::ap214::Axis2Placement3d) -> (DVec3, DVec3, DVec3) {
+fn axis2_placement_3d_debug(
+    s: &StepFile,
+    a: step::ap214::Axis2Placement3d,
+) -> (DVec3, DVec3, DVec3) {
     let placement = match &s.0[a.0] {
         Entity::Axis2Placement3d(p) => p,
         _ => panic!("Expected Axis2Placement3d"),
     };
     let location = match &s.0[placement.location.0] {
-        Entity::CartesianPoint(p) => DVec3::new(p.coordinates[0].0, p.coordinates[1].0, p.coordinates[2].0),
+        Entity::CartesianPoint(p) => {
+            DVec3::new(p.coordinates[0].0, p.coordinates[1].0, p.coordinates[2].0)
+        }
         _ => panic!("Expected CartesianPoint"),
     };
     let axis = match &s.0[placement.axis.0] {
-        Entity::Direction(d) => DVec3::new(d.direction_ratios[0].0, d.direction_ratios[1].0, d.direction_ratios[2].0).normalize(),
+        Entity::Direction(d) => DVec3::new(
+            d.direction_ratios[0].0,
+            d.direction_ratios[1].0,
+            d.direction_ratios[2].0,
+        )
+        .normalize(),
         _ => panic!("Expected Direction"),
     };
     let ref_direction = match &s.0[placement.ref_direction.0] {
-        Entity::Direction(d) => DVec3::new(d.direction_ratios[0].0, d.direction_ratios[1].0, d.direction_ratios[2].0).normalize(),
+        Entity::Direction(d) => DVec3::new(
+            d.direction_ratios[0].0,
+            d.direction_ratios[1].0,
+            d.direction_ratios[2].0,
+        )
+        .normalize(),
         _ => panic!("Expected Direction"),
     };
     (location, axis, ref_direction)
@@ -170,11 +218,15 @@ fn face_bound_3d(s: &StepFile, b: step::ap214::FaceBoundId) -> Vec<DVec3> {
         Entity::VertexLoop(vl) => {
             if let Entity::VertexPoint(vp) = &s.0[vl.loop_vertex.0] {
                 if let Entity::CartesianPoint(cp) = &s.0[vp.vertex_geometry.0] {
-                    return vec![DVec3::new(cp.coordinates[0].0, cp.coordinates[1].0, cp.coordinates[2].0)];
+                    return vec![DVec3::new(
+                        cp.coordinates[0].0,
+                        cp.coordinates[1].0,
+                        cp.coordinates[2].0,
+                    )];
                 }
             }
             return vec![];
-        },
+        }
         _ => return vec![],
     };
 
@@ -199,7 +251,11 @@ fn face_bound_3d(s: &StepFile, b: step::ap214::FaceBoundId) -> Vec<DVec3> {
 fn get_vertex_pos(s: &StepFile, v: step::ap214::Vertex) -> Option<DVec3> {
     if let Entity::VertexPoint(vp) = &s.0[v.0] {
         if let Entity::CartesianPoint(cp) = &s.0[vp.vertex_geometry.0] {
-            return Some(DVec3::new(cp.coordinates[0].0, cp.coordinates[1].0, cp.coordinates[2].0));
+            return Some(DVec3::new(
+                cp.coordinates[0].0,
+                cp.coordinates[1].0,
+                cp.coordinates[2].0,
+            ));
         }
     }
     None

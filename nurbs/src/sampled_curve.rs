@@ -1,5 +1,9 @@
-use nalgebra_glm::{dot, length, length2, DVec3};
 use crate::{abstract_curve::AbstractCurve, nd_curve::NDBSplineCurve};
+use nalgebra_glm::{dot, length, length2, DVec3};
+
+const ADAPTIVE_MAX_DEPTH: usize = 10;
+const ADAPTIVE_REL_TOL: f64 = 0.01;
+const ADAPTIVE_MIN_CHORD: f64 = 1e-9;
 
 #[derive(Debug)]
 pub struct SampledCurve<const N: usize> {
@@ -8,7 +12,8 @@ pub struct SampledCurve<const N: usize> {
 }
 
 impl<const N: usize> SampledCurve<N>
-    where NDBSplineCurve<N>: AbstractCurve
+where
+    NDBSplineCurve<N>: AbstractCurve,
 {
     pub fn new(curve: NDBSplineCurve<N>) -> Self {
         const N: usize = 8;
@@ -58,9 +63,7 @@ impl<const N: usize> SampledCurve<N>
             if r_len <= eps1 {
                 // Skip cosine check when derivative or residual is degenerate
                 // (near-zero) to avoid 0/0 = NaN causing infinite loops.
-                if cp_len < 1e-10 || r_len < 1e-10
-                    || dot(&C_p, &r) / cp_len / r_len <= eps2
-                {
+                if cp_len < 1e-10 || r_len < 1e-10 || dot(&C_p, &r) / cp_len / r_len <= eps2 {
                     return u_i;
                 }
             }
@@ -147,11 +150,18 @@ impl<const N: usize> SampledCurve<N>
         self.curve.max_u()
     }
 
+    pub fn point(&self, u: f64) -> DVec3 {
+        self.curve.point(u)
+    }
+
     pub fn u_from_point(&self, p: DVec3) -> f64 {
         use ordered_float::OrderedFloat;
-        let best_u = self.samples.iter()
+        let best_u = self
+            .samples
+            .iter()
             .min_by_key(|(_u, pos)| OrderedFloat((pos - p).norm()))
-            .unwrap().0;
+            .unwrap()
+            .0;
         self.u_from_point_newtons_method(p, best_u)
     }
 
@@ -187,5 +197,77 @@ impl<const N: usize> SampledCurve<N>
             result.reverse();
         }
         result
+    }
+
+    pub fn as_adaptive_polyline(&self, u_start: f64, u_end: f64) -> Vec<DVec3> {
+        let (u_min, u_max, reversed) = if u_start < u_end {
+            (u_start, u_end, false)
+        } else {
+            (u_end, u_start, true)
+        };
+
+        let mut breaks = vec![u_min];
+        for i in 0..self.curve.knots.len() - 1 {
+            let knot = self.curve.knots[i];
+            let next = self.curve.knots[i + 1];
+            if knot == next {
+                continue;
+            }
+            if knot > u_min && knot < u_max {
+                breaks.push(knot);
+            }
+            if next > u_min && next < u_max {
+                breaks.push(next);
+            }
+        }
+        breaks.push(u_max);
+        breaks.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        breaks.dedup_by(|a, b| (*a - *b).abs() < f64::EPSILON);
+
+        let mut result = vec![self.point(u_min)];
+        for window in breaks.windows(2) {
+            let u0 = window[0];
+            let u1 = window[1];
+            if (u1 - u0).abs() < f64::EPSILON {
+                continue;
+            }
+            let p0 = *result.last().unwrap();
+            let p1 = self.point(u1);
+            self.push_adaptive_segment(u0, p0, u1, p1, ADAPTIVE_MAX_DEPTH, &mut result);
+        }
+
+        if reversed {
+            result.reverse();
+        }
+        result
+    }
+
+    fn push_adaptive_segment(
+        &self,
+        u0: f64,
+        p0: DVec3,
+        u1: f64,
+        p1: DVec3,
+        depth: usize,
+        out: &mut Vec<DVec3>,
+    ) {
+        let chord = p1 - p0;
+        let chord_len = length(&chord);
+        if depth == 0 || chord_len <= ADAPTIVE_MIN_CHORD {
+            out.push(p1);
+            return;
+        }
+
+        let um = 0.5 * (u0 + u1);
+        let pm = self.point(um);
+        let chord_mid = (p0 + p1) * 0.5;
+        let midpoint_error = length(&(pm - chord_mid));
+        if midpoint_error <= chord_len * ADAPTIVE_REL_TOL {
+            out.push(p1);
+            return;
+        }
+
+        self.push_adaptive_segment(u0, p0, um, pm, depth - 1, out);
+        self.push_adaptive_segment(um, pm, u1, p1, depth - 1, out);
     }
 }

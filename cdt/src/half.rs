@@ -1,4 +1,7 @@
-use crate::{Error, indexes::{PointIndex, EdgeIndex, EdgeVec, EMPTY_EDGE}};
+use crate::{
+    indexes::{EdgeIndex, EdgeVec, PointIndex, EMPTY_EDGE},
+    Error,
+};
 
 /// Represents a directed edge in a triangle graph.
 #[derive(Copy, Clone, Debug)]
@@ -111,28 +114,39 @@ impl Half {
 
     /// Inserts a new triangle into the edge map, based on three points
     /// and optional paired edges.  Returns the new edge index `a → b`
-    pub fn insert(&mut self, a: PointIndex, b: PointIndex, c: PointIndex,
-                  e_cb: EdgeIndex, e_ac: EdgeIndex, e_ba: EdgeIndex)
-        -> Result<EdgeIndex, Error>
-    {
+    pub fn insert(
+        &mut self,
+        a: PointIndex,
+        b: PointIndex,
+        c: PointIndex,
+        e_cb: EdgeIndex,
+        e_ac: EdgeIndex,
+        e_ba: EdgeIndex,
+    ) -> Result<EdgeIndex, Error> {
         let e_ab = self.edges.next_index();
         let e_bc = e_ab + 1usize;
         let e_ca = e_ab + 2usize;
         self.push_edge(Edge {
-            src: a, dst: b,
-            prev: e_ca, next: e_bc,
+            src: a,
+            dst: b,
+            prev: e_ca,
+            next: e_bc,
             buddy: e_ba,
             sign: None,
         })?;
         self.push_edge(Edge {
-            src: b, dst: c,
-            prev: e_ab, next: e_ca,
+            src: b,
+            dst: c,
+            prev: e_ab,
+            next: e_ca,
             buddy: e_cb,
             sign: None,
         })?;
         self.push_edge(Edge {
-            src: c, dst: a,
-            prev: e_bc, next: e_ab,
+            src: c,
+            dst: a,
+            prev: e_bc,
+            next: e_ab,
             buddy: e_ac,
             sign: None,
         })?;
@@ -140,15 +154,20 @@ impl Half {
         Ok(e_ab)
     }
 
-    pub fn iter_edges(&self) -> impl Iterator<Item=(PointIndex, PointIndex, bool)> + '_ {
-        return self.edges.iter()
+    pub fn iter_edges(&self) -> impl Iterator<Item = (PointIndex, PointIndex, bool)> + '_ {
+        return self
+            .edges
+            .iter()
             .filter(|e| e.next != EMPTY_EDGE)
-            .map(|e| (e.src, e.dst, e.fixed()))
+            .map(|e| (e.src, e.dst, e.fixed()));
     }
 
-    pub fn iter_triangles(&self) -> impl Iterator<Item=(PointIndex, PointIndex, PointIndex)> + '_ {
+    pub fn iter_triangles(
+        &self,
+    ) -> impl Iterator<Item = (PointIndex, PointIndex, PointIndex)> + '_ {
         let mut seen = EdgeVec::of(vec![false; self.edges.len()]);
-        self.edges.iter()
+        self.edges
+            .iter()
             .enumerate()
             .filter(|(_i, e)| e.next != EMPTY_EDGE)
             .filter_map(move |(index, edge)| {
@@ -261,7 +280,7 @@ impl Half {
          *         \ || /
          *          V|V/
          *           b
-        */
+         */
         let edge = self.edge(e_ba);
         if edge.buddy == EMPTY_EDGE {
             return Err(Error::HalfEdgeInvariant);
