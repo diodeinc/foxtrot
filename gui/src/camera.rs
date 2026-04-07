@@ -1,6 +1,6 @@
+use glm::{Mat4, Vec2, Vec3, Vec4};
 use itertools::Itertools;
 use nalgebra_glm as glm;
-use glm::{Vec2, Vec3, Vec4, Mat4};
 use winit::event::MouseButton;
 
 use triangulate::mesh::Vertex;
@@ -33,11 +33,11 @@ pub struct Camera {
     mouse: MouseState,
 }
 
-
 impl Camera {
     pub fn new(width: f32, height: f32) -> Self {
         Camera {
-            width, height,
+            width,
+            height,
             pitch: 0.0,
             yaw: 0.0,
             scale: 1.0,
@@ -53,17 +53,19 @@ impl Camera {
                 MouseButton::Left => Some(MouseState::Rotate(*pos)),
                 MouseButton::Right => Some(MouseState::Pan(*pos, self.mouse_pos(*pos))),
                 _ => None,
-            }.map(|m| self.mouse = m);
+            }
+            .map(|m| self.mouse = m);
         }
     }
     pub fn mouse_released(&mut self, button: MouseButton) {
         match &self.mouse {
-            MouseState::Rotate(pos) if button == MouseButton::Left =>
-                Some(MouseState::Free(*pos)),
-            MouseState::Pan(pos, ..) if button == MouseButton::Right =>
-                Some(MouseState::Free(*pos)),
+            MouseState::Rotate(pos) if button == MouseButton::Left => Some(MouseState::Free(*pos)),
+            MouseState::Pan(pos, ..) if button == MouseButton::Right => {
+                Some(MouseState::Free(*pos))
+            }
             _ => None,
-        }.map(|m| self.mouse = m);
+        }
+        .map(|m| self.mouse = m);
     }
 
     pub fn mat(&self) -> Mat4 {
@@ -82,7 +84,7 @@ impl Camera {
     }
 
     pub fn mouse_move(&mut self, new_pos: Vec2) {
-        let x_norm =  2.0 * (new_pos.x / self.width - 0.5);
+        let x_norm = 2.0 * (new_pos.x / self.width - 0.5);
         let y_norm = -2.0 * (new_pos.y / self.height - 0.5);
         let new_pos = Vec2::new(x_norm, y_norm);
 
@@ -92,20 +94,19 @@ impl Camera {
                 let current_pos = self.mouse_pos(new_pos);
                 let delta_pos = orig - current_pos;
                 self.center += delta_pos;
-            },
+            }
             MouseState::Rotate(pos) => {
                 let delta = new_pos - *pos;
-                self.spin(delta.x * 3.0,
-                          -delta.y * 3.0 * self.height / self.width);
-            },
+                self.spin(delta.x * 3.0, -delta.y * 3.0 * self.height / self.width);
+            }
             _ => (),
         }
 
         // Store new mouse position
         match &mut self.mouse {
-            MouseState::Free(pos)
-            | MouseState::Pan(pos, ..)
-            | MouseState::Rotate(pos) => *pos = new_pos,
+            MouseState::Free(pos) | MouseState::Pan(pos, ..) | MouseState::Rotate(pos) => {
+                *pos = new_pos
+            }
             MouseState::Unknown => self.mouse = MouseState::Free(new_pos),
         }
     }
@@ -117,16 +118,33 @@ impl Camera {
     }
 
     pub fn fit_verts(&mut self, verts: &[Vertex]) {
-        let xb = verts.iter().map(|v| v.pos.x).minmax().into_option().unwrap();
-        let yb = verts.iter().map(|v| v.pos.y).minmax().into_option().unwrap();
-        let zb = verts.iter().map(|v| v.pos.z).minmax().into_option().unwrap();
+        let xb = verts
+            .iter()
+            .map(|v| v.pos.x)
+            .minmax()
+            .into_option()
+            .unwrap();
+        let yb = verts
+            .iter()
+            .map(|v| v.pos.y)
+            .minmax()
+            .into_option()
+            .unwrap();
+        let zb = verts
+            .iter()
+            .map(|v| v.pos.z)
+            .minmax()
+            .into_option()
+            .unwrap();
         let dx = xb.1 - xb.0;
         let dy = yb.1 - yb.0;
         let dz = zb.1 - zb.0;
         self.scale = (1.0 / dx.max(dy).max(dz)) as f32;
-        self.center = Vec3::new((xb.0 + xb.1) as f32 / 2.0,
-                                (yb.0 + yb.1) as f32 / 2.0,
-                                (zb.0 + zb.1) as f32 / 2.0);
+        self.center = Vec3::new(
+            (xb.0 + xb.1) as f32 / 2.0,
+            (yb.0 + yb.1) as f32 / 2.0,
+            (zb.0 + zb.1) as f32 / 2.0,
+        );
     }
 
     pub fn set_size(&mut self, width: f32, height: f32) {
@@ -166,7 +184,7 @@ impl Camera {
         self.yaw += dy;
     }
 
-    pub fn scale(&mut self, value: f32, pos: Vec2){
+    pub fn scale(&mut self, value: f32, pos: Vec2) {
         let start_pos = self.mouse_pos(pos);
         self.scale *= value;
         let end_pos = self.mouse_pos(pos);

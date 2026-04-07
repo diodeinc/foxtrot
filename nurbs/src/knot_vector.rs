@@ -18,7 +18,9 @@ impl KnotVector {
     /// Constructs a new knot vector of over
     pub fn from_multiplicities(p: usize, knots: &[f64], multiplicities: &[usize]) -> Self {
         assert!(knots.len() == multiplicities.len());
-        let U = knots.iter().zip(multiplicities.iter())
+        let U = knots
+            .iter()
+            .zip(multiplicities.iter())
             .flat_map(|(k, m)| std::iter::repeat(*k).take(*m))
             .collect();
         Self { U, p }
@@ -135,9 +137,7 @@ impl KnotVector {
             let mut s2 = 1;
             a[0][0] = 1.0;
             for k in 1..=n {
-                let aus = |i: i32| -> usize {
-                    i.try_into().expect("Could not convert to usize")
-                };
+                let aus = |i: i32| -> usize { i.try_into().expect("Could not convert to usize") };
                 let mut d = 0.0;
                 let rk = (r as i32) - (k as i32);
                 let pk = (self.p as i32) - (k as i32);

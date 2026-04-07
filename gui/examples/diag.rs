@@ -1,7 +1,7 @@
-use step::step_file::StepFile;
 use step::ap214::*;
-use triangulate::triangulate::triangulate;
+use step::step_file::StepFile;
 use triangulate::surface::Surface;
+use triangulate::triangulate::triangulate;
 
 fn main() {
     env_logger::init();
@@ -19,11 +19,16 @@ fn main() {
             Entity::BSplineSurfaceWithKnots(b) => {
                 eprintln!("  Type: BSplineSurfaceWithKnots");
                 eprintln!("  u_degree: {}, v_degree: {}", b.u_degree, b.v_degree);
-                eprintln!("  u_mults: {:?}, v_mults: {:?}", b.u_multiplicities, b.v_multiplicities);
-                eprintln!("  control_points: {}x{}",
+                eprintln!(
+                    "  u_mults: {:?}, v_mults: {:?}",
+                    b.u_multiplicities, b.v_multiplicities
+                );
+                eprintln!(
+                    "  control_points: {}x{}",
                     b.control_points_list.len(),
-                    b.control_points_list.first().map(|r| r.len()).unwrap_or(0));
-            },
+                    b.control_points_list.first().map(|r| r.len()).unwrap_or(0)
+                );
+            }
             Entity::CylindricalSurface(_) => eprintln!("  Type: CylindricalSurface"),
             Entity::Plane(_) => eprintln!("  Type: Plane"),
             Entity::ConicalSurface(_) => eprintln!("  Type: ConicalSurface"),
@@ -36,7 +41,12 @@ fn main() {
         for (i, entity) in step.0.iter().enumerate() {
             if let Entity::AdvancedFace(face) = entity {
                 if face.face_geometry.0 == *sid {
-                    eprintln!("  Face #{}, same_sense: {}, bounds: {}", i, face.same_sense, face.bounds.len());
+                    eprintln!(
+                        "  Face #{}, same_sense: {}, bounds: {}",
+                        i,
+                        face.same_sense,
+                        face.bounds.len()
+                    );
                     for (bi, b) in face.bounds.iter().enumerate() {
                         let (bound_id, orientation) = match &step.0[b.0] {
                             Entity::FaceBound(b) => (b.bound, b.orientation),
@@ -44,7 +54,12 @@ fn main() {
                             _ => continue,
                         };
                         if let Entity::EdgeLoop(el) = &step.0[bound_id.0] {
-                            eprintln!("  Bound[{}]: {} edges, orientation={}", bi, el.edge_list.len(), orientation);
+                            eprintln!(
+                                "  Bound[{}]: {} edges, orientation={}",
+                                bi,
+                                el.edge_list.len(),
+                                orientation
+                            );
                             for (ei, oe_id) in el.edge_list.iter().enumerate() {
                                 if let Entity::OrientedEdge(oe) = &step.0[oe_id.0] {
                                     if let Entity::EdgeCurve(ec) = &step.0[oe.edge_element.0] {
@@ -79,7 +94,11 @@ fn main() {
 fn get_vertex_pos(step: &StepFile, v: Vertex) -> Option<(f64, f64, f64)> {
     if let Entity::VertexPoint(vp) = &step.0[v.0] {
         if let Entity::CartesianPoint(cp) = &step.0[vp.vertex_geometry.0] {
-            return Some((cp.coordinates[0].0, cp.coordinates[1].0, cp.coordinates[2].0));
+            return Some((
+                cp.coordinates[0].0,
+                cp.coordinates[1].0,
+                cp.coordinates[2].0,
+            ));
         }
     }
     None

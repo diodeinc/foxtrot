@@ -1,6 +1,6 @@
-use std::cmp::min;
-use nalgebra_glm::TVec;
 use crate::KnotVector;
+use nalgebra_glm::TVec;
+use std::cmp::min;
 
 #[derive(Debug, Clone)]
 pub struct NDBSplineCurve<const D: usize> {
@@ -11,11 +11,7 @@ pub struct NDBSplineCurve<const D: usize> {
 
 /// Abstract b-spline curve with N-dimensional control points
 impl<const D: usize> NDBSplineCurve<D> {
-    pub fn new(
-        open: bool,
-        knots: KnotVector,
-        control_points: Vec<TVec<f64, D>>,
-    ) -> Self {
+    pub fn new(open: bool, knots: KnotVector, control_points: Vec<TVec<f64, D>>) -> Self {
         Self {
             open,
             knots,
@@ -68,7 +64,12 @@ impl<const D: usize> NDBSplineCurve<D> {
         CK
     }
 
-    pub fn as_polyline(&self, u_start: f64, u_end: f64, num_points_per_knot: usize) -> Vec<TVec<f64, D>> {
+    pub fn as_polyline(
+        &self,
+        u_start: f64,
+        u_end: f64,
+        num_points_per_knot: usize,
+    ) -> Vec<TVec<f64, D>> {
         let (u_min, u_max) = if u_start < u_end {
             (u_start, u_end)
         } else {

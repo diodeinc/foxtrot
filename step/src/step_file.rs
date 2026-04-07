@@ -1,5 +1,5 @@
-use memchr::{memchr, memchr2, memchr_iter};
 use log::warn;
+use memchr::{memchr, memchr2, memchr_iter};
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
@@ -16,14 +16,32 @@ impl<'a> StepFile<'a> {
     /// Parses a STEP file from a raw array of bytes
     /// `data` must be preprocessed by [`strip_flatten`] first
     pub fn parse(data: &'a [u8]) -> Self {
+        if data.is_empty() {
+            warn!("STEP input is empty");
+            return Self(Vec::new());
+        }
         let blocks = Self::into_blocks(&data);
-        let data_start = blocks.iter()
-            .position(|b| b == b"DATA;")
-            .unwrap_or(0) + 1;
-        let data_end = blocks.iter()
+        if blocks.is_empty() {
+            warn!("STEP input contained no parseable blocks");
+            return Self(Vec::new());
+        }
+        let Some(data_start) = blocks.iter().position(|b| b == b"DATA;").map(|i| i + 1) else {
+            warn!("STEP input is missing a DATA section");
+            return Self(Vec::new());
+        };
+        let Some(data_end_rel) = blocks
+            .iter()
             .skip(data_start)
             .position(|b| b == b"ENDSEC;")
-            .unwrap_or(0) + data_start;
+        else {
+            warn!("STEP input is missing ENDSEC after DATA");
+            return Self(Vec::new());
+        };
+        let data_end = data_end_rel + data_start;
+        if data_start > data_end || data_end > blocks.len() {
+            warn!("STEP input has an invalid DATA block range");
+            return Self(Vec::new());
+        }
 
         // Parse every block, accumulating a Vec of Results.  We parse in
         // single-threaded mode in WASM builds, because there's no thread
@@ -31,28 +49,34 @@ impl<'a> StepFile<'a> {
         let block_iter = {
             let block_slice = &blocks[data_start..data_end];
             #[cfg(feature = "rayon")]
-            { block_slice.par_iter() }
+            {
+                block_slice.par_iter()
+            }
             #[cfg(not(feature = "rayon"))]
-            { block_slice.iter() }
+            {
+                block_slice.iter()
+            }
         };
 
         let parsed: Vec<(usize, Entity)> = block_iter
-            .filter_map(|b| parse_entity_decl(*b)
-                .or_else(|e| {
-                    warn!("Failed to parse {}: {:?}",
-                        std::str::from_utf8(b).unwrap_or("[INVALID UTF-8]"),
-                              e);
-                    parse_entity_fallback(*b)
-                })
-                .ok())
+            .filter_map(|b| {
+                parse_entity_decl(*b)
+                    .or_else(|e| {
+                        warn!(
+                            "Failed to parse {}: {:?}",
+                            std::str::from_utf8(b).unwrap_or("[INVALID UTF-8]"),
+                            e
+                        );
+                        parse_entity_fallback(*b)
+                    })
+                    .ok()
+            })
             .map(|b| b.1)
             .collect();
 
         // Awkward construction because `Entity` is not `Clone`
         let max_id = parsed.iter().map(|b| b.0).max().unwrap_or(0);
-        let mut out: Vec<Entity> = (0..=max_id)
-            .map(|_| Entity::_EmptySlot)
-            .collect();
+        let mut out: Vec<Entity> = (0..=max_id).map(|_| Entity::_EmptySlot).collect();
 
         for p in parsed.into_iter() {
             out[p.0] = p.1;
@@ -67,11 +91,13 @@ impl<'a> StepFile<'a> {
         let mut i = 0;
         while i < data.len() {
             match data[i] {
-                b'/' => if i + 1 < data.len() && data[i + 1] == b'*' {
-                    for j in memchr_iter(b'/', &data[i + 2..]) {
-                        if data[i + j + 1] == b'*' {
-                            i += j + 2;
-                            break;
+                b'/' => {
+                    if i + 1 < data.len() && data[i + 1] == b'*' {
+                        for j in memchr_iter(b'/', &data[i + 2..]) {
+                            if data[i + j + 1] == b'*' {
+                                i += j + 2;
+                                break;
+                            }
                         }
                     }
                 }
@@ -94,16 +120,26 @@ impl<'a> StepFile<'a> {
         let mut i = 0;
         let mut start = 0;
         while i < data.len() {
-            let next = memchr2(b'\'', b';', &data[i..]).unwrap();
+            let Some(next) = memchr2(b'\'', b';', &data[i..]) else {
+                warn!("Ignoring unterminated STEP block");
+                break;
+            };
             match data[i + next] {
                 // Skip over quoted blocks
-                b'\'' => i += next + memchr(b'\'', &data[i + next..]).unwrap() + 1,
+                b'\'' => {
+                    let quote_start = i + next + 1;
+                    let Some(end_quote) = memchr(b'\'', &data[quote_start..]) else {
+                        warn!("Ignoring unterminated STEP string literal");
+                        break;
+                    };
+                    i = quote_start + end_quote + 1;
+                }
                 b';' => {
                     blocks.push(&data[start..=(i + next)]);
 
                     i += next + 1; // Skip the semicolon
                     start = i;
-                },
+                }
                 _ => unreachable!(),
             }
         }
