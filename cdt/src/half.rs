@@ -259,11 +259,9 @@ impl Half {
 
     /// Swaps the target edge, which must be have a matched pair.
     pub fn swap(&mut self, e_ba: EdgeIndex) -> Result<(), Error> {
+        let edge = self.edge_checked(e_ba)?;
         // We refuse to swap fixed edges, though the caller may ask for it
-        if e_ba == EMPTY_EDGE || (e_ba.0 as usize) >= self.edges.len() {
-            return Err(Error::HalfEdgeInvariant);
-        }
-        if self.edges[e_ba].fixed() {
+        if edge.fixed() {
             return Ok(());
         }
         /* Before:
@@ -281,7 +279,6 @@ impl Half {
          *          V|V/
          *           b
         */
-        let edge = self.edge_checked(e_ba)?;
         if edge.buddy == EMPTY_EDGE {
             return Err(Error::HalfEdgeInvariant);
         }
