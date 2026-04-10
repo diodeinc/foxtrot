@@ -95,6 +95,21 @@ impl Half {
         self.edges[e]
     }
 
+    pub fn edge_checked(&self, e: EdgeIndex) -> Result<Edge, Error> {
+        if e == EMPTY_EDGE || (e.0 as usize) >= self.edges.len() {
+            return Err(Error::HalfEdgeInvariant);
+        }
+        Ok(self.edges[e])
+    }
+
+    pub fn next_checked(&self, e: EdgeIndex) -> Result<EdgeIndex, Error> {
+        Ok(self.edge_checked(e)?.next)
+    }
+
+    pub fn prev_checked(&self, e: EdgeIndex) -> Result<EdgeIndex, Error> {
+        Ok(self.edge_checked(e)?.prev)
+    }
+
     fn push_edge(&mut self, edge: Edge) -> Result<(), Error> {
         let mut index = self.edges.push(edge);
 
@@ -169,16 +184,17 @@ impl Half {
     /// using odd-even counting (i.e. we switch from outside to inside every
     /// time we cross a fixed edge).
     pub fn flood_erase_from(&mut self, e: EdgeIndex) -> Result<(), Error> {
-        if self.edge(e).buddy != EMPTY_EDGE {
+        let start_edge = self.edge_checked(e)?;
+        if start_edge.buddy != EMPTY_EDGE {
             return Err(Error::HalfEdgeInvariant);
         }
         let mut seen = EdgeVec::of(vec![false; self.edges.len()]);
-        let mut todo = vec![(e, self.edge(e).fixed())];
+        let mut todo = vec![(e, start_edge.fixed())];
         while let Some((e, inside)) = todo.pop() {
             if e == EMPTY_EDGE || seen[e] {
                 continue;
             }
-            let edge = self.edge(e);
+            let edge = self.edge_checked(e)?;
 
             if seen[edge.next] || seen[edge.prev] {
                 return Err(Error::HalfEdgeInvariant);
@@ -187,8 +203,8 @@ impl Half {
             seen[edge.next] = true;
             seen[edge.prev] = true;
 
-            let next = self.edge(edge.next);
-            let prev = self.edge(edge.prev);
+            let next = self.edge_checked(edge.next)?;
+            let prev = self.edge_checked(edge.prev)?;
             todo.push((next.buddy, inside ^ (next.sign == Some(true))));
             todo.push((prev.buddy, inside ^ (prev.sign == Some(true))));
             if !inside {
@@ -243,8 +259,9 @@ impl Half {
 
     /// Swaps the target edge, which must be have a matched pair.
     pub fn swap(&mut self, e_ba: EdgeIndex) -> Result<(), Error> {
+        let edge = self.edge_checked(e_ba)?;
         // We refuse to swap fixed edges, though the caller may ask for it
-        if self.edges[e_ba].fixed() {
+        if edge.fixed() {
             return Ok(());
         }
         /* Before:
@@ -262,20 +279,19 @@ impl Half {
          *          V|V/
          *           b
         */
-        let edge = self.edge(e_ba);
         if edge.buddy == EMPTY_EDGE {
             return Err(Error::HalfEdgeInvariant);
         }
 
-        let e_ac = self.next(e_ba);
-        let e_cb = self.prev(e_ba);
-        let c = self.edge(e_ac).dst;
+        let e_ac = self.next_checked(e_ba)?;
+        let e_cb = self.prev_checked(e_ba)?;
+        let c = self.edge_checked(e_ac)?.dst;
 
         let e_ab = edge.buddy;
 
-        let e_bd = self.next(e_ab);
-        let d = self.edge(e_bd).dst;
-        let e_da = self.prev(e_ab);
+        let e_bd = self.next_checked(e_ab)?;
+        let d = self.edge_checked(e_bd)?.dst;
+        let e_da = self.prev_checked(e_ab)?;
 
         /* After:
          *            a

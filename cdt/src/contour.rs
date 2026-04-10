@@ -161,7 +161,7 @@ impl Contour {
             let e_ab = t.half.insert(a.point, b.point, c.point,
                                      EMPTY_EDGE, EMPTY_EDGE, EMPTY_EDGE)?;
             // Link the new triangle with buddies or hull edges
-            let edge_ab = t.half.edge(e_ab);
+            let edge_ab = t.half.edge_checked(e_ab)?;
             let e_ca = edge_ab.prev;
             let e_bc = edge_ab.next;
             match a.data {
@@ -211,7 +211,7 @@ impl Contour {
             let e_ba = t.half.insert(b.point, a.point, c.point,
                                      EMPTY_EDGE, EMPTY_EDGE, EMPTY_EDGE)?;
             // Link the new triangle with buddies or hull edges
-            let edge_ba = t.half.edge(e_ba);
+            let edge_ba = t.half.edge_checked(e_ba)?;
             let e_cb = edge_ba.prev;
             let e_ac = edge_ba.next;
             match a.data {
@@ -234,7 +234,7 @@ impl Contour {
         };
 
         {   // Legalize the two outer edges of the new triangle
-            let edge = t.half.edge(new_edge);
+            let edge = t.half.edge_checked(new_edge)?;
             t.legalize(edge.next)?;
             t.legalize(edge.prev)?;
         }
