@@ -450,8 +450,8 @@ impl Triangulation {
             let el = self.hull.edge(hl);
             let er = self.hull.edge(hr);
 
-            let edge_l = self.half.edge(el);
-            let edge_r = self.half.edge(er);
+            let edge_l = self.half.edge_checked(el)?;
+            let edge_r = self.half.edge_checked(er)?;
             if edge_r.dst != edge_l.src {
                 return Err(Error::HalfEdgeInvariant);
             }
@@ -548,7 +548,7 @@ impl Triangulation {
          *          b<------a [previous hull edge]
          *              e
          */
-        let edge = self.half.edge(e_ab);
+        let edge = self.half.edge_checked(e_ab)?;
         let a = edge.src;
         let b = edge.dst;
         if edge.next == EMPTY_EDGE
@@ -587,8 +587,8 @@ impl Triangulation {
             if edge.buddy != EMPTY_EDGE {
                 return Err(Error::HalfEdgeInvariant);
             }
-            let edge_bc = self.half.edge(edge.next);
-            let edge_ca = self.half.edge(edge.prev);
+            let edge_bc = self.half.edge_checked(edge.next)?;
+            let edge_ca = self.half.edge_checked(edge.prev)?;
             let c = edge_bc.dst;
             if c != edge_ca.src {
                 return Err(Error::HalfEdgeInvariant);
@@ -662,7 +662,7 @@ impl Triangulation {
                  */
                 let h_ca = self.hull.right_hull(h_ab);
                 let e_ca = self.hull.edge(h_ca);
-                let edge_ca = self.half.edge(e_ca);
+                let edge_ca = self.half.edge_checked(e_ca)?;
                 if a != edge_ca.dst {
                     return Err(Error::HalfEdgeInvariant);
                 }
@@ -713,13 +713,13 @@ impl Triangulation {
             // h_b will be pointing at the b->p edge.
             h_b = self.hull.left_hull(h_b);
             let e_pb = self.hull.edge(h_b);
-            let edge_pb = self.half.edge(e_pb);
+            let edge_pb = self.half.edge_checked(e_pb)?;
             let b = edge_pb.dst;
 
             // Pick out the next item in the list
             let h_q = self.hull.left_hull(h_b);
             let e_bq = self.hull.edge(h_q);
-            let edge_bq = self.half.edge(e_bq);
+            let edge_bq = self.half.edge_checked(e_bq)?;
             let q = edge_bq.dst;
 
             // If we're building a constrained triangulation, then we force the
@@ -764,7 +764,7 @@ impl Triangulation {
             // Move one edge to the left.  In the first iteration of the loop,
             // h_a will be pointing at the p->a edge.
             let e_ap = self.hull.edge(h_a);
-            let edge_ap = self.half.edge(e_ap);
+            let edge_ap = self.half.edge_checked(e_ap)?;
             let a = edge_ap.src;
             if a == p {
                 return Err(Error::HalfEdgeInvariant);
@@ -773,7 +773,7 @@ impl Triangulation {
             // Scoot over by one to look at the a-q edge
             h_a = self.hull.right_hull(h_a);
             let e_qa = self.hull.edge(h_a);
-            let edge_qa = self.half.edge(e_qa);
+            let edge_qa = self.half.edge_checked(e_qa)?;
             let q = edge_qa.src;
 
             // Same check as above
@@ -829,8 +829,8 @@ impl Triangulation {
         // Note that e_right-e_left may be a wedge that contains multiple
         // triangles (for example, this would be the case if there was an edge
         // flip of b->a)
-        let wedge_left = self.half.edge(e_left).dst;
-        let wedge_right = self.half.edge(e_right).src;
+        let wedge_left = self.half.edge_checked(e_left)?.dst;
+        let wedge_right = self.half.edge_checked(e_right)?.src;
 
         // If the fixed edge is directly attached to src, then we can declare
         // that we're done right away (and the caller will lock the edge)
@@ -854,10 +854,10 @@ impl Triangulation {
 
         // Walk the inside of the wedge until we find the
         // subtriangle which captures the p-src line.
-        let mut index_a_src = self.half.edge(e_left).prev;
+        let mut index_a_src = self.half.edge_checked(e_left)?.prev;
 
         loop {
-            let edge_a_src = self.half.edge(index_a_src);
+            let edge_a_src = self.half.edge_checked(index_a_src)?;
             let a = edge_a_src.src;
             if a == dst {
                 /* Lucky break: the src point is one of the edges directly
@@ -918,7 +918,7 @@ impl Triangulation {
                 if buddy == EMPTY_EDGE {
                     return Err(Error::WedgeEscape);
                 }
-                index_a_src = self.half.edge(buddy).prev;
+                index_a_src = self.half.edge_checked(buddy)?.prev;
             } else {
                 // Hit a vertex exactly on the src→dst line; split there
                 return Ok(Walk::Through(a));
@@ -944,11 +944,11 @@ impl Triangulation {
                     :
                    dst
          */
-        let edge_ba = self.half.edge(e);
+        let edge_ba = self.half.edge_checked(e)?;
         let e_ac = edge_ba.next;
         let e_cb = edge_ba.prev;
-        let edge_ac = self.half.edge(e_ac);
-        let edge_cb = self.half.edge(e_cb);
+        let edge_ac = self.half.edge_checked(e_ac)?;
+        let edge_cb = self.half.edge_checked(e_cb)?;
 
         // Delete this triangle from the triangulation; it will be
         // reconstructed later in a more perfect form.
@@ -1002,11 +1002,11 @@ impl Triangulation {
                    :     c
                   dst
              */
-            let edge_ab = self.half.edge(e);
+            let edge_ab = self.half.edge_checked(e)?;
             let e_bc = edge_ab.next;
             let e_ca = edge_ab.prev;
-            let edge_bc = self.half.edge(e_bc);
-            let edge_ca = self.half.edge(e_ca);
+            let edge_bc = self.half.edge_checked(e_bc)?;
+            let edge_ca = self.half.edge_checked(e_ca)?;
             let c = edge_bc.dst;
 
             // Erase this triangle from the triangulation before
@@ -1033,7 +1033,8 @@ impl Triangulation {
 
                 // This better have terminated the triangulation of
                 // the upper contour with a dst-src edge
-                if self.half.edge(e_dst_src).dst != src || self.half.edge(e_dst_src).src != dst {
+                let edge_dst_src = self.half.edge_checked(e_dst_src)?;
+                if edge_dst_src.dst != src || edge_dst_src.src != dst {
                     return Err(Error::HalfEdgeInvariant);
                 }
 
@@ -1055,7 +1056,8 @@ impl Triangulation {
 
                 // Similarly, this better have terminated the
                 // triangulation of the lower contour.
-                if self.half.edge(e_src_dst).src != src || self.half.edge(e_src_dst).dst != dst {
+                let edge_src_dst = self.half.edge_checked(e_src_dst)?;
+                if edge_src_dst.src != src || edge_src_dst.dst != dst {
                     return Err(Error::HalfEdgeInvariant);
                 }
 
@@ -1211,22 +1213,25 @@ impl Triangulation {
          *  This function may be called with a half-empty edge, e.g. while
          *  recursing; in that case, then return immediately.
          */
-        let edge = self.half.edge(e_ab);
+        if e_ab == EMPTY_EDGE {
+            return Ok(());
+        }
+        let edge = self.half.edge_checked(e_ab)?;
         if edge.fixed() || edge.buddy == EMPTY_EDGE {
             return Ok(());
         }
         let a = edge.src;
         let b = edge.dst;
-        let c = self.half.edge(self.half.next(e_ab)).dst;
+        let c = self.half.edge_checked(self.half.next_checked(e_ab)?)?.dst;
 
         let e_ba = edge.buddy;
-        let e_ad = self.half.next(e_ba);
-        let d = self.half.edge(e_ad).dst;
+        let e_ad = self.half.next_checked(e_ba)?;
+        let d = self.half.edge_checked(e_ad)?.dst;
 
         if in_circle(self.points[a], self.points[b], self.points[c],
                      self.points[d]) > 0.0
         {
-            let e_db = self.half.prev(e_ba);
+            let e_db = self.half.prev_checked(e_ba)?;
 
             self.half.swap(e_ab)?;
             self.legalize(e_ad)?;
@@ -1659,5 +1664,12 @@ mod tests {
         if let Err(e) = t {
             assert!(e == Error::OpenContour);
         }
+    }
+
+    #[test]
+    fn legalize_empty_edge_is_noop() {
+        let pts = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
+        let mut t = Triangulation::build(&pts).expect("Could not construct");
+        assert_eq!(t.legalize(EMPTY_EDGE), Ok(()));
     }
 }
