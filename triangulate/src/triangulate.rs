@@ -960,6 +960,14 @@ fn get_surface(s: &StepFile, surf: ap214::Surface) -> Result<Surface, Error> {
             let (location, axis, _ref_direction) = axis2_placement_3d(s, c.position)?;
             Surface::new_torus(location, axis, c.major_radius.0.0.0, c.minor_radius.0.0.0)
         },
+        Entity::DegenerateToroidalSurface(c) => {
+            // A degenerate toroidal surface has minor_radius >= major_radius,
+            // causing self-intersection.  select_outer chooses which sheet.
+            // We treat it as a regular torus for tessellation purposes;
+            // the CDT will handle the resulting geometry.
+            let (location, axis, _ref_direction) = axis2_placement_3d(s, c.position)?;
+            Surface::new_torus(location, axis, c.major_radius.0.0.0, c.minor_radius.0.0.0)
+        },
         Entity::Plane(p) => {
             // We'll ignore axis and ref_direction in favor of building an
             // orthonormal basis later on
@@ -1235,17 +1243,90 @@ fn segment_intersection_params(
     c: (f64, f64), d: (f64, f64),
 ) -> Option<(f64, f64)> {
     let denom = (b.0 - a.0) * (d.1 - c.1) - (b.1 - a.1) * (d.0 - c.0);
-    if denom.abs() < 1e-12 {
+    if denom.abs() < 1e-15 {
         return None; // parallel or coincident
     }
     let t = ((c.0 - a.0) * (d.1 - c.1) - (c.1 - a.1) * (d.0 - c.0)) / denom;
     let s = ((c.0 - a.0) * (b.1 - a.1) - (c.1 - a.1) * (b.0 - a.0)) / denom;
+    // Use a generous epsilon to catch near-endpoint crossings that the CDT's
+    // exact predicates would detect.
     let eps = 1e-10;
     if t > eps && t < 1.0 - eps && s > eps && s < 1.0 - eps {
         Some((t, s))
     } else {
         None
     }
+}
+
+/// Check if point p is within `eps` distance of segment a→b (but not near
+/// the endpoints).  Returns the parameter t along a→b if so.
+fn point_near_segment(
+    p: (f64, f64), a: (f64, f64), b: (f64, f64), eps: f64,
+) -> Option<f64> {
+    let ab = (b.0 - a.0, b.1 - a.1);
+    let ab_len2 = ab.0 * ab.0 + ab.1 * ab.1;
+    if ab_len2 < eps * eps {
+        return None;
+    }
+    let ap = (p.0 - a.0, p.1 - a.1);
+    let t = (ap.0 * ab.0 + ap.1 * ab.1) / ab_len2;
+    let end_margin = 0.01; // 1% from endpoints
+    if t <= end_margin || t >= 1.0 - end_margin {
+        return None;
+    }
+    // Distance from p to the line through a,b
+    let cross = (ap.0 * ab.1 - ap.1 * ab.0).abs();
+    let dist = cross / ab_len2.sqrt();
+    if dist < eps {
+        Some(t)
+    } else {
+        None
+    }
+}
+
+/// Snap duplicate or nearly-coincident 2D points to the same index.
+/// This prevents the CDT from seeing crossing edges caused by
+/// numerical noise in the surface lowering.
+fn dedup_close_points(
+    pts: &mut Vec<(f64, f64)>,
+    edges: &mut Vec<(usize, usize)>,
+    boundary_count: usize,
+) {
+    // Compute bounding box diagonal for relative tolerance
+    let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &(x, y) in pts.iter().take(boundary_count) {
+        xmin = xmin.min(x); xmax = xmax.max(x);
+        ymin = ymin.min(y); ymax = ymax.max(y);
+    }
+    let diag = ((xmax - xmin).powi(2) + (ymax - ymin).powi(2)).sqrt();
+    if diag < 1e-15 {
+        return;
+    }
+    let eps = diag * 1e-8;
+
+    // Build a mapping: for each point, find if there's an earlier point
+    // within epsilon distance
+    let mut remap: Vec<usize> = (0..pts.len()).collect();
+    for i in 1..boundary_count {
+        for j in 0..i {
+            let dx = pts[i].0 - pts[j].0;
+            let dy = pts[i].1 - pts[j].1;
+            if dx.abs() < eps && dy.abs() < eps {
+                remap[i] = remap[j];
+                break;
+            }
+        }
+    }
+
+    // Apply remapping to edges
+    for edge in edges.iter_mut() {
+        edge.0 = remap[edge.0];
+        edge.1 = remap[edge.1];
+    }
+
+    // Remove degenerate edges (where src == dst after remapping)
+    edges.retain(|e| e.0 != e.1);
 }
 
 /// Pre-process edges to resolve any crossings before feeding them to the CDT.
@@ -1257,8 +1338,23 @@ fn resolve_crossing_edges(
     verts: &mut Vec<mesh::Vertex>,
     v_start: usize,
 ) {
-    // Limit iterations to prevent pathological runaway
-    for _ in 0..100 {
+    let boundary_count = pts.len();
+
+    // First, dedup nearly-coincident points to prevent phantom crossings
+    dedup_close_points(pts, edges, boundary_count);
+
+    // Compute bounding box diagonal for relative tolerance
+    let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &(x, y) in pts.iter().take(boundary_count) {
+        xmin = xmin.min(x); xmax = xmax.max(x);
+        ymin = ymin.min(y); ymax = ymax.max(y);
+    }
+    let diag = ((xmax - xmin).powi(2) + (ymax - ymin).powi(2)).sqrt();
+    let snap_eps = if diag > 1e-15 { diag * 1e-7 } else { 1e-12 };
+
+    // Phase 1: resolve actual crossings (edge-edge intersections)
+    for _ in 0..200 {
         let mut found = None;
         'outer: for i in 0..edges.len() {
             for j in (i + 1)..edges.len() {
@@ -1309,4 +1405,35 @@ fn resolve_crossing_edges(
         edges[j] = (c, new_idx);
         edges.push((new_idx, d));
     }
+
+    // Phase 2: resolve T-intersections where a vertex lies very close to
+    // an edge but is not an endpoint.  The CDT uses exact predicates, so
+    // even tiny proximity can cause CrossingFixedEdge.
+    for _ in 0..200 {
+        let mut found = None;
+        'outer2: for ei in 0..edges.len() {
+            let (a, b) = edges[ei];
+            for pi in 0..boundary_count {
+                if pi == a || pi == b {
+                    continue;
+                }
+                if let Some(t) = point_near_segment(pts[pi], pts[a], pts[b], snap_eps) {
+                    found = Some((ei, pi, t));
+                    break 'outer2;
+                }
+            }
+        }
+        let (ei, pi, _t) = match found {
+            Some(v) => v,
+            None => break,
+        };
+
+        // Split the edge at this point
+        let (a, b) = edges[ei];
+        edges[ei] = (a, pi);
+        edges.push((pi, b));
+    }
+
+    // Remove degenerate edges after all splits
+    edges.retain(|e| e.0 != e.1);
 }
