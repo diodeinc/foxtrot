@@ -468,13 +468,40 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
         .collect();
 
     // Store a map of ShapeRepresentationRelationships, which some models
-    // use to map from axes to specific instances
+    // use to map from a product-level ShapeRepresentation to the concrete
+    // AdvancedBrepShapeRepresentation / ManifoldSurfaceShapeRepresentation
+    // that contains the meshable items.
+    //
+    // The STEP attribute names (`rep_1`, `rep_2`) are not a reliable
+    // parent→child direction in practice: e.g. Inventor/PDElib files often
+    // write `SHAPE_REPRESENTATION_RELATIONSHIP(...,#advanced_brep,#shape)`.
+    // Build the traversal edge from the non-mesh representation to the
+    // mesh-bearing representation, regardless of attribute order.
+    let representation_has_mesh_items = |rep: Id<_>| -> bool {
+        let items = match &s[rep] {
+            Entity::AdvancedBrepShapeRepresentation(b) => &b.items,
+            Entity::ShapeRepresentation(b) => &b.items,
+            Entity::ManifoldSurfaceShapeRepresentation(b) => &b.items,
+            _ => return false,
+        };
+        items.iter().any(|m| matches!(
+            &s[*m],
+            Entity::ManifoldSolidBrep(_)
+                | Entity::BrepWithVoids(_)
+                | Entity::ShellBasedSurfaceModel(_)
+        ))
+    };
+
     let mut shape_rep_relationship: HashMap<Id<_>, Vec<Id<_>>> = HashMap::new();
     for (r1, r2) in s.0.iter()
         .filter_map(|e| ShapeRepresentationRelationship_::try_from_entity(e))
         .map(|e| (e.rep_1, e.rep_2))
     {
-        shape_rep_relationship.entry(r1).or_default().push(r2);
+        match (representation_has_mesh_items(r1), representation_has_mesh_items(r2)) {
+            (true, false) => shape_rep_relationship.entry(r2).or_default().push(r1),
+            (false, true) => shape_rep_relationship.entry(r1).or_default().push(r2),
+            _ => continue,
+        };
     }
 
     let rep_instances = collect_rep_instances(s);
