@@ -364,6 +364,79 @@ impl Surface {
         }
     }
 
+    fn unwrap_periodic_coord(pts: &mut [(f64, f64)],
+                             edges: &[(usize, usize)],
+                             start_edge: usize,
+                             end_edge: usize,
+                             coord: usize,
+                             period: f64,
+                             skip_large_closing_jump: bool) -> bool {
+        if period.abs() <= EPSILON || !period.is_finite() {
+            return false;
+        }
+        let n = end_edge - start_edge;
+        if n < 2 {
+            return false;
+        }
+        let vertices: Vec<_> = edges[start_edge..end_edge]
+            .iter()
+            .map(|edge| edge.0)
+            .collect();
+        if vertices.iter().any(|&idx| idx >= pts.len()) {
+            return false;
+        }
+
+        let raw: Vec<_> = vertices.iter()
+            .map(|&idx| Self::uv_coord(pts[idx], coord))
+            .collect();
+        let mut best = raw.clone();
+        let mut best_max_jump = f64::INFINITY;
+        let mut best_sum_jump = f64::INFINITY;
+
+        // Try every vertex as the loop anchor.  If the loop has a consistent
+        // unwrap, this avoids leaving an arbitrary full-period jump on the
+        // closing constrained edge just because the first lowered vertex was
+        // chosen on the wrong side of the seam.
+        for anchor in 0..n {
+            let mut candidate = raw.clone();
+            let mut prev = anchor;
+            for step in 1..n {
+                let cur = (anchor + step) % n;
+                candidate[cur] = Self::unwrap_near(raw[cur], candidate[prev], period);
+                prev = cur;
+            }
+
+            let mut max_jump: f64 = 0.0;
+            let mut sum_jump = 0.0;
+            for i in 0..n {
+                let d = (candidate[(i + 1) % n] - candidate[i]).abs();
+                max_jump = max_jump.max(d);
+                sum_jump += d * d;
+            }
+            if max_jump < best_max_jump - 1e-9
+                || ((max_jump - best_max_jump).abs() <= 1e-9 && sum_jump < best_sum_jump)
+            {
+                best = candidate;
+                best_max_jump = max_jump;
+                best_sum_jump = sum_jump;
+            }
+        }
+
+        if skip_large_closing_jump && best_max_jump > period.abs() * 0.5 {
+            // A single closed edge that winds all the way around the periodic
+            // dimension cannot be represented as a closed contour in one
+            // unwrapped plane without leaving one full-period constrained edge.
+            // Leave these iso-periodic loops in their lowered coordinates;
+            // otherwise the artificial cut can create CDT regressions.
+            return false;
+        }
+
+        for (&idx, value) in vertices.iter().zip(best.into_iter()) {
+            Self::set_uv_coord(&mut pts[idx], coord, value);
+        }
+        true
+    }
+
     fn straighten_periodic_runs(pts: &mut [(f64, f64)],
                                 edges: &[(usize, usize)],
                                 start_edge: usize,
@@ -448,7 +521,7 @@ impl Surface {
     pub fn unwrap_periodic(&self,
                            pts: &mut [(f64, f64)],
                            edges: &[(usize, usize)],
-                           ranges: &[(usize, usize)]) {
+                           ranges: &[(usize, usize, bool)]) {
         if ranges.is_empty() {
             return;
         }
@@ -457,28 +530,22 @@ impl Surface {
             return;
         }
 
-        for &(start_edge, end_edge) in ranges {
+        for &(start_edge, end_edge, single_edge_bound) in ranges {
             if start_edge >= end_edge || end_edge > edges.len() {
                 continue;
             }
-            let mut prev = edges[start_edge].0;
-            for edge in &edges[(start_edge + 1)..end_edge] {
-                let cur = edge.0;
-                if cur >= pts.len() || prev >= pts.len() {
-                    break;
-                }
-                if let Some(period) = u_period {
-                    pts[cur].0 = Self::unwrap_near(pts[cur].0, pts[prev].0, period);
-                }
-                if let Some(period) = v_period {
-                    pts[cur].1 = Self::unwrap_near(pts[cur].1, pts[prev].1, period);
-                }
-                prev = cur;
-            }
-            if u_period.is_some() {
+            let unwrapped_u = u_period
+                .map(|period| Self::unwrap_periodic_coord(
+                    pts, edges, start_edge, end_edge, 0, period, single_edge_bound))
+                .unwrap_or(false);
+            let unwrapped_v = v_period
+                .map(|period| Self::unwrap_periodic_coord(
+                    pts, edges, start_edge, end_edge, 1, period, single_edge_bound))
+                .unwrap_or(false);
+            if unwrapped_u {
                 Self::straighten_periodic_runs(pts, edges, start_edge, end_edge, 0, 1);
             }
-            if v_period.is_some() {
+            if unwrapped_v {
                 Self::straighten_periodic_runs(pts, edges, start_edge, end_edge, 1, 0);
             }
         }

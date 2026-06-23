@@ -832,7 +832,7 @@ fn advanced_face(
     let v_start = mesh.verts.len();
     let mut num_pts = 0;
     for b in &face.bounds {
-        let (bound_contours, unwrap_periodic_bound) = face_bound(s, *b)?;
+        let (bound_contours, edge_loop_len) = face_bound(s, *b)?;
 
         match bound_contours.len() {
             // We should always have non-zero items in the contour
@@ -878,8 +878,8 @@ fn advanced_face(
                 let last = edges.last_mut()
                     .ok_or(Error::InvalidGeometry("contour loop had no edges"))?;
                 last.1 = start;
-                if unwrap_periodic_bound {
-                    unwrap_ranges.push((edge_start, edges.len()));
+                if edge_loop_len > 0 {
+                    unwrap_ranges.push((edge_start, edges.len(), edge_loop_len == 1));
                 }
             }
         }
@@ -1109,7 +1109,7 @@ fn control_points_2d(s: &StepFile, rows: &Vec<Vec<CartesianPoint>>) -> Result<Ve
         .collect()
 }
 
-fn face_bound(s: &StepFile, b: FaceBound) -> Result<(Vec<DVec3>, bool), Error> {
+fn face_bound(s: &StepFile, b: FaceBound) -> Result<(Vec<DVec3>, usize), Error> {
     let (bound, orientation) = match &s[b] {
         Entity::FaceBound(b) => (b.bound, b.orientation),
         Entity::FaceOuterBound(b) => (b.bound, b.orientation),
@@ -1121,12 +1121,12 @@ fn face_bound(s: &StepFile, b: FaceBound) -> Result<(Vec<DVec3>, bool), Error> {
             if !orientation {
                 d.reverse()
             }
-            Ok((d, e.edge_list.len() > 1))
+            Ok((d, e.edge_list.len()))
         },
         Entity::VertexLoop(v) => {
             // This is an "edge loop" with a single vertex, which is
             // used for cones and not really anything else.
-            Ok((vec![vertex_point(s, v.loop_vertex)?], false))
+            Ok((vec![vertex_point(s, v.loop_vertex)?], 0))
         }
         _ => Err(Error::InvalidStepEntity("FaceBound.bound")),
     }
