@@ -18,8 +18,14 @@ pub enum Curve {
         dir: bool
     },
     Line,
-    BSplineCurveWithKnots(SampledCurve<3>),
-    NURBSCurve(SampledCurve<4>),
+    BSplineCurveWithKnots {
+        curve: SampledCurve<3>,
+        dir: bool,
+    },
+    NURBSCurve {
+        curve: SampledCurve<4>,
+        dir: bool,
+    },
 }
 
 impl Curve {
@@ -53,12 +59,19 @@ impl Curve {
     }
 
     fn curve_points<const N: usize>(u: DVec3, v: DVec3, curve: &SampledCurve<N>,
-                                     is_loop: bool) -> Result<Vec<DVec3>, Error>
+                                     is_loop: bool, dir: bool) -> Result<Vec<DVec3>, Error>
         where NDBSplineCurve<N>: AbstractCurve
     {
         let (t_start, t_end) = if is_loop {
-            // Full-loop edge: sample the entire parameter range
-            (curve.min_u(), curve.max_u())
+            // Full-loop edge: sample the entire parameter range.  For closed
+            // spline curves, the start and end vertices are identical, so the
+            // direction cannot be recovered from their parameters; use the
+            // oriented edge / same_sense direction instead.
+            if dir {
+                (curve.min_u(), curve.max_u())
+            } else {
+                (curve.max_u(), curve.min_u())
+            }
         } else {
             (curve.u_from_point(u), curve.u_from_point(v))
         };
@@ -76,8 +89,8 @@ impl Curve {
     pub fn build(&self, u: DVec3, v: DVec3, is_loop: bool) -> Result<Vec<DVec3>, Error> {
         match self {
             Self::Line => Ok(vec![u, v]),
-            Self::BSplineCurveWithKnots(curve) => Self::curve_points(u, v, curve, is_loop),
-            Self::NURBSCurve(curve) => Self::curve_points(u, v, curve, is_loop),
+            Self::BSplineCurveWithKnots { curve, dir } => Self::curve_points(u, v, curve, is_loop, *dir),
+            Self::NURBSCurve { curve, dir } => Self::curve_points(u, v, curve, is_loop, *dir),
             Self::Ellipse {
                 eplane_from_world, world_from_eplane, closed, dir
             } => {
