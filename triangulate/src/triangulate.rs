@@ -766,7 +766,7 @@ fn open_shell(
     for face in &cs.cfs_faces {
         if let Err(err) = advanced_face(
             s,
-            face.cast(),
+            *face,
             mesh,
             stats,
             styled_item_colors,
@@ -794,7 +794,7 @@ fn closed_shell(
     for face in &cs.cfs_faces {
         if let Err(err) = advanced_face(
             s,
-            face.cast(),
+            *face,
             mesh,
             stats,
             styled_item_colors,
@@ -808,19 +808,25 @@ fn closed_shell(
 
 fn advanced_face(
     s: &StepFile,
-    f: AdvancedFace,
+    f: Face,
     mesh: &mut Mesh,
     stats: &mut Stats,
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
 ) -> Result<(), Error> {
-    let face = s.entity(f).ok_or(Error::InvalidStepEntity("AdvancedFace"))?;
+    // Closed shells may legally reference either ADVANCED_FACE or the more
+    // general FACE_SURFACE; OCCT/KiCad translate both through FaceSurface.
+    let (bounds, face_geometry, same_sense) = match &s[f] {
+        Entity::AdvancedFace(face) => (&face.bounds[..], face.face_geometry, face.same_sense),
+        Entity::FaceSurface(face) => (&face.bounds[..], face.face_geometry, face.same_sense),
+        _ => return Err(Error::InvalidStepEntity("FaceSurface")),
+    };
     let face_color = styled_item_colors.get(&f.0).copied().unwrap_or(default_color);
     stats.num_faces += 1;
-    info!("triangulating face {} (geometry {})", f.0, face.face_geometry.0);
+    info!("triangulating face {} (geometry {})", f.0, face_geometry.0);
 
     // Grab the surface, returning early if it's unimplemented
-    let mut surf = get_surface(s, face.face_geometry)?;
+    let mut surf = get_surface(s, face_geometry)?;
 
     // This is the starting point at which we insert new vertices
     let offset = mesh.verts.len();
@@ -831,7 +837,7 @@ fn advanced_face(
     let mut unwrap_ranges = Vec::new();
     let v_start = mesh.verts.len();
     let mut num_pts = 0;
-    for b in &face.bounds {
+    for b in bounds {
         let (bound_contours, edge_loop_len) = face_bound(s, *b)?;
 
         match bound_contours.len() {
@@ -895,7 +901,7 @@ fn advanced_face(
     resolve_crossing_edges(&mut pts, &mut edges, &mut mesh.verts, v_start);
     let bonus_points = pts.len();
     surf.add_steiner_points(&mut pts, &mut mesh.verts);
-    let face_id = face.face_geometry.0;
+    let face_id = face_geometry.0;
     let n_steiner = pts.len() - bonus_points;
     info!("face {} cdt input: {} pts ({} boundary, {} steiner), {} edges",
           face_id, pts.len(), bonus_points, n_steiner, edges.len());
@@ -951,7 +957,7 @@ fn advanced_face(
                 let b = (b + offset) as u32;
                 let c = (c + offset) as u32;
                 mesh.triangles.push(Triangle { verts:
-                    if face.same_sense {
+                    if same_sense {
                         U32Vec3::new(a, b, c)
                     } else {
                         U32Vec3::new(a, c, b)
@@ -962,7 +968,7 @@ fn advanced_face(
         Err(e) => {
             debug!(
                 "Got error while triangulating {}: {:?}",
-                face.face_geometry.0,
+                face_geometry.0,
                 e
             );
             stats.num_errors += 1;
@@ -974,7 +980,7 @@ fn advanced_face(
         v.color = face_color;
     }
     // Flip normals of new vertices, depending on the same_sense flag
-    if !face.same_sense {
+    if !same_sense {
         for v in &mut mesh.verts[v_start..] {
             v.norm = -v.norm;
         }
@@ -1347,5 +1353,71 @@ fn resolve_crossing_edges(
         let (c, d) = edges[j];
         edges[j] = (c, new_idx);
         edges.push((new_idx, d));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn triangulates_face_surface_in_closed_shell() {
+        let data = br#"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''), '2;1');
+FILE_NAME('face_surface_square.step','','',(''),(''),'','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=VERTEX_POINT('',#1);
+#3=CARTESIAN_POINT('',(1.,0.,0.));
+#4=VERTEX_POINT('',#3);
+#5=CARTESIAN_POINT('',(1.,1.,0.));
+#6=VERTEX_POINT('',#5);
+#7=CARTESIAN_POINT('',(0.,1.,0.));
+#8=VERTEX_POINT('',#7);
+#9=DIRECTION('',(1.,0.,0.));
+#10=VECTOR('',#9,1.);
+#11=LINE('',#1,#10);
+#12=EDGE_CURVE('',#2,#4,#11,.T.);
+#13=DIRECTION('',(0.,1.,0.));
+#14=VECTOR('',#13,1.);
+#15=LINE('',#3,#14);
+#16=EDGE_CURVE('',#4,#6,#15,.T.);
+#17=DIRECTION('',(-1.,0.,0.));
+#18=VECTOR('',#17,1.);
+#19=LINE('',#5,#18);
+#20=EDGE_CURVE('',#6,#8,#19,.T.);
+#21=DIRECTION('',(0.,-1.,0.));
+#22=VECTOR('',#21,1.);
+#23=LINE('',#7,#22);
+#24=EDGE_CURVE('',#8,#2,#23,.T.);
+#25=ORIENTED_EDGE('',*,*,#12,.T.);
+#26=ORIENTED_EDGE('',*,*,#16,.T.);
+#27=ORIENTED_EDGE('',*,*,#20,.T.);
+#28=ORIENTED_EDGE('',*,*,#24,.T.);
+#29=EDGE_LOOP('',(#25,#26,#27,#28));
+#30=FACE_OUTER_BOUND('',#29,.T.);
+#31=DIRECTION('',(0.,0.,1.));
+#32=DIRECTION('',(1.,0.,0.));
+#33=AXIS2_PLACEMENT_3D('',#1,#31,#32);
+#34=PLANE('',#33);
+#35=FACE_SURFACE('',(#30),#34,.T.);
+#36=CLOSED_SHELL('',(#35));
+#37=SHELL_BASED_SURFACE_MODEL('',(#36));
+ENDSEC;
+END-ISO-10303-21;
+"#;
+
+        let flat = StepFile::strip_flatten(data);
+        let step = StepFile::parse(&flat);
+        let (mesh, stats) = triangulate(&step);
+
+        assert_eq!(stats.num_faces, 1);
+        assert_eq!(stats.num_errors, 0);
+        assert_eq!(stats.num_panics, 0);
+        assert_eq!(mesh.triangles.len(), 2);
+        assert_eq!(mesh.verts.len(), 4);
     }
 }
