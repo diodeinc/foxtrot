@@ -828,10 +828,11 @@ fn advanced_face(
     // For each contour, project from 3D down to the surface, then
     // start collecting them as constrained edges for triangulation
     let mut edges = Vec::new();
+    let mut unwrap_ranges = Vec::new();
     let v_start = mesh.verts.len();
     let mut num_pts = 0;
     for b in &face.bounds {
-        let bound_contours = face_bound(s, *b)?;
+        let (bound_contours, unwrap_periodic_bound) = face_bound(s, *b)?;
 
         match bound_contours.len() {
             // We should always have non-zero items in the contour
@@ -853,6 +854,7 @@ fn advanced_face(
             _ => {
                 // Record the initial point to close the loop
                 let start = num_pts;
+                let edge_start = edges.len();
                 for pt in bound_contours {
                     // The contour marches forward!
                     edges.push((num_pts, num_pts + 1));
@@ -876,6 +878,9 @@ fn advanced_face(
                 let last = edges.last_mut()
                     .ok_or(Error::InvalidGeometry("contour loop had no edges"))?;
                 last.1 = start;
+                if unwrap_periodic_bound {
+                    unwrap_ranges.push((edge_start, edges.len()));
+                }
             }
         }
     }
@@ -886,6 +891,7 @@ fn advanced_face(
     // assigning it to the first point in the list, which causes it to get
     // deduplicated), then retry.
     let mut pts = surf.lower_verts(&mut mesh.verts[v_start..])?;
+    surf.unwrap_periodic(&mut pts, &edges, &unwrap_ranges);
     resolve_crossing_edges(&mut pts, &mut edges, &mut mesh.verts, v_start);
     let bonus_points = pts.len();
     surf.add_steiner_points(&mut pts, &mut mesh.verts);
@@ -1103,7 +1109,7 @@ fn control_points_2d(s: &StepFile, rows: &Vec<Vec<CartesianPoint>>) -> Result<Ve
         .collect()
 }
 
-fn face_bound(s: &StepFile, b: FaceBound) -> Result<Vec<DVec3>, Error> {
+fn face_bound(s: &StepFile, b: FaceBound) -> Result<(Vec<DVec3>, bool), Error> {
     let (bound, orientation) = match &s[b] {
         Entity::FaceBound(b) => (b.bound, b.orientation),
         Entity::FaceOuterBound(b) => (b.bound, b.orientation),
@@ -1115,12 +1121,12 @@ fn face_bound(s: &StepFile, b: FaceBound) -> Result<Vec<DVec3>, Error> {
             if !orientation {
                 d.reverse()
             }
-            Ok(d)
+            Ok((d, e.edge_list.len() > 1))
         },
         Entity::VertexLoop(v) => {
             // This is an "edge loop" with a single vertex, which is
             // used for cones and not really anything else.
-            Ok(vec![vertex_point(s, v.loop_vertex)?])
+            Ok((vec![vertex_point(s, v.loop_vertex)?], false))
         }
         _ => Err(Error::InvalidStepEntity("FaceBound.bound")),
     }
@@ -1196,7 +1202,10 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
                 knot_vec,
                 control_points_list,
             );
-            Curve::BSplineCurveWithKnots(SampledCurve::new(curve))
+            Curve::BSplineCurveWithKnots {
+                curve: SampledCurve::new(curve),
+                dir: edge_curve.same_sense ^ !orientation,
+            }
         },
         Entity::ComplexEntity(v) if v.len() == 2 => {
             let bspline = if let Entity::BSplineCurveWithKnots(b) = &v[0] {
@@ -1231,7 +1240,10 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
                 knot_vec,
                 control_points_list,
             );
-            Curve::NURBSCurve(SampledCurve::new(curve))
+            Curve::NURBSCurve {
+                curve: SampledCurve::new(curve),
+                dir: edge_curve.same_sense ^ !orientation,
+            }
         },
         Entity::SurfaceCurve(v) => {
             curve(s, edge_curve, v.curve_3d, orientation)?
