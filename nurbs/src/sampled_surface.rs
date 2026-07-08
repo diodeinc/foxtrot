@@ -50,11 +50,19 @@ impl<const N: usize> SampledSurface<N>
 
     // Section 6.1 (start middle page 232)
     pub fn uv_from_point_newtons_method(&self, P: DVec3, uv_0: DVec2) -> Option<DVec2> {
+        let out = self.newtons_method_inner(P, uv_0, 256);
+        if out.is_none() {
+            error!("Could not find UV coordinates");
+        }
+        out
+    }
+
+    fn newtons_method_inner(&self, P: DVec3, uv_0: DVec2, max_iter: usize) -> Option<DVec2> {
         let eps1 = 0.01; // a Euclidean distance error bound
         let eps2 = 0.01; // a cosine error bound
 
         let mut uv_i = uv_0;
-        for _ in 0..256 {
+        for _ in 0..max_iter {
             // The surface and its derivatives at uv_i
             let derivs = self.surf.derivs::<2>(uv_i);
             let S = derivs[0][0];
@@ -165,7 +173,6 @@ impl<const N: usize> SampledSurface<N>
             // otherwise, iterate again
             uv_i = uv_ip1;
         }
-        error!("Could not find UV coordinates");
         None
     }
 
@@ -173,9 +180,28 @@ impl<const N: usize> SampledSurface<N>
         assert!(!self.samples.is_empty());
         use ordered_float::OrderedFloat;
         let best_uv = self.samples.iter()
-            .min_by_key(|(_uv, pos)| OrderedFloat((pos - p).norm()))
+            .min_by_key(|(_uv, pos)| OrderedFloat((pos - p).norm_squared()))
             .unwrap().0;
         self.uv_from_point_newtons_method(p, best_uv)
+    }
+
+    /// Like [`uv_from_point`](Self::uv_from_point), but first tries Newton's
+    /// method seeded from `hint` (e.g. the UV of an adjacent contour vertex).
+    /// The convergence criteria are identical to the cold path, so an accepted
+    /// result satisfies the same distance tolerance; on failure this falls
+    /// back to the full nearest-sample search.
+    pub fn uv_from_point_with_hint(&self, p: DVec3, hint: Option<DVec2>)
+        -> Option<DVec2>
+    {
+        if let Some(uv0) = hint {
+            // Adjacent contour vertices are close in UV, so a good hint
+            // converges in a few iterations; cap the attempt so a bad hint
+            // falls through to the sample search quickly.
+            if let Some(uv) = self.newtons_method_inner(p, uv0, 32) {
+                return Some(uv);
+            }
+        }
+        self.uv_from_point(p)
     }
 }
 

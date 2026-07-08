@@ -20,3 +20,6 @@ parallel = ["rayon", "step/parallel"]
 [dev-dependencies]
 clap = "2.33"
 env_logger = "0.8"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+libc = "0.2"
