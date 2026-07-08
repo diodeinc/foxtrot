@@ -536,7 +536,7 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                 let default_color = styled_item_colors.get(&id.0)
                     .copied()
                     .unwrap_or(DVec3::new(0.5, 0.5, 0.5));
-                match &s[*id] {
+                crate::timing::time("shape:mesh_faces", || match &s[*id] {
                     Entity::ManifoldSolidBrep(b) =>
                         closed_shell(s, b.outer, &mut mesh, &mut stats,
                             &styled_item_colors, default_color),
@@ -551,13 +551,13 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                             &styled_item_colors, default_color),
                     _ => {
                         warn!("Skipping {:?} (not a known solid)", s[*id]);
-                        return (mesh, stats);
                     },
-                };
+                });
 
                 // Build copies of the mesh by copying and applying transforms
                 let v_end = mesh.verts.len();
                 let t_end = mesh.triangles.len();
+                crate::timing::time("shape:instance_copies", || {
                 for mat in &mats[1..] {
                     for v in v_start..v_end {
                         let p = mesh.verts[v].pos;
@@ -589,6 +589,7 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                     let n = mesh.verts[v].norm;
                     mesh.verts[v].norm = (mat * glm::vec3_to_vec4(&n)).xyz();
                 }
+                });
                 (mesh, stats)
             });
 
@@ -772,7 +773,10 @@ fn open_shell(
             styled_item_colors,
             default_color,
         ) {
-            error!("Failed to triangulate {:?}: {}", s[*face], err);
+            // Per-face failures are common on large boards and summarised
+            // once at the end of triangulate(); keep the per-face detail off
+            // the console (console logging is expensive in wasm workers).
+            debug!("Failed to triangulate {:?}: {}", s[*face], err);
         }
     }
     stats.num_shells += 1;
@@ -800,7 +804,10 @@ fn closed_shell(
             styled_item_colors,
             default_color,
         ) {
-            error!("Failed to triangulate {:?}: {}", s[*face], err);
+            // Per-face failures are common on large boards and summarised
+            // once at the end of triangulate(); keep the per-face detail off
+            // the console (console logging is expensive in wasm workers).
+            debug!("Failed to triangulate {:?}: {}", s[*face], err);
         }
     }
     stats.num_shells += 1;
@@ -826,7 +833,8 @@ fn advanced_face(
     info!("triangulating face {} (geometry {})", f.0, face_geometry.0);
 
     // Grab the surface, returning early if it's unimplemented
-    let mut surf = get_surface(s, face_geometry)?;
+    let mut surf = crate::timing::time("face:get_surface",
+        || get_surface(s, face_geometry))?;
 
     // This is the starting point at which we insert new vertices
     let offset = mesh.verts.len();
@@ -838,7 +846,8 @@ fn advanced_face(
     let v_start = mesh.verts.len();
     let mut num_pts = 0;
     for b in bounds {
-        let (bound_contours, edge_loop_len) = face_bound(s, *b)?;
+        let (bound_contours, edge_loop_len) =
+            crate::timing::time("face:face_bound", || face_bound(s, *b))?;
 
         match bound_contours.len() {
             // We should always have non-zero items in the contour
@@ -896,16 +905,20 @@ fn advanced_face(
     // _fail_ due to these points, so if that happens, we nuke the point (by
     // assigning it to the first point in the list, which causes it to get
     // deduplicated), then retry.
-    let mut pts = surf.lower_verts(&mut mesh.verts[v_start..])?;
-    surf.unwrap_periodic(&mut pts, &edges, &unwrap_ranges);
-    resolve_crossing_edges(&mut pts, &mut edges, &mut mesh.verts, v_start);
+    let mut pts = crate::timing::time("face:lower_verts",
+        || surf.lower_verts(&mut mesh.verts[v_start..]))?;
+    crate::timing::time("face:unwrap_periodic",
+        || surf.unwrap_periodic(&mut pts, &edges, &unwrap_ranges));
+    crate::timing::time("face:resolve_crossing_edges",
+        || resolve_crossing_edges(&mut pts, &mut edges, &mut mesh.verts, v_start));
     let bonus_points = pts.len();
-    surf.add_steiner_points(&mut pts, &mut mesh.verts);
+    crate::timing::time("face:add_steiner_points",
+        || surf.add_steiner_points(&mut pts, &mut mesh.verts));
     let face_id = face_geometry.0;
     let n_steiner = pts.len() - bonus_points;
     info!("face {} cdt input: {} pts ({} boundary, {} steiner), {} edges",
           face_id, pts.len(), bonus_points, n_steiner, edges.len());
-    let result = {
+    let result = crate::timing::time("face:cdt", || {
         let mut pts = pts.clone();
         let mut retried_without_steiner = false;
         loop {
@@ -949,7 +962,7 @@ fn advanced_face(
                 },
             }
         }
-    };
+    });
     match result {
         Ok(t) => {
             for (a, b, c) in t.triangles() {
@@ -1293,6 +1306,63 @@ fn segment_intersection_params(
     }
 }
 
+/// Find the lexicographically-smallest pair of constrained edges `(i, j)`
+/// (i < j) that cross at interior points, along with the intersection
+/// parameter `t` along edge `i`.
+///
+/// Uses a sweep over x-sorted edge bounding boxes so that faces with many
+/// non-overlapping contours (e.g. PCB outlines with thousands of via holes)
+/// avoid the full O(E²) pair scan.
+fn find_first_crossing(
+    pts: &[(f64, f64)],
+    edges: &[(usize, usize)],
+) -> Option<(usize, usize, f64)> {
+    // (xmin, xmax, ymin, ymax, edge index), sorted by xmin
+    let mut boxes: Vec<(f64, f64, f64, f64, usize)> = edges.iter()
+        .enumerate()
+        .map(|(i, &(a, b))| {
+            let (ax, ay) = pts[a];
+            let (bx, by) = pts[b];
+            (ax.min(bx), ax.max(bx), ay.min(by), ay.max(by), i)
+        })
+        .collect();
+    boxes.sort_by(|p, q| p.0.partial_cmp(&q.0)
+        .unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut best: Option<(usize, usize, f64)> = None;
+    for bi in 0..boxes.len() {
+        let (_, xmax_i, ymin_i, ymax_i, ei) = boxes[bi];
+        for bj in (bi + 1)..boxes.len() {
+            let (xmin_j, _, ymin_j, ymax_j, ej) = boxes[bj];
+            if xmin_j > xmax_i {
+                break; // sorted by xmin: no later box can overlap either
+            }
+            if ymin_j > ymax_i || ymax_j < ymin_i {
+                continue;
+            }
+            // Orient the pair as (i < j) to match the original scan order
+            let (i, j) = (ei.min(ej), ei.max(ej));
+            if let Some((bi2, bj2, _)) = best {
+                if (i, j) >= (bi2, bj2) {
+                    continue;
+                }
+            }
+            // Skip edges that share an endpoint
+            if edges[i].0 == edges[j].0 || edges[i].0 == edges[j].1
+            || edges[i].1 == edges[j].0 || edges[i].1 == edges[j].1 {
+                continue;
+            }
+            if let Some((t, _s)) = segment_intersection_params(
+                pts[edges[i].0], pts[edges[i].1],
+                pts[edges[j].0], pts[edges[j].1],
+            ) {
+                best = Some((i, j, t));
+            }
+        }
+    }
+    best
+}
+
 /// Pre-process edges to resolve any crossings before feeding them to the CDT.
 /// When two constrained edges cross, split both at the intersection point by
 /// inserting a new shared vertex.
@@ -1304,24 +1374,7 @@ fn resolve_crossing_edges(
 ) {
     // Limit iterations to prevent pathological runaway
     for _ in 0..100 {
-        let mut found = None;
-        'outer: for i in 0..edges.len() {
-            for j in (i + 1)..edges.len() {
-                // Skip edges that share an endpoint
-                if edges[i].0 == edges[j].0 || edges[i].0 == edges[j].1
-                || edges[i].1 == edges[j].0 || edges[i].1 == edges[j].1 {
-                    continue;
-                }
-                if let Some((t, _s)) = segment_intersection_params(
-                    pts[edges[i].0], pts[edges[i].1],
-                    pts[edges[j].0], pts[edges[j].1],
-                ) {
-                    found = Some((i, j, t));
-                    break 'outer;
-                }
-            }
-        }
-        let (i, j, t) = match found {
+        let (i, j, t) = match find_first_crossing(pts, edges) {
             Some(v) => v,
             None => break, // no more crossings
         };

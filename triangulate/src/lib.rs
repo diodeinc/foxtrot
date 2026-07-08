@@ -2,6 +2,7 @@ pub mod colored_mesh;
 pub mod mesh;
 pub mod stats;
 pub mod surface;
+pub mod timing;
 pub mod triangulate;
 pub mod curve;
 
