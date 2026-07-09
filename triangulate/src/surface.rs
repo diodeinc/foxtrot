@@ -307,28 +307,9 @@ impl Surface {
     {
         self.prepare(verts)?;
         let mut pts = Vec::with_capacity(verts.len());
-        // Consecutive contour vertices are adjacent on the surface, so for
-        // sampled (B-spline / NURBS) surfaces the previous vertex's UV is an
-        // excellent Newton seed; it replaces the full nearest-sample search
-        // with a couple of Newton iterations in the common case.
-        let mut hint: Option<DVec2> = None;
         for v in verts {
             // Project to the 2D subspace for triangulation
-            let proj = match self {
-                Surface::BSpline(surf) => {
-                    let uv = surf.uv_from_point_with_hint(v.pos, hint)
-                        .ok_or(Error::CouldNotLower)?;
-                    hint = Some(uv);
-                    uv
-                },
-                Surface::NURBS(surf) => {
-                    let uv = surf.uv_from_point_with_hint(v.pos, hint)
-                        .ok_or(Error::CouldNotLower)?;
-                    hint = Some(uv);
-                    uv
-                },
-                _ => self.lower(v.pos)?,
-            };
+            let proj = self.lower(v.pos)?;
             // Update the surface normal
             v.norm = self.normal(v.pos, proj);
             pts.push((proj.x, proj.y));

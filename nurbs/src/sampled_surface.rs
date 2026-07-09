@@ -6,6 +6,67 @@ use log::error;
 pub struct SampledSurface<const N: usize> {
     pub surf: NDBSplineSurface<N>,
     samples: Vec<(DVec2, DVec3)>,
+    /// Sample indices arranged as an implicit kd-tree over the 3D sample
+    /// positions (median at the middle of each range, axis = depth % 3).
+    kd: Vec<u32>,
+}
+
+/// Squared distance matching `(a - b).norm_squared()` term order, so kd-tree
+/// lookups compute bit-identical distances to the previous linear scan.
+fn dist2(a: DVec3, b: DVec3) -> f64 {
+    let d = a - b;
+    d.x * d.x + d.y * d.y + d.z * d.z
+}
+
+fn build_kd(samples: &[(DVec2, DVec3)], idx: &mut [u32], depth: usize) {
+    if idx.len() <= 1 {
+        return;
+    }
+    let axis = depth % 3;
+    let mid = idx.len() / 2;
+    idx.select_nth_unstable_by(mid, |&a, &b| {
+        samples[a as usize].1[axis]
+            .partial_cmp(&samples[b as usize].1[axis])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let (lo, rest) = idx.split_at_mut(mid);
+    let (_, hi) = rest.split_at_mut(1);
+    build_kd(samples, lo, depth + 1);
+    build_kd(samples, hi, depth + 1);
+}
+
+/// Exact nearest-neighbor query. Ties on squared distance are broken by the
+/// lowest sample index, matching what a linear `min_by_key` scan returns.
+fn kd_nearest(
+    samples: &[(DVec2, DVec3)],
+    idx: &[u32],
+    depth: usize,
+    p: DVec3,
+    best: &mut (f64, u32),
+) {
+    if idx.is_empty() {
+        return;
+    }
+    let mid = idx.len() / 2;
+    let si = idx[mid];
+    let pos = samples[si as usize].1;
+    let d2 = dist2(pos, p);
+    if (d2, si) < *best {
+        *best = (d2, si);
+    }
+    let axis = depth % 3;
+    let delta = p[axis] - pos[axis];
+    let (near, far) = if delta < 0.0 {
+        (&idx[..mid], &idx[mid + 1..])
+    } else {
+        (&idx[mid + 1..], &idx[..mid])
+    };
+    kd_nearest(samples, near, depth + 1, p, best);
+    // `<=` so an equal-distance, lower-index sample across the splitting
+    // plane is still visited (tie-break correctness).
+    if delta * delta <= best.0 {
+        kd_nearest(samples, far, depth + 1, p, best);
+    }
 }
 
 impl<const N: usize> SampledSurface<N>
@@ -45,7 +106,9 @@ impl<const N: usize> SampledSurface<N>
                 }
             }
         }
-        Self { surf, samples }
+        let mut kd: Vec<u32> = (0..samples.len() as u32).collect();
+        build_kd(&samples, &mut kd, 0);
+        Self { surf, samples, kd }
     }
 
     // Section 6.1 (start middle page 232)
@@ -178,31 +241,19 @@ impl<const N: usize> SampledSurface<N>
 
     pub fn uv_from_point(&self, p: DVec3) -> Option<DVec2> {
         assert!(!self.samples.is_empty());
-        use ordered_float::OrderedFloat;
-        let best_uv = self.samples.iter()
-            .min_by_key(|(_uv, pos)| OrderedFloat((pos - p).norm_squared()))
-            .unwrap().0;
+        let mut best = (f64::INFINITY, u32::MAX);
+        kd_nearest(&self.samples, &self.kd, 0, p, &mut best);
+        let best_idx = if best.1 == u32::MAX { 0 } else { best.1 as usize };
+        let best_uv = self.samples[best_idx].0;
         self.uv_from_point_newtons_method(p, best_uv)
     }
 
-    /// Like [`uv_from_point`](Self::uv_from_point), but first tries Newton's
-    /// method seeded from `hint` (e.g. the UV of an adjacent contour vertex).
-    /// The convergence criteria are identical to the cold path, so an accepted
-    /// result satisfies the same distance tolerance; on failure this falls
-    /// back to the full nearest-sample search.
-    pub fn uv_from_point_with_hint(&self, p: DVec3, hint: Option<DVec2>)
-        -> Option<DVec2>
-    {
-        if let Some(uv0) = hint {
-            // Adjacent contour vertices are close in UV, so a good hint
-            // converges in a few iterations; cap the attempt so a bad hint
-            // falls through to the sample search quickly.
-            if let Some(uv) = self.newtons_method_inner(p, uv0, 32) {
-                return Some(uv);
-            }
-        }
-        self.uv_from_point(p)
-    }
+    // NOTE: do not add warm-start ("hint") seeding from an adjacent contour
+    // vertex here. On degenerate patches (e.g. slivers whose whole u-range
+    // moves the 3D point by less than the convergence tolerance) a hint seed
+    // converges without moving, collapsing distinct contour vertices onto one
+    // UV and producing broken CDT input. Every vertex must seed from its own
+    // nearest sample so results stay well-defined on such surfaces.
 }
 
 /// Builds the symmetric matrix [[a, b], [b, d]]
