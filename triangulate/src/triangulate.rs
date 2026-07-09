@@ -918,7 +918,16 @@ fn advanced_face(
     let n_steiner = pts.len() - bonus_points;
     info!("face {} cdt input: {} pts ({} boundary, {} steiner), {} edges",
           face_id, pts.len(), bonus_points, n_steiner, edges.len());
-    let result = crate::timing::time("face:cdt", || {
+    if std::env::var("DUMP_FACE").ok().as_deref() == Some(&face_id.to_string()) {
+        eprintln!("DUMP_FACE {}: pts={:?}", face_id, pts);
+        eprintln!("DUMP_FACE {}: edges={:?}", face_id, edges);
+    }
+    // Isolate CDT panics (degenerate inputs can trip index bugs in the
+    // half-edge structure): one bad face should cost that face, not the
+    // whole model. The only mesh mutation inside is the bounded steiner
+    // truncate, which is safe to abandon mid-way.
+    let result = crate::timing::time("face:cdt", ||
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut pts = pts.clone();
         let mut retried_without_steiner = false;
         loop {
@@ -962,9 +971,13 @@ fn advanced_face(
                 },
             }
         }
-    });
+    })));
     match result {
-        Ok(t) => {
+        Err(_panic) => {
+            warn!("face {}: panicked during CDT triangulation, skipping face", face_id);
+            stats.num_panics += 1;
+        },
+        Ok(Ok(t)) => {
             for (a, b, c) in t.triangles() {
                 let a = (a + offset) as u32;
                 let b = (b + offset) as u32;
@@ -978,7 +991,7 @@ fn advanced_face(
                 });
             }
         },
-        Err(e) => {
+        Ok(Err(e)) => {
             debug!(
                 "Got error while triangulating {}: {:?}",
                 face_geometry.0,
