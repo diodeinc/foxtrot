@@ -18,6 +18,10 @@ thiserror = "2"
 parallel = ["rayon", "step/parallel"]
 
 [dev-dependencies]
+# Self dev-dependency so examples build with `parallel`, matching how the
+# regression baseline was recorded (it used to come from gui's feature
+# selection). Library consumers are unaffected -- `parallel` is still opt-in.
+triangulate = { path = ".", features = ["parallel"] }
 clap = "2.33"
 glob = "0.3"
 env_logger = "0.8"
