@@ -7,7 +7,7 @@ edition = "2018"
 [dependencies]
 fast-float = "0.2"
 memchr = "2.4.0"
-nom = "6.0"
+nom = "7"
 
 [dev-dependencies]
 clap = "2.33"

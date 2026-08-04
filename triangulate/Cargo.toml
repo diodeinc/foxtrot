@@ -10,15 +10,16 @@ nurbs = { path = "../nurbs" }
 step = { path = "../step" }
 
 log = "0.4.14"
-nalgebra-glm = "0.13.0"
+nalgebra-glm = "0.21"
 rayon = { version = "1.5", optional = true }
-thiserror = "1.0"
+thiserror = "2"
 
 [features]
 parallel = ["rayon", "step/parallel"]
 
 [dev-dependencies]
 clap = "2.33"
+glob = "0.3"
 env_logger = "0.8"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
