@@ -182,7 +182,7 @@ fn octet(s: &str) -> IResult<&str> {
 
 // 139
 fn binary_literal(s: &str) -> IResult<usize> {
-    let bits = fold_many1(alt((char('0'), char('1'))), 0,
+    let bits = fold_many1(alt((char('0'), char('1'))), || 0,
         |acc, item| acc * 2 + item.to_digit(10).unwrap() as usize);
     preceded(char('%'), bits)(s)
 }
@@ -191,7 +191,7 @@ fn binary_literal(s: &str) -> IResult<usize> {
 fn encoded_string_literal(s: &str) -> IResult<String> {
     delimited(
         char('"'),
-        fold_many0(encoded_character, String::new(),
+        fold_many0(encoded_character, String::new,
             |mut s: String, c: char| { s.push(c); s }),
         char('"'))(s)
 }
@@ -258,7 +258,7 @@ fn simple_string_literal(s: &str) -> IResult<String> {
     ));
     delimited(
             char('\''),
-            fold_many0(f, String::new(), |mut s, c| { s.push(c); s }),
+            fold_many0(f, String::new, |mut s, c| { s.push(c); s }),
             char('\''))(s)
 }
 

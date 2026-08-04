@@ -14,7 +14,7 @@ categories = ["graphics", "mathematics", "algorithms"]
 [dependencies]
 geometry-predicates = "0.3.0"
 log = "0.4"
-thiserror = "1.0"
+thiserror = "2"
 
 [features]
 long-indexes = []

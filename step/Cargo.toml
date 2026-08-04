@@ -9,7 +9,7 @@ arrayvec = "0.7.1"
 fast-float = "0.2"
 log = "0.4.14"
 memchr = "2.4.0"
-nom = "6.0"
+nom = "7"
 rayon = {version = "1.5", optional = true }
 
 [features]
