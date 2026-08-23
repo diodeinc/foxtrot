@@ -720,16 +720,79 @@ impl Surface {
         (xmin, xmax, ymin, ymax)
     }
 
+    fn add_torus_steiner_points(&self, pts: &mut Vec<(f64, f64)>,
+                                verts: &mut Vec<Vertex>)
+    {
+        const ANGULAR_SAMPLES: usize = 32;
+        const RADIAL_RINGS: usize = 2;
+
+        let mut radii = Vec::with_capacity(pts.len());
+        let mut angles = Vec::with_capacity(pts.len());
+        for &(x, y) in pts.iter() {
+            let radius = x.hypot(y);
+            let angle = y.atan2(x);
+            if radius.is_finite() && angle.is_finite() {
+                radii.push(radius);
+                angles.push(angle);
+            }
+        }
+        if radii.is_empty() || angles.is_empty() {
+            return;
+        }
+
+        let radial_min = radii.iter().copied()
+            .fold(f64::INFINITY, f64::min);
+        let radial_max = radii.iter().copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        if !radial_min.is_finite() || !radial_max.is_finite() ||
+           radial_max - radial_min <= EPSILON
+        {
+            return;
+        }
+
+        let (angular_start, measured_span) =
+            Self::smallest_circular_arc(&mut angles);
+        let full_revolution = measured_span > 1.5 * PI;
+        let angular_span = if full_revolution { 2.0 * PI } else { measured_span };
+        if angular_span <= EPSILON {
+            return;
+        }
+
+        for radial_index in 1..=RADIAL_RINGS {
+            let radial_fraction = radial_index as f64 / (RADIAL_RINGS + 1) as f64;
+            let radius = radial_min * (1.0 - radial_fraction) +
+                         radial_max * radial_fraction;
+            for angular_index in 0..ANGULAR_SAMPLES {
+                let angular_fraction = if full_revolution {
+                    (angular_index as f64 + 0.5) / ANGULAR_SAMPLES as f64
+                } else {
+                    (angular_index as f64 + 1.0) / (ANGULAR_SAMPLES + 1) as f64
+                };
+                let angle = angular_start + angular_span * angular_fraction;
+                let uv = DVec2::new(radius * angle.cos(), radius * angle.sin());
+                if let Some(pos) = self.raise(uv) {
+                    pts.push((uv.x, uv.y));
+                    verts.push(Vertex {
+                        pos,
+                        norm: self.normal(pos, uv),
+                        color: DVec3::new(0.0, 0.0, 0.0),
+                    });
+                }
+            }
+        }
+    }
+
     pub fn add_steiner_points(&self, pts: &mut Vec<(f64, f64)>,
                                      verts: &mut Vec<Vertex>)
     {
+        if matches!(self, Surface::Torus { .. }) {
+            self.add_torus_steiner_points(pts, verts);
+            return;
+        }
+
         let (xmin, xmax, ymin, ymax) = Self::bbox(&pts);
         let num_pts = match self {
             Surface::Sphere { .. }   => 6,
-            // A dense fixed torus grid explodes on connector-style models in
-            // wasm. A smaller lattice still preserves curvature but avoids
-            // 1024 extra points per face.
-            Surface::Torus { .. } => 8,
             _ => 0,
         };
 
@@ -847,7 +910,17 @@ mod tests {
             let raised = surface.raise(DVec2::new(u, v)).unwrap();
             assert!((raised - vertex.pos).norm() < 1e-9);
         }
+        let boundary_len = points.len();
+        let radial_min = points.iter().map(|(u, v)| u.hypot(*v))
+            .fold(f64::INFINITY, f64::min);
+        let radial_max = points.iter().map(|(u, v)| u.hypot(*v))
+            .fold(f64::NEG_INFINITY, f64::max);
         surface.add_steiner_points(&mut points, &mut vertices);
+        assert_eq!(points.len() - boundary_len, 32 * 2);
+        assert!(points[boundary_len..].iter().all(|(u, v)| {
+            let radius = u.hypot(*v);
+            radius > radial_min && radius < radial_max
+        }));
         let mut triangulation =
             cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
         triangulation.run().unwrap();
