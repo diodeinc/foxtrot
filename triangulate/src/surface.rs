@@ -43,6 +43,8 @@ pub enum Surface {
         mat_i: DMat4,
         major_radius: f64,
         minor_radius: f64,
+        polar_major: bool,
+        radial_start: f64,
     },
 }
 
@@ -82,11 +84,23 @@ impl Surface {
     pub fn new_torus(location: DVec3, axis: DVec3,
                      major_radius: f64, minor_radius: f64) -> Result<Self, Error>
     {
+        let ref_direction = Self::fallback_perpendicular(axis);
+        Self::new_torus_with_ref_direction(
+            location, axis, ref_direction, major_radius, minor_radius)
+    }
+
+    pub fn new_torus_with_ref_direction(location: DVec3, axis: DVec3,
+                     ref_direction: DVec3,
+                     major_radius: f64, minor_radius: f64) -> Result<Self, Error>
+    {
+        // Torus parameterization uses local X as the revolution axis and
+        // local Z as the zero-angle radial direction.
+        let mat = Self::make_rigid_transform(ref_direction, axis, location);
+        let mat_i = mat.try_inverse()
+            .ok_or(Error::SingularTransform("torus transform"))?;
         Ok(Surface::Torus {
-            // mat and mat_i are built in prepare()
-            mat: DMat4::identity(),
-            mat_i: DMat4::identity(),
-            location, axis, major_radius, minor_radius
+            mat, mat_i, location, axis, major_radius, minor_radius,
+            polar_major: true, radial_start: 0.0,
         })
     }
 
@@ -178,7 +192,11 @@ impl Surface {
                 let scale = 1.0 / (1.0 + z);
                 Ok(DVec2::new(p.x * scale, p.y * scale))
             },
-            Surface::Torus { mat_i, major_radius, minor_radius, .. } => {
+            Surface::Torus { mat_i, major_radius, minor_radius,
+                             polar_major, radial_start, .. } => {
+                if major_radius.abs() < EPSILON || minor_radius.abs() < EPSILON {
+                    return Err(Error::InvalidGeometry("torus has a zero radius"));
+                }
                 let p = mat_i * p_;
                 /*
                          ^ Y
@@ -206,17 +224,25 @@ impl Surface {
 
                 let minor_angle = new_p.x.atan2(new_p.z);
 
-                // Construct nested circles with a scale based on the ratio
-                // of radiuses (to make an _attempt_ to match 3D distance)
-                let scale = 1.0 + (major_radius / minor_radius) *
-                                  (major_angle + PI) / (2.0 * PI);
-
-                let x = if *major_radius > 0.0 {
-                    -minor_angle.cos()
-                } else {
-                    minor_angle.cos()
-                };
-                Ok(scale * DVec2::new(x, minor_angle.sin()))
+                // Keep the boundary's wider periodic direction as the polar
+                // coordinate, so full rings stay closed without an artificial
+                // seam. Unroll the narrower direction radially.
+                let (polar_angle, radial_angle, base_radius, radial_scale) =
+                    if *polar_major {
+                        (major_angle, minor_angle,
+                         major_radius.abs(), minor_radius.abs())
+                    } else {
+                        (minor_angle, major_angle,
+                         minor_radius.abs(), major_radius.abs())
+                    };
+                let radial_angle = Self::unwrap_from_start(
+                    radial_angle, *radial_start);
+                let radius = base_radius +
+                    (radial_angle - *radial_start) * radial_scale;
+                Ok(DVec2::new(
+                    radius * polar_angle.cos(),
+                    radius * polar_angle.sin(),
+                ))
             },
             Surface::BSpline(surf) => Self::surf_lower(p, surf),
             Surface::NURBS(surf) => Self::surf_lower(p, surf),
@@ -266,17 +292,26 @@ impl Surface {
                     .try_inverse()
                     .ok_or(Error::SingularTransform("sphere transform"))?;
             },
-            Surface::Torus { axis, mat, mat_i, location, .. } => {
-                let mean_dir = verts.iter()
-                    .map(|v| v.pos - *location)
-                    .sum::<DVec3>()
-                    .normalize();
-                let mean_perp_dir = (mean_dir - *axis * mean_dir.dot(axis)).normalize();
-                *mat = Self::make_rigid_transform(
-                    mean_perp_dir, *axis, *location);
-                *mat_i = mat
-                    .try_inverse()
-                    .ok_or(Error::SingularTransform("torus transform"))?;
+            Surface::Torus { mat_i, major_radius,
+                             polar_major, radial_start, .. } => {
+                let mut major_angles = Vec::with_capacity(verts.len());
+                let mut minor_angles = Vec::with_capacity(verts.len());
+                for vertex in verts {
+                    let (major, minor) = Self::torus_angles(
+                        *mat_i, vertex.pos, *major_radius)?;
+                    major_angles.push(major);
+                    minor_angles.push(minor);
+                }
+                let (major_start, major_span) =
+                    Self::smallest_circular_arc(&mut major_angles);
+                let (minor_start, minor_span) =
+                    Self::smallest_circular_arc(&mut minor_angles);
+                *polar_major = major_span >= minor_span;
+                *radial_start = if *polar_major {
+                    minor_start
+                } else {
+                    major_start
+                };
             },
             _ => (),
         }
@@ -360,6 +395,58 @@ impl Surface {
                 (u_period, v_period)
             },
             _ => (None, None),
+        }
+    }
+
+    fn torus_angles(mat_i: DMat4, point: DVec3,
+                    major_radius: f64) -> Result<(f64, f64), Error> {
+        let p = (mat_i * DVec4::new(
+            point.x, point.y, point.z, 1.0)).xyz();
+        let major_angle = p.y.atan2(p.z);
+        let radial = p.y.hypot(p.z);
+        let minor_angle = p.x.atan2(radial - major_radius);
+        if major_angle.is_finite() && minor_angle.is_finite() {
+            Ok((major_angle, minor_angle))
+        } else {
+            Err(Error::InvalidGeometry("non-finite torus angle"))
+        }
+    }
+
+    fn smallest_circular_arc(angles: &mut [f64]) -> (f64, f64) {
+        if angles.is_empty() {
+            return (0.0, 0.0);
+        }
+        let period = 2.0 * PI;
+        for angle in angles.iter_mut() {
+            *angle = angle.rem_euclid(period);
+        }
+        angles.sort_by(|a, b| a.partial_cmp(b)
+            .unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut largest_gap = -1.0;
+        let mut start = angles[0];
+        for i in 0..angles.len() {
+            let next = if i + 1 < angles.len() {
+                angles[i + 1]
+            } else {
+                angles[0] + period
+            };
+            let gap = next - angles[i];
+            if gap > largest_gap {
+                largest_gap = gap;
+                start = next.rem_euclid(period);
+            }
+        }
+        (start, (period - largest_gap).max(0.0))
+    }
+
+    fn unwrap_from_start(angle: f64, start: f64) -> f64 {
+        let period = 2.0 * PI;
+        let angle = angle.rem_euclid(period);
+        if angle + 1e-12 < start {
+            angle + period
+        } else {
+            angle
         }
     }
 
@@ -593,14 +680,21 @@ impl Surface {
             },
             Surface::BSpline(s) => Some(s.surf.point(uv)),
             Surface::NURBS(s) => Some(s.surf.point(uv)),
-            Surface::Torus { mat, minor_radius, major_radius, .. } => {
-                let mut uv = uv;
-                if *major_radius > 0.0 {
-                    uv.x *= -1.0;
+            Surface::Torus { mat, minor_radius, major_radius,
+                             polar_major, radial_start, .. } => {
+                if major_radius.abs() < EPSILON || minor_radius.abs() < EPSILON {
+                    return None;
                 }
-                let minor_angle = uv.y.atan2(uv.x);
-                let major_angle = (uv.norm() - 1.0) /
-                                  (major_radius / minor_radius) * 2.0 * PI - PI;
+                let polar_angle = uv.y.atan2(uv.x);
+                let (major_angle, minor_angle) = if *polar_major {
+                    (polar_angle,
+                     *radial_start +
+                         (uv.norm() - major_radius.abs()) / minor_radius.abs())
+                } else {
+                    (*radial_start +
+                         (uv.norm() - minor_radius.abs()) / major_radius.abs(),
+                     polar_angle)
+                };
                 let new_p = DVec3::new(minor_angle.sin(), 0.0, minor_angle.cos()) * *minor_radius;
 
                 let z = DVec3::new(0.0, major_angle.sin(), major_angle.cos());
@@ -626,16 +720,79 @@ impl Surface {
         (xmin, xmax, ymin, ymax)
     }
 
+    fn add_torus_steiner_points(&self, pts: &mut Vec<(f64, f64)>,
+                                verts: &mut Vec<Vertex>)
+    {
+        const ANGULAR_SAMPLES: usize = 32;
+        const RADIAL_RINGS: usize = 2;
+
+        let mut radii = Vec::with_capacity(pts.len());
+        let mut angles = Vec::with_capacity(pts.len());
+        for &(x, y) in pts.iter() {
+            let radius = x.hypot(y);
+            let angle = y.atan2(x);
+            if radius.is_finite() && angle.is_finite() {
+                radii.push(radius);
+                angles.push(angle);
+            }
+        }
+        if radii.is_empty() || angles.is_empty() {
+            return;
+        }
+
+        let radial_min = radii.iter().copied()
+            .fold(f64::INFINITY, f64::min);
+        let radial_max = radii.iter().copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        if !radial_min.is_finite() || !radial_max.is_finite() ||
+           radial_max - radial_min <= EPSILON
+        {
+            return;
+        }
+
+        let (angular_start, measured_span) =
+            Self::smallest_circular_arc(&mut angles);
+        let full_revolution = measured_span > 1.5 * PI;
+        let angular_span = if full_revolution { 2.0 * PI } else { measured_span };
+        if angular_span <= EPSILON {
+            return;
+        }
+
+        for radial_index in 1..=RADIAL_RINGS {
+            let radial_fraction = radial_index as f64 / (RADIAL_RINGS + 1) as f64;
+            let radius = radial_min * (1.0 - radial_fraction) +
+                         radial_max * radial_fraction;
+            for angular_index in 0..ANGULAR_SAMPLES {
+                let angular_fraction = if full_revolution {
+                    (angular_index as f64 + 0.5) / ANGULAR_SAMPLES as f64
+                } else {
+                    (angular_index as f64 + 1.0) / (ANGULAR_SAMPLES + 1) as f64
+                };
+                let angle = angular_start + angular_span * angular_fraction;
+                let uv = DVec2::new(radius * angle.cos(), radius * angle.sin());
+                if let Some(pos) = self.raise(uv) {
+                    pts.push((uv.x, uv.y));
+                    verts.push(Vertex {
+                        pos,
+                        norm: self.normal(pos, uv),
+                        color: DVec3::new(0.0, 0.0, 0.0),
+                    });
+                }
+            }
+        }
+    }
+
     pub fn add_steiner_points(&self, pts: &mut Vec<(f64, f64)>,
                                      verts: &mut Vec<Vertex>)
     {
+        if matches!(self, Surface::Torus { .. }) {
+            self.add_torus_steiner_points(pts, verts);
+            return;
+        }
+
         let (xmin, xmax, ymin, ymax) = Self::bbox(&pts);
         let num_pts = match self {
             Surface::Sphere { .. }   => 6,
-            // A dense fixed torus grid explodes on connector-style models in
-            // wasm. A smaller lattice still preserves curvature but avoids
-            // 1024 extra points per face.
-            Surface::Torus { .. } => 8,
             _ => 0,
         };
 
@@ -707,5 +864,94 @@ impl Surface {
                 (mat * norm.to_homogeneous()).xyz()
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn torus_point(major_angle: f64, minor_angle: f64) -> DVec3 {
+        let major_radius = 4.9;
+        let minor_radius = 0.1;
+        let ring_radius = major_radius + minor_radius * minor_angle.cos();
+        DVec3::new(
+            minor_radius * minor_angle.sin(),
+            ring_radius * major_angle.sin(),
+            ring_radius * major_angle.cos(),
+        )
+    }
+
+    fn append_ring(vertices: &mut Vec<Vertex>, edges: &mut Vec<(usize, usize)>,
+                   fixed_angle: f64, vary_major: bool, reverse: bool) {
+        const SEGMENTS: usize = 32;
+        let start = vertices.len();
+        for i in 0..SEGMENTS {
+            let direction = if reverse { -1.0 } else { 1.0 };
+            let varying_angle = direction * 2.0 * PI * i as f64 / SEGMENTS as f64;
+            let (major_angle, minor_angle) = if vary_major {
+                (varying_angle, fixed_angle)
+            } else {
+                (fixed_angle, varying_angle)
+            };
+            vertices.push(Vertex {
+                pos: torus_point(major_angle, minor_angle),
+                norm: DVec3::zeros(),
+                color: DVec3::zeros(),
+            });
+            edges.push((start + i, start + (i + 1) % SEGMENTS));
+        }
+    }
+
+    fn assert_band_tessellates(mut surface: Surface, mut vertices: Vec<Vertex>,
+                               edges: Vec<(usize, usize)>) {
+        let mut points = surface.lower_verts(&mut vertices).unwrap();
+        for (vertex, &(u, v)) in vertices.iter().zip(&points) {
+            let raised = surface.raise(DVec2::new(u, v)).unwrap();
+            assert!((raised - vertex.pos).norm() < 1e-9);
+        }
+        let boundary_len = points.len();
+        let radial_min = points.iter().map(|(u, v)| u.hypot(*v))
+            .fold(f64::INFINITY, f64::min);
+        let radial_max = points.iter().map(|(u, v)| u.hypot(*v))
+            .fold(f64::NEG_INFINITY, f64::max);
+        surface.add_steiner_points(&mut points, &mut vertices);
+        assert_eq!(points.len() - boundary_len, 32 * 2);
+        assert!(points[boundary_len..].iter().all(|(u, v)| {
+            let radius = u.hypot(*v);
+            radius > radial_min && radius < radial_max
+        }));
+        let mut triangulation =
+            cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
+        triangulation.run().unwrap();
+        assert!(triangulation.triangles().next().is_some());
+    }
+
+    fn test_torus() -> Surface {
+        Surface::new_torus_with_ref_direction(
+            DVec3::zeros(),
+            DVec3::new(1.0, 0.0, 0.0),
+            DVec3::new(0.0, 0.0, 1.0),
+            4.9,
+            0.1,
+        ).unwrap()
+    }
+
+    #[test]
+    fn full_major_toroidal_band_has_non_crossing_annular_contours() {
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        append_ring(&mut vertices, &mut edges, 1.2, true, false);
+        append_ring(&mut vertices, &mut edges, 0.2, true, true);
+        assert_band_tessellates(test_torus(), vertices, edges);
+    }
+
+    #[test]
+    fn full_minor_toroidal_band_uses_the_other_annular_chart() {
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        append_ring(&mut vertices, &mut edges, 1.2, false, false);
+        append_ring(&mut vertices, &mut edges, 0.2, false, true);
+        assert_band_tessellates(test_torus(), vertices, edges);
     }
 }

@@ -27,7 +27,56 @@ pub struct TessellatedMesh {
 pub struct ColoredSubmesh {
     pub color: [f32; 4],
     pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
+}
+
+struct ColoredBucket {
+    submesh: ColoredSubmesh,
+}
+
+impl ColoredBucket {
+    fn new(color: [f32; 4]) -> Self {
+        Self {
+            submesh: ColoredSubmesh {
+                color,
+                positions: Vec::new(),
+                normals: Vec::new(),
+                indices: Vec::new(),
+            },
+        }
+    }
+
+    fn insert_vertex(
+        &mut self,
+        key: ColorKey,
+        mesh_index: usize,
+        vertex: &crate::mesh::Vertex,
+        vertex_indices: &mut [Option<(ColorKey, u32)>],
+    ) -> Result<u32, String> {
+        if let Some((existing_key, existing_index)) = vertex_indices[mesh_index] {
+            if existing_key == key {
+                return Ok(existing_index);
+            }
+        }
+
+        let index = u32::try_from(self.submesh.positions.len())
+            .map_err(|_| "too many vertices for u32 index")?;
+        self.submesh.positions.push([
+            vertex.pos.x as f32,
+            vertex.pos.y as f32,
+            vertex.pos.z as f32,
+        ]);
+        self.submesh.normals.push([
+            vertex.norm.x as f32,
+            vertex.norm.y as f32,
+            vertex.norm.z as f32,
+        ]);
+        if vertex_indices[mesh_index].is_none() {
+            vertex_indices[mesh_index] = Some((key, index));
+        }
+        Ok(index)
+    }
 }
 
 /// Lightweight statistics from tessellation.
@@ -71,7 +120,8 @@ pub fn tessellate_step_bytes(
 
 /// Group an already-triangulated `Mesh` into per-colour sub-meshes.
 pub fn group_mesh_by_color(mesh: &Mesh) -> Result<TessellatedMesh, String> {
-    let mut buckets: HashMap<ColorKey, ColoredSubmesh> = HashMap::new();
+    let mut buckets: HashMap<ColorKey, ColoredBucket> = HashMap::new();
+    let mut vertex_indices = vec![None; mesh.verts.len()];
 
     for tri in mesh.triangles.iter() {
         let ia = tri.verts.x as usize;
@@ -91,25 +141,18 @@ pub fn group_mesh_by_color(mesh: &Mesh) -> Result<TessellatedMesh, String> {
             .ok_or_else(|| format!("triangle index out of range: {ic}"))?;
 
         let key = triangle_color_key(va, vb, vc);
-        let sub = buckets.entry(key).or_insert_with(|| ColoredSubmesh {
-            color: key.to_rgba(),
-            positions: Vec::new(),
-            indices: Vec::new(),
-        });
-
-        let base =
-            u32::try_from(sub.positions.len()).map_err(|_| "too many vertices for u32 index")?;
-        sub.positions
-            .push([va.pos.x as f32, va.pos.y as f32, va.pos.z as f32]);
-        sub.positions
-            .push([vb.pos.x as f32, vb.pos.y as f32, vb.pos.z as f32]);
-        sub.positions
-            .push([vc.pos.x as f32, vc.pos.y as f32, vc.pos.z as f32]);
-        sub.indices.extend([base, base + 1, base + 2]);
+        let bucket = buckets
+            .entry(key)
+            .or_insert_with(|| ColoredBucket::new(key.to_rgba()));
+        let a = bucket.insert_vertex(key, ia, va, &mut vertex_indices)?;
+        let b = bucket.insert_vertex(key, ib, vb, &mut vertex_indices)?;
+        let c = bucket.insert_vertex(key, ic, vc, &mut vertex_indices)?;
+        bucket.submesh.indices.extend([a, b, c]);
     }
 
     let mut submeshes = buckets
         .into_values()
+        .map(|bucket| bucket.submesh)
         .filter(|s| !s.positions.is_empty() && !s.indices.is_empty())
         .collect::<Vec<_>>();
     // Largest groups first for deterministic ordering.
@@ -160,5 +203,74 @@ fn triangle_color_key(
         kb
     } else {
         ka
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mesh::{Triangle, Vertex};
+    use nalgebra_glm::{DVec3, U32Vec3};
+
+    fn vertex(pos: DVec3, norm: DVec3) -> Vertex {
+        Vertex {
+            pos,
+            norm,
+            color: DVec3::new(0.25, 0.5, 0.75),
+        }
+    }
+
+    #[test]
+    fn preserves_normals_and_reuses_mesh_vertices() {
+        let mesh = Mesh {
+            verts: vec![
+                vertex(DVec3::new(0.0, 0.0, 0.0), DVec3::new(0.0, 0.0, 1.0)),
+                vertex(DVec3::new(1.0, 0.0, 0.0), DVec3::new(0.0, 0.0, 1.0)),
+                vertex(DVec3::new(1.0, 1.0, 0.0), DVec3::new(0.0, 0.0, 1.0)),
+                vertex(DVec3::new(0.0, 1.0, 0.0), DVec3::new(0.0, 0.0, 1.0)),
+            ],
+            triangles: vec![
+                Triangle {
+                    verts: U32Vec3::new(0, 1, 2),
+                },
+                Triangle {
+                    verts: U32Vec3::new(0, 2, 3),
+                },
+            ],
+        };
+
+        let tess = group_mesh_by_color(&mesh).unwrap();
+        let submesh = &tess.submeshes[0];
+        assert_eq!(submesh.positions.len(), 4);
+        assert_eq!(submesh.normals, vec![[0.0, 0.0, 1.0]; 4]);
+        assert_eq!(submesh.indices, vec![0, 1, 2, 0, 2, 3]);
+    }
+
+    #[test]
+    fn keeps_coincident_vertices_separate_across_hard_edges() {
+        let mesh = Mesh {
+            verts: vec![
+                vertex(DVec3::new(0.0, 0.0, 0.0), DVec3::new(0.0, 0.0, 1.0)),
+                vertex(DVec3::new(1.0, 0.0, 0.0), DVec3::new(0.0, 0.0, 1.0)),
+                vertex(DVec3::new(0.0, 1.0, 0.0), DVec3::new(0.0, 0.0, 1.0)),
+                vertex(DVec3::new(0.0, 0.0, 0.0), DVec3::new(1.0, 0.0, 0.0)),
+                vertex(DVec3::new(0.0, 1.0, 0.0), DVec3::new(1.0, 0.0, 0.0)),
+                vertex(DVec3::new(0.0, 0.0, 1.0), DVec3::new(1.0, 0.0, 0.0)),
+            ],
+            triangles: vec![
+                Triangle {
+                    verts: U32Vec3::new(0, 1, 2),
+                },
+                Triangle {
+                    verts: U32Vec3::new(3, 4, 5),
+                },
+            ],
+        };
+
+        let tess = group_mesh_by_color(&mesh).unwrap();
+        let submesh = &tess.submeshes[0];
+        assert_eq!(submesh.positions.len(), 6);
+        assert_eq!(submesh.normals[..3], [[0.0, 0.0, 1.0]; 3]);
+        assert_eq!(submesh.normals[3..], [[1.0, 0.0, 0.0]; 3]);
     }
 }
