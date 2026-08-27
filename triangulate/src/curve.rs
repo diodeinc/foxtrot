@@ -5,7 +5,7 @@ use crate::Error;
 use nurbs::{AbstractCurve, NDBSplineCurve, SampledCurve};
 use crate::surface::Surface;
 
-const BSPLINE_POINTS_PER_KNOT: usize = 4;
+const BSPLINE_POINTS_PER_KNOT: usize = 8;
 const ELLIPSE_SAMPLES_PER_REV: usize = 32;
 
 #[derive(Debug)]

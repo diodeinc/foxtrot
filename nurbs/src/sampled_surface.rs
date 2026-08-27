@@ -75,12 +75,12 @@ impl<const N: usize> SampledSurface<N>
     pub fn new(surf: NDBSplineSurface<N>) -> Self {
         const N: usize = 8;
         let mut samples = Vec::new();
-        for i in 0..surf.u_knots.len() - 1 {
+        for i in surf.u_knots.degree()..surf.u_knots.len() - 1 - surf.u_knots.degree() {
             // Skip multiple knots
             if surf.u_knots[i] == surf.u_knots[i + 1] {
                 continue;
             }
-            for j in 0..surf.v_knots.len() - 1 {
+            for j in surf.v_knots.degree()..surf.v_knots.len() - 1 - surf.v_knots.degree() {
                 if surf.v_knots[j] == surf.v_knots[j + 1] {
                     continue;
                 }
@@ -263,4 +263,35 @@ fn symmetric2x2(a: f64, b: f64, d: f64) -> DMat2x2 {
     mat.set_column(0, &DVec2::new(a, b));
     mat.set_column(1, &DVec2::new(b, d));
     mat
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::KnotVector;
+
+    #[test]
+    fn samples_only_the_valid_knot_domain() {
+        let surface = NDBSplineSurface::new(
+            false,
+            true,
+            KnotVector::from_multiplicities(1, &[-1.0, 0.0, 1.0, 2.0, 3.0, 4.0], &[1; 6]),
+            KnotVector::from_multiplicities(1, &[0.0, 1.0], &[2, 2]),
+            vec![
+                vec![DVec3::new(0.0, 0.0, 0.0), DVec3::new(0.0, 1.0, 0.0)],
+                vec![DVec3::new(1.0, 0.0, 0.0), DVec3::new(1.0, 1.0, 0.0)],
+                vec![DVec3::new(2.0, 0.0, 0.0), DVec3::new(2.0, 1.0, 0.0)],
+                vec![DVec3::new(3.0, 0.0, 0.0), DVec3::new(3.0, 1.0, 0.0)],
+            ],
+        );
+
+        let sampled = SampledSurface::new(surface);
+
+        assert!(sampled.samples.iter().all(|(uv, _)| {
+            uv.x >= sampled.surf.min_u()
+                && uv.x <= sampled.surf.max_u()
+                && uv.y >= sampled.surf.min_v()
+                && uv.y <= sampled.surf.max_v()
+        }));
+    }
 }
