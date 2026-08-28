@@ -497,38 +497,41 @@ impl Surface {
             .collect();
         let mut best = raw.clone();
         let mut best_max_jump = f64::INFINITY;
+        let mut best_closing_jump = -1.0;
         let mut best_sum_jump = f64::INFINITY;
 
-        // Try every vertex as the loop anchor.  If the loop has a consistent
-        // unwrap, this avoids leaving an arbitrary full-period jump on the
-        // closing constrained edge just because the first lowered vertex was
-        // chosen on the wrong side of the seam.
+        // Try every vertex as the loop anchor.  Score only the traversed edges:
+        // a contour which crosses a periodic seam must retain one full-period
+        // jump on the closing edge to form a non-degenerate polygon in UV.
         for anchor in 0..n {
             let mut candidate = raw.clone();
             let mut prev = anchor;
+            let mut max_jump: f64 = 0.0;
+            let mut sum_jump = 0.0;
             for step in 1..n {
                 let cur = (anchor + step) % n;
                 candidate[cur] = Self::unwrap_near(raw[cur], candidate[prev], period);
-                prev = cur;
-            }
-
-            let mut max_jump: f64 = 0.0;
-            let mut sum_jump = 0.0;
-            for i in 0..n {
-                let d = (candidate[(i + 1) % n] - candidate[i]).abs();
+                let d = (candidate[cur] - candidate[prev]).abs();
                 max_jump = max_jump.max(d);
                 sum_jump += d * d;
+                prev = cur;
             }
+            let closing_jump = (candidate[anchor] - candidate[prev]).abs();
+
             if max_jump < best_max_jump - 1e-9
-                || ((max_jump - best_max_jump).abs() <= 1e-9 && sum_jump < best_sum_jump)
+                || ((max_jump - best_max_jump).abs() <= 1e-9
+                    && (closing_jump > best_closing_jump + 1e-9
+                        || ((closing_jump - best_closing_jump).abs() <= 1e-9
+                            && sum_jump < best_sum_jump)))
             {
                 best = candidate;
                 best_max_jump = max_jump;
+                best_closing_jump = closing_jump;
                 best_sum_jump = sum_jump;
             }
         }
 
-        if skip_large_closing_jump && best_max_jump > period.abs() * 0.5 {
+        if skip_large_closing_jump && best_closing_jump > period.abs() * 0.5 {
             // A single closed edge that winds all the way around the periodic
             // dimension cannot be represented as a closed contour in one
             // unwrapped plane without leaving one full-period constrained edge.
@@ -720,6 +723,14 @@ impl Surface {
         (xmin, xmax, ymin, ymax)
     }
 
+    fn spline_parameter(value: f64, min: f64, max: f64, open: bool) -> f64 {
+        if open {
+            value.clamp(min, max)
+        } else {
+            min + (value - min).rem_euclid(max - min)
+        }
+    }
+
     fn add_torus_steiner_points(&self, pts: &mut Vec<(f64, f64)>,
                                 verts: &mut Vec<Vertex>)
     {
@@ -782,12 +793,65 @@ impl Surface {
         }
     }
 
+    fn add_spline_steiner_points<const N: usize>(
+        &self,
+        pts: &mut Vec<(f64, f64)>,
+        verts: &mut Vec<Vertex>,
+        surf: &SampledSurface<N>,
+    ) where NDBSplineSurface<N>: AbstractSurface
+    {
+        const SAMPLES: usize = 16;
+
+        let (xmin, xmax, ymin, ymax) = Self::bbox(pts);
+        let aspect_ratio = surf.surf.aspect_ratio();
+        if !aspect_ratio.is_finite() || aspect_ratio.abs() <= EPSILON {
+            return;
+        }
+
+        for x in 0..SAMPLES {
+            let x_frac = (x as f64 + 1.0) / (SAMPLES as f64 + 1.0);
+            let projected_u = x_frac * xmax + (1.0 - x_frac) * xmin;
+            for y in 0..SAMPLES {
+                let y_frac = (y as f64 + 1.0) / (SAMPLES as f64 + 1.0);
+                let projected_v = y_frac * ymax + (1.0 - y_frac) * ymin;
+                let raw_uv = DVec2::new(
+                    Self::spline_parameter(
+                        projected_u, surf.surf.min_u(), surf.surf.max_u(), surf.surf.u_open,
+                    ),
+                    Self::spline_parameter(
+                        projected_v / aspect_ratio,
+                        surf.surf.min_v(), surf.surf.max_v(), surf.surf.v_open,
+                    ),
+                );
+                let pos = surf.surf.point(raw_uv);
+                pts.push((projected_u, projected_v));
+                verts.push(Vertex {
+                    pos,
+                    norm: Self::surf_normal(raw_uv, surf),
+                    color: DVec3::new(0.0, 0.0, 0.0),
+                });
+            }
+        }
+    }
+
     pub fn add_steiner_points(&self, pts: &mut Vec<(f64, f64)>,
                                      verts: &mut Vec<Vertex>)
     {
         if matches!(self, Surface::Torus { .. }) {
             self.add_torus_steiner_points(pts, verts);
             return;
+        }
+
+        match self {
+            Surface::BSpline(surf) => {
+                self.add_spline_steiner_points(pts, verts, surf);
+                return;
+            },
+            Surface::NURBS(surf) => {
+                self.add_spline_steiner_points(pts, verts, surf);
+                return;
+            },
+            _ => (),
         }
 
         let (xmin, xmax, ymin, ymax) = Self::bbox(&pts);
@@ -819,10 +883,38 @@ impl Surface {
     fn surf_normal<const N: usize>(uv: DVec2, surf: &SampledSurface<N>) -> DVec3
         where NDBSplineSurface<N>: AbstractSurface
     {
-        // Calculate first order derivs, then cross them to get normal
         let derivs = surf.surf.derivs::<1>(uv);
         let n = derivs[1][0].cross(&derivs[0][1]);
-        n.normalize()
+        if n.norm_squared() > 1e-20 {
+            return n.normalize();
+        }
+
+        // At a collapsed spline pole one derivative is zero exactly at the
+        // boundary, but the surface still has a well-defined limiting normal.
+        // Evaluate just inside each parameter boundary before giving up.
+        let u_step = (surf.surf.max_u() - surf.surf.min_u()) * 1e-3;
+        let v_step = (surf.surf.max_v() - surf.surf.min_v()) * 1e-3;
+        for candidate in [
+            DVec2::new(uv.x - u_step, uv.y),
+            DVec2::new(uv.x + u_step, uv.y),
+            DVec2::new(uv.x, uv.y - v_step),
+            DVec2::new(uv.x, uv.y + v_step),
+        ] {
+            let candidate = DVec2::new(
+                Self::spline_parameter(
+                    candidate.x, surf.surf.min_u(), surf.surf.max_u(), surf.surf.u_open,
+                ),
+                Self::spline_parameter(
+                    candidate.y, surf.surf.min_v(), surf.surf.max_v(), surf.surf.v_open,
+                ),
+            );
+            let derivs = surf.surf.derivs::<1>(candidate);
+            let n = derivs[1][0].cross(&derivs[0][1]);
+            if n.norm_squared() > 1e-20 {
+                return n.normalize();
+            }
+        }
+        DVec3::zeros()
     }
 
     // Calculate the surface normal, using either the 3D or 2D position
@@ -870,6 +962,82 @@ impl Surface {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nurbs::{BSplineSurface, KnotVector};
+
+    #[test]
+    fn periodic_seam_bound_retains_a_full_width_uv_polygon() {
+        let period = 2.0 * PI;
+        let mut points = vec![
+            (0.0, 1.0),
+            (period, 0.5),
+            (0.0, 0.0),
+            (period * 0.25, 0.0),
+            (period * 0.5, 0.0),
+            (period * 0.75, 0.0),
+            (0.0, 0.0),
+            (period, 0.5),
+        ];
+        let edges = (0..points.len())
+            .map(|i| (i, (i + 1) % points.len()))
+            .collect::<Vec<_>>();
+
+        assert!(Surface::unwrap_periodic_coord(
+            &mut points, &edges, 0, edges.len(), 0, period, false,
+        ));
+
+        let u_min = points.iter().map(|p| p.0)
+            .fold(f64::INFINITY, f64::min);
+        let u_max = points.iter().map(|p| p.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!((u_max - u_min - period).abs() < 1e-9);
+
+        let mut triangulation =
+            cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
+        triangulation.run().unwrap();
+        assert!(triangulation.triangles().next().is_some());
+    }
+
+    #[test]
+    fn bspline_surface_gets_interior_steiner_points() {
+        let knots = || KnotVector::from_multiplicities(2, &[0.0, 1.0], &[3, 3]);
+        let control_points = (0..3).map(|u| {
+            (0..3).map(|v| {
+                DVec3::new(u as f64, v as f64, (u * v) as f64 * 0.25)
+            }).collect()
+        }).collect();
+        let surface = Surface::BSpline(SampledSurface::new(BSplineSurface::new(
+            true, true, knots(), knots(), control_points,
+        )));
+        let mut points = vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+        let mut vertices = Vec::new();
+
+        surface.add_steiner_points(&mut points, &mut vertices);
+
+        assert_eq!(points.len(), 4 + 16 * 16);
+        assert_eq!(vertices.len(), 16 * 16);
+        assert!(vertices.iter().all(|vertex| vertex.norm.norm() > 0.99));
+    }
+
+    #[test]
+    fn bspline_pole_uses_the_limiting_surface_normal() {
+        let knots = || KnotVector::from_multiplicities(2, &[0.0, 1.0], &[3, 3]);
+        let control_points = (0..3).map(|u| {
+            let x = u as f64;
+            vec![
+                DVec3::new(x, 0.0, 0.0),
+                DVec3::new(x, 0.0, 1.0),
+                DVec3::new(1.0, 0.0, 1.0),
+            ]
+        }).collect();
+        let sampled = SampledSurface::new(BSplineSurface::new(
+            true, true, knots(), knots(), control_points,
+        ));
+
+        let normal = Surface::surf_normal(DVec2::new(0.5, 1.1), &sampled);
+
+        assert!(normal.norm() > 0.99);
+        assert!(normal.y.abs() > 0.99);
+    }
 
     fn torus_point(major_angle: f64, minor_angle: f64) -> DVec3 {
         let major_radius = 4.9;
