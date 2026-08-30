@@ -6,7 +6,7 @@ edition = "2018"
 
 [dependencies]
 arrayvec = "0.7.1"
-fast-float = "0.2"
+fast-float = { package = "fast-float2", version = "0.2.4" }
 log = "0.4.14"
 memchr = "2.4.0"
 nom = "7"
