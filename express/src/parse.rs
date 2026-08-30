@@ -201,7 +201,7 @@ fn encoded_string_literal(s: &str) -> IResult<String> {
 
 // 142
 fn real_literal_(s: &str) -> IResult<f64> {
-    match fast_float::parse_partial::<f64, _>(s) {
+    match fast_float2::parse_partial::<f64, _>(s) {
         Err(_) => build_err(s, "Could not parse float"),
         Ok((x, n)) => Ok((&s[n..], x)),
     }
@@ -2537,6 +2537,20 @@ mod tests {
         assert!(real_literal("1.E6").unwrap().1 == 1.0e6);
         assert!(real_literal("3.5e-5").unwrap().1 == 3.5e-5);
         assert!(real_literal("359.62").unwrap().1 == 359.62);
+    }
+
+    #[test]
+    fn test_real_literal_rejects_empty_and_invalid_input() {
+        for input in ["", "+", "-", ".", ",", "(", "é"] {
+            assert!(real_literal_(input).is_err(), "accepted {:?}", input);
+        }
+    }
+
+    #[test]
+    fn test_real_literal_preserves_remainder() {
+        let (rest, value) = real_literal_("-1.25E-3;").unwrap();
+        assert_eq!(value, -0.00125);
+        assert_eq!(rest, ";");
     }
 
     #[test]

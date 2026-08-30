@@ -42,7 +42,7 @@ pub(crate) trait Parse<'a> {
 
 impl Parse<'_> for f64 {
     fn parse(s: &str) -> IResult<Self> {
-        match fast_float::parse_partial::<f64, _>(s) {
+        match fast_float2::parse_partial::<f64, _>(s) {
             Err(_) => nom_err(s, ErrorKind::Float),
             Ok((x, n)) => Ok((&s[n..], x)),
         }
@@ -334,6 +334,28 @@ pub(crate) fn parse_complex_mapping(s: &str) -> IResult<Entity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_float_rejects_empty_and_invalid_input() {
+        for input in ["", "+", "-", ".", ",", "(", "é"] {
+            assert!(f64::parse(input).is_err(), "accepted {:?}", input);
+        }
+    }
+
+    #[test]
+    fn test_float_preserves_step_notation_and_remainder() {
+        for (input, expected, remainder) in [
+            ("1.E-007),", 1e-7, "),"),
+            ("-12.5,", -12.5, ","),
+            ("+0.25)", 0.25, ")"),
+            ("5e-324;", f64::from_bits(1), ";"),
+        ] {
+            let (rest, value) = f64::parse(input).unwrap();
+            assert_eq!(value, expected);
+            assert_eq!(rest, remainder);
+        }
+    }
+
     #[test]
     fn test_parse_entity_decl() {
         parse_entity_decl(b"#3=SHAPE_DEFINITION_REPRESENTATION(#4,#10);").unwrap();
