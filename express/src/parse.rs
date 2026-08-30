@@ -145,7 +145,7 @@ fn digit(s: &str) -> IResult<char> {
 }
 
 // 125 digits
-// skipped due to using fast_float
+// skipped due to using fast_float2
 
 // 126
 fn encoded_character(s: &str) -> IResult<char> {
@@ -197,11 +197,11 @@ fn encoded_string_literal(s: &str) -> IResult<String> {
 }
 
 // 141 integer_literal = digits .
-// skipped because we're using fast_float instead
+// skipped because we're using fast_float2 instead
 
 // 142
 fn real_literal_(s: &str) -> IResult<f64> {
-    match fast_float::parse_partial::<f64, _>(s) {
+    match fast_float2::parse_partial::<f64, _>(s) {
         Err(_) => build_err(s, "Could not parse float"),
         Ok((x, n)) => Ok((&s[n..], x)),
     }

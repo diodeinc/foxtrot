@@ -5,7 +5,7 @@ authors = ["Matt Keeter <matt.j.keeter@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-fast-float = { package = "fast-float2", version = "0.2.4" }
+fast-float2 = "0.2.4"
 memchr = "2.4.0"
 nom = "7"
 

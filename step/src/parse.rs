@@ -42,7 +42,7 @@ pub(crate) trait Parse<'a> {
 
 impl Parse<'_> for f64 {
     fn parse(s: &str) -> IResult<Self> {
-        match fast_float::parse_partial::<f64, _>(s) {
+        match fast_float2::parse_partial::<f64, _>(s) {
             Err(_) => nom_err(s, ErrorKind::Float),
             Ok((x, n)) => Ok((&s[n..], x)),
         }
