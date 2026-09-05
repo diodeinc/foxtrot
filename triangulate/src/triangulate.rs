@@ -1162,6 +1162,20 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3]) -> Result
                 location, axis, ref_direction,
                 c.major_radius.0.0.0, c.minor_radius.0.0.0)
         },
+        Entity::DegenerateToroidalSurface(c) => {
+            let (location, axis, ref_direction) = axis2_placement_3d(s, c.position)?;
+            let major = c.major_radius.0.0.0;
+            let minor = c.minor_radius.0.0.0;
+            if !(0.0 < major && major < minor) {
+                return Err(Error::InvalidGeometry("degenerate torus requires 0 < major < minor"));
+            }
+            // For the inner lemon, u' = u + π and v' = π - v turn the
+            // negative radial branch into a positive one with major radius
+            // -R. This also selects the spec's outward normal: away from the
+            // furthest, rather than nearest, point on the major circle.
+            Surface::new_torus_with_ref_direction(location, axis, ref_direction,
+                if c.select_outer { major } else { -major }, minor)
+        },
         Entity::Plane(p) => {
             // We'll ignore axis and ref_direction in favor of building an
             // orthonormal basis later on
@@ -1586,6 +1600,36 @@ fn resolve_crossing_edges(
 mod tests {
     use super::*;
     use nurbs::AbstractSurface;
+
+    #[test]
+    fn degenerate_torus_selects_branch_and_outward_normal() {
+        for (outer, v) in [(true, 0.3_f64), (false, std::f64::consts::PI + 0.3)] {
+            let text = format!("ISO-10303-21;HEADER;ENDSEC;DATA;\
+                #1=CARTESIAN_POINT('',(0.,0.,0.));\
+                #2=DIRECTION('',(0.,0.,1.));\
+                #3=DIRECTION('',(1.,0.,0.));\
+                #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);\
+                #5=DEGENERATE_TOROIDAL_SURFACE('',#4,1.,2.,.{}.);\
+                ENDSEC;END-ISO-10303-21;", if outer { "T" } else { "F" });
+            let flat = StepFile::strip_flatten(text.as_bytes()).unwrap();
+            let step = StepFile::parse(&flat).unwrap();
+            let mut surface = get_surface(&step, Id::new(5), &[]).unwrap();
+            let mut verts: Vec<_> = [0.5_f64, 0.7, 0.9].iter().map(|&u| {
+                let radius = 1.0 + 2.0 * v.cos();
+                mesh::Vertex {
+                    pos: DVec3::new(radius * u.cos(), radius * u.sin(), 2.0 * v.sin()),
+                    norm: DVec3::zeros(), color: DVec3::zeros(),
+                }
+            }).collect();
+            let uv = surface.lower_verts(&mut verts).unwrap();
+            for (i, u) in [0.5_f64, 0.7, 0.9].iter().enumerate() {
+                let expected = DVec3::new(v.cos() * u.cos(), v.cos() * u.sin(), v.sin());
+                assert!(verts[i].norm.dot(&expected) > 1.0 - 1e-12);
+                assert!((surface.raise(glm::DVec2::new(uv[i].0, uv[i].1)).unwrap()
+                    - verts[i].pos).norm() < 1e-12);
+            }
+        }
+    }
 
     fn test_curve(rational: bool) -> HomogeneousCurve {
         let points = [DVec3::new(2.0, -1.0, 0.5), DVec3::new(3.0, 1.0, 2.0)];
