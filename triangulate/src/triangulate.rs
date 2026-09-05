@@ -1024,6 +1024,13 @@ struct HomogeneousCurve {
     control_points: Vec<DVec4>,
 }
 
+// Tangent-intersection controls for four rational quadratic circle spans.
+// Reuse the first control at the seam exactly, without sin(2π) roundoff.
+const CIRCLE_CONTROLS: [(f64, f64); 9] = [
+    (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (-1.0, 1.0),
+    (-1.0, 0.0), (-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (1.0, 0.0),
+];
+
 fn homogeneous_curve(s: &StepFile, curve: ap214::Curve) -> Result<HomogeneousCurve, Error> {
     match &s[curve] {
         Entity::BSplineCurveWithKnots(b) => {
@@ -1076,9 +1083,7 @@ fn conic_curve(s: &StepFile, position: Axis2Placement3d, a: f64, b: f64)
     let x = (x - z * x.dot(&z)).normalize();
     let y = z.cross(&x);
     let q = std::f64::consts::FRAC_1_SQRT_2;
-    let unit = [(1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (-1.0, 1.0),
-                (-1.0, 0.0), (-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (1.0, 0.0)];
-    let control_points = unit.iter().enumerate().map(|(i, &(u, v))| {
+    let control_points = CIRCLE_CONTROLS.iter().enumerate().map(|(i, &(u, v))| {
         let w = if i % 2 == 0 { 1.0 } else { q };
         let p = center + x * (a * u) + y * (b * v);
         DVec4::new(p.x * w, p.y * w, p.z * w, w)
@@ -1126,8 +1131,7 @@ fn revolution_surface(curve: HomogeneousCurve, origin: DVec3, axis: DVec3)
     let q = std::f64::consts::FRAC_1_SQRT_2;
     // ISO 10303-42 defines revolution as the first parameter and the basis
     // curve as the second. Swapping them reverses the surface normal.
-    let controls = (0..9).map(|j| {
-        let theta = j as f64 * std::f64::consts::FRAC_PI_4;
+    let controls = CIRCLE_CONTROLS.iter().enumerate().map(|(j, &(x, y))| {
         let wj = if j % 2 == 0 { 1.0 } else { q };
         curve.control_points.iter().map(|h| {
             let p = h.xyz() / h.w;
@@ -1135,8 +1139,7 @@ fn revolution_surface(curve: HomogeneousCurve, origin: DVec3, axis: DVec3)
             let radial = p - axial;
             // The first parameter is the standard four-span rational
             // quadratic circle, not an angular parameter.
-            let rotated = radial * theta.cos() + axis.cross(&radial) * theta.sin();
-            let point = axial + rotated / wj;
+            let point = axial + radial * x + axis.cross(&radial) * y;
             let weight = h.w * wj;
             DVec4::new(point.x * weight, point.y * weight, point.z * weight, weight)
         }).collect()
@@ -1634,6 +1637,8 @@ mod tests {
             * std::f64::consts::FRAC_1_SQRT_2;
         let expected_normal = axis.cross(&(expected - origin)).cross(&rotated);
         assert!(normal.normalize().dot(&expected_normal.normalize()) > 1.0 - 1e-12);
+        assert_eq!(surface.surf.point(glm::DVec2::new(0.0, 0.4)),
+                   surface.surf.point(glm::DVec2::new(1.0, 0.4)));
     }
 
     #[test]
