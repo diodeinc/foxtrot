@@ -1033,3 +1033,37 @@ f64 and ten f32 degenerate facets; its upstream cause is not established here.
 Evidence: `local/wurth-endpoint-regressions`, `local/repair-endpoint-check`, and
 `.amp/in/artifacts/topological-seam-remaining/` (per-file source observations and
 before/after results; the two original invalid meshes remain RCA-unresolved).
+
+### Pass 10 and the surface distance Hessian
+
+Full pass 10 uses the frozen endpoint worker for both corpora, Würth first:
+7,328 Würth files (6,922 ok, 276 invalid meshes, 127 tessellation errors,
+3 source crashes), then 7,251 KiCad files (7,115 ok, 136 invalid meshes,
+zero tessellation errors). Exact path/hash coverage, complete eight-shard unions
+and common worker digests are verified. Per-file observations and reproduction
+commands: `.amp/in/artifacts/repair-pass10/`. Failure STLs are losslessly gzipped
+after their atomic result files are complete.
+
+The surface inverse uses a Gauss–Newton approximation which omits the residual
+times second-derivative terms in the squared-distance Hessian. Normal offsets
+can then make first-order convergence arbitrarily slow. An analytic extruded
+parabola near its curvature center exhausts the old iteration limit. Include
+the full derivative-normalized Hessian, with a scaled eigenvalue shift to retain
+a positive definite descent model when curvature is negative or singular.
+The analytic regression and all 28 NURBS tests pass; workspace tests and eight
+checkpoints pass. No convergence tolerance or iteration limit is increased.
+
+Of the 54 pass-10 Würth files with lowering errors, 11 now pass and two reach
+mesh validation; 41 retain tessellation errors. WPCC-RX 760308102210 has one
+additional face error and needs further investigation. These are not all
+resolved by the Hessian: DSUB 216612013 still fails at a closed-domain seam.
+Temporary probes are removed; retained evidence is in
+`local/repair-hessian-{lowering,check}` and `local/dsub-{inverse,hessian}-probe.*`.
+
+Source analysis of the 137 canceled faces (61 files) identifies 49 faces in
+33 files with distinct parallel LINE offsets, 47 faces in 14 files with identical
+geometric curves, and 41 faces in 19 files not resolved by exact pair comparison.
+File groups overlap. Evidence: `.amp/in/artifacts/pass10-canceled-faces/`.
+Unlike the earlier endpoint-only hypothesis, this analysis examines infinite
+LINE origins/directions and uses exact decimal predicates. It does not infer
+zero area from two vertices or curvature merely from distinct spline controls.

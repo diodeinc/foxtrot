@@ -146,7 +146,7 @@ where
         const ARMIJO: f64 = 1e-4;
         let mut uv_i = self.constrain_uv(uv_0);
         for _ in 0..max_iter {
-            let derivs = self.surf.derivs::<1>(uv_i);
+            let derivs = self.surf.derivs::<2>(uv_i);
             let S = derivs[0][0];
             let r = S - P;
             let ranges = DVec2::new(
@@ -195,17 +195,33 @@ where
                 return Some(uv_i);
             }
 
-            // Levenberg-damped Gauss--Newton in derivative-normalized
-            // coordinates.  The positive damping makes this a descent
-            // direction even when the two derivatives are dependent.
+            // The squared-distance Hessian includes surface curvature even
+            // when the closest point has a nonzero normal residual. Omitting
+            // it makes convergence arbitrarily slow near a curvature center.
             let fit_unit = [
                 if free[0] { unit[0] } else { DVec3::zeros() },
                 if free[1] { unit[1] } else { DVec3::zeros() },
             ];
-            let correlation = dot(&fit_unit[0], &fit_unit[1]);
-            let a = fit_unit[0].norm_squared() + DAMPING;
-            let d = fit_unit[1].norm_squared() + DAMPING;
+            let curvature = |i: usize, j: usize, derivative: DVec3| {
+                if free[i] && free[j] && norms[i] > 0. && norms[j] > 0. {
+                    dot(&r, &(derivative * (ranges[i] / norms[i]) * (ranges[j] / norms[j])))
+                } else { 0. }
+            };
+            let mut a = fit_unit[0].norm_squared() + curvature(0, 0, derivs[2][0]);
+            let mut d = fit_unit[1].norm_squared() + curvature(1, 1, derivs[0][2]);
+            let mut correlation = dot(&fit_unit[0], &fit_unit[1]) + curvature(0, 1, derivs[1][1]);
+            let scale = a.abs().max(d.abs()).max(correlation.abs()).max(1.);
+            a /= scale;
+            d /= scale;
+            correlation /= scale;
+            // Shift the spectrum only as needed for a positive definite
+            // descent model, including singular and negative-curvature cases.
+            let eigen_min = 0.5 * (a + d) - (0.5 * (a - d)).hypot(correlation);
+            let shift = (DAMPING - eigen_min).max(0.);
+            a += shift;
+            d += shift;
             let det = a * d - correlation * correlation;
+            let projected = projected / scale;
             let q = DVec2::new(
                 (-d * projected.x + correlation * projected.y) / det,
                 (correlation * projected.x - a * projected.y) / det,
@@ -335,6 +351,19 @@ mod tests {
             close(uv.x, expected.x, 1e-10);
             close(uv.y, expected.y, 1e-10);
         }
+    }
+
+    #[test]
+    fn near_curvature_center_projection_uses_distance_hessian() {
+        let sampled = SampledSurface::new(NDBSplineSurface::new(true, true,
+            KnotVector::from_multiplicities(2, &[-1., 1.], &[3, 3]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [(-1., 1.), (0., -1.), (1., 1.)].iter().map(|&(x, z)|
+                vec![DVec3::new(x, 0., z), DVec3::new(x, 1., z)]).collect()));
+        let uv = sampled.uv_from_point_newtons_method(
+            DVec3::new(0., 0.37, 0.49999), DVec2::new(0.1, 0.4)).unwrap();
+        close(uv.x, 0., 1e-8);
+        close(uv.y, 0.37, 1e-12);
     }
 
     #[test]
