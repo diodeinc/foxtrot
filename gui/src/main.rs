@@ -89,8 +89,8 @@ fn main() {
         use triangulate::triangulate::triangulate;
 
         let data = std::fs::read(input).expect("Could not open file");
-        let flat = StepFile::strip_flatten(&data);
-        let step = StepFile::parse(&flat);
+        let flat = StepFile::strip_flatten(&data).expect("Could not preprocess STEP file");
+        let step = StepFile::parse(&flat).expect("Could not parse STEP file");
         let (mesh, _stats) = triangulate(&step);
         mesh
     });

@@ -1,7 +1,7 @@
 use std::collections::{HashSet, HashMap};
 use nom::{
     branch::{alt},
-    bytes::complete::{is_not, tag},
+    bytes::complete::tag,
     character::complete::{char, digit1},
     combinator::{map, map_res, opt},
     error::*,
@@ -64,11 +64,30 @@ impl Parse<'_> for i64 {
 }
 impl<'a> Parse<'a> for &'a str {
     fn parse(s: &'a str) -> IResult<'a, &'a str> {
-        alt((
-            map(delimited(char('\''), opt(is_not("'")), char('\'')),
-                |r| r.unwrap_or("")),
-            // NUL REF
-            map(char('$'), |_| "")))(s)
+        if let Some(rest) = s.strip_prefix('$') {
+            return Ok((rest, ""));
+        }
+        if !s.starts_with('\'') {
+            return nom_err(s, ErrorKind::Char);
+        }
+
+        let bytes = s.as_bytes();
+        let mut i = 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                } else {
+                    // Keep doubled apostrophes in their ISO 10303-21 encoded
+                    // representation: borrowed strings cannot be unescaped
+                    // without changing the generated entity field types.
+                    return Ok((&s[i + 1..], &s[1..i]));
+                }
+            } else {
+                i += 1;
+            }
+        }
+        nom_err(s, ErrorKind::Char)
     }
 }
 
@@ -339,6 +358,13 @@ mod tests {
     fn logical_uses_iso_unknown_literal() {
         assert_eq!(Logical::parse(".U."), Ok(("", Logical(None))));
         assert!(Logical::parse(".UNKNOWN.").is_err());
+    }
+
+    #[test]
+    fn strings_allow_doubled_apostrophes() {
+        assert_eq!(<&str>::parse("'Don''t panic',next"),
+                   Ok((",next", "Don''t panic")));
+        assert!(<&str>::parse("'unterminated").is_err());
     }
 
     #[test]

@@ -25,12 +25,14 @@ fn main() {
     eprintln!("input: {} ({:.1} MB)", path, data.len() as f64 / 1e6);
 
     let t0 = Instant::now();
-    let flat = step::step_file::StepFile::strip_flatten(&data);
+    let flat = step::step_file::StepFile::strip_flatten(&data)
+        .expect("could not preprocess STEP file");
     let t1 = Instant::now();
     eprintln!("strip_flatten: {:.3}s ({:.1} MB flattened) [rss {:.0} MB]",
         (t1 - t0).as_secs_f64(), flat.len() as f64 / 1e6, peak_rss_mb());
 
-    let parsed = step::step_file::StepFile::parse(&flat);
+    let parsed = step::step_file::StepFile::parse(&flat)
+        .expect("could not parse STEP file");
     let t2 = Instant::now();
     eprintln!("parse:         {:.3}s ({} entities) [rss {:.0} MB]",
         (t2 - t1).as_secs_f64(), parsed.0.len(), peak_rss_mb());

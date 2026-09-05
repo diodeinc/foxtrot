@@ -34,8 +34,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start = std::time::SystemTime::now();
     let data = std::fs::read(input)?;
-    let flat = StepFile::strip_flatten(&data);
-    let entities = StepFile::parse(&flat);
+    let flat = StepFile::strip_flatten(&data)?;
+    let entities = StepFile::parse(&flat)?;
     let end = std::time::SystemTime::now();
     let since_the_epoch = end.duration_since(start)
         .expect("Time went backwards");
@@ -49,4 +49,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
-

@@ -16,12 +16,14 @@ pub fn init_log() {
 }
 
 #[wasm_bindgen]
-pub fn step_to_triangle_buf(data: String) -> Vec<f32> {
+pub fn step_to_triangle_buf(data: String) -> Result<Vec<f32>, JsValue> {
     use step::step_file::StepFile;
     use triangulate::triangulate::triangulate; // lol
 
-    let flat = StepFile::strip_flatten(data.as_bytes());
-    let step = StepFile::parse(&flat);
+    let flat = StepFile::strip_flatten(data.as_bytes())
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let step = StepFile::parse(&flat)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let (mut mesh, _stats) = triangulate(&step);
 
     let (mut xmin, mut xmax) = (std::f64::INFINITY, -std::f64::INFINITY);
@@ -45,10 +47,10 @@ pub fn step_to_triangle_buf(data: String) -> Vec<f32> {
         pos.z = (pos.z - zc) / scale * 200.0;
     }
 
-    mesh.triangles.iter()
+    Ok(mesh.triangles.iter()
         .flat_map(|v| v.verts.iter())
         .map(|p| &mesh.verts[*p as usize])
         .flat_map(|v| v.pos.iter().chain(&v.norm).chain(&v.color))
         .map(|f| *f as f32)
-        .collect()
+        .collect())
 }

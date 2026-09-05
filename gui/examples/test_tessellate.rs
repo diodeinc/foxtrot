@@ -23,8 +23,8 @@ fn main() {
     let path = matches.value_of("input").expect("Could not get input file");
 
     let data = std::fs::read(path).expect("Could not open file");
-    let flat = StepFile::strip_flatten(&data);
-    let step = StepFile::parse(&flat);
+    let flat = StepFile::strip_flatten(&data).expect("Could not preprocess STEP file");
+    let step = StepFile::parse(&flat).expect("Could not parse STEP file");
     let (mesh, stats) = triangulate(&step);
 
     eprintln!("Faces: {}, Errors: {}, Panics: {}, Triangles: {}, Vertices: {}",

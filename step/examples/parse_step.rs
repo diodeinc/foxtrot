@@ -16,8 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = SystemTime::now();
 
     let data = std::fs::read(input)?;
-    let flat = StepFile::strip_flatten(&data);
-    let entities = StepFile::parse(&flat);
+    let flat = StepFile::strip_flatten(&data)?;
+    let entities = StepFile::parse(&flat)?;
     println!("Got {} entities", entities.0.len());
 
     let end = SystemTime::now();
@@ -25,4 +25,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("time {:?}", since_the_epoch);
     Ok(())
 }
-

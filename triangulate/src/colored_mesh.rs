@@ -104,8 +104,10 @@ impl From<&Stats> for TessellationDiagnostics {
 pub fn tessellate_step_bytes(
     step_bytes: &[u8],
 ) -> Result<(TessellatedMesh, TessellationDiagnostics), String> {
-    let flattened = step::step_file::StepFile::strip_flatten(step_bytes);
-    let step = step::step_file::StepFile::parse(&flattened);
+    let flattened = step::step_file::StepFile::strip_flatten(step_bytes)
+        .map_err(|e| e.to_string())?;
+    let step = step::step_file::StepFile::parse(&flattened)
+        .map_err(|e| e.to_string())?;
     let (mesh, stats) = triangulate(&step);
     let diag = TessellationDiagnostics::from(&stats);
     let tess = group_mesh_by_color(&mesh)?;

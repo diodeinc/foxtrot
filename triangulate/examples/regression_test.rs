@@ -73,8 +73,8 @@ fn run_tests(files: &[std::path::PathBuf]) -> Vec<FileResult> {
         std::thread::spawn(move || {
             let inner = std::panic::catch_unwind(|| {
                 let data = std::fs::read(&path_clone).expect("Could not open file");
-                let flat = StepFile::strip_flatten(&data);
-                let step = StepFile::parse(&flat);
+                let flat = StepFile::strip_flatten(&data).unwrap();
+                let step = StepFile::parse(&flat).unwrap();
                 let (mesh, stats) = triangulate(&step);
                 (mesh.triangles.len(), stats)
             });

@@ -46,8 +46,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = std::fs::read(&args[1])?;
     let read_ms = start.elapsed().as_secs_f64() * 1000.0;
     let start = Instant::now();
-    let flat = StepFile::strip_flatten(&data);
-    let step = StepFile::parse(&flat);
+    let flat = StepFile::strip_flatten(&data)?;
+    let step = StepFile::parse(&flat)?;
     let parse_ms = start.elapsed().as_secs_f64() * 1000.0;
     let start = Instant::now();
     let (mesh, stats) = triangulate(&step);

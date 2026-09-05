@@ -1443,8 +1443,8 @@ mod tests {
                  #8=SHELL_BASED_SURFACE_MODEL('',(#7));\
                  ENDSEC;END-ISO-10303-21;"
             );
-            let flat = StepFile::strip_flatten(data.as_bytes());
-            let step = StepFile::parse(&flat);
+            let flat = StepFile::strip_flatten(data.as_bytes()).unwrap();
+            let step = StepFile::parse(&flat).unwrap();
             let (mesh, stats) = triangulate(&step);
 
             assert_eq!(stats.num_shells, 1, "{shell_type}");
@@ -1505,8 +1505,8 @@ ENDSEC;
 END-ISO-10303-21;
 "#;
 
-        let flat = StepFile::strip_flatten(data);
-        let step = StepFile::parse(&flat);
+        let flat = StepFile::strip_flatten(data).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
         let (mesh, stats) = triangulate(&step);
 
         assert_eq!(stats.num_faces, 1);

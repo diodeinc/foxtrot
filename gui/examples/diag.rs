@@ -10,8 +10,8 @@ fn main() {
     let surface_ids: Vec<usize> = args[2..].iter().map(|s| s.parse().unwrap()).collect();
 
     let data = std::fs::read(path).expect("Could not open file");
-    let flat = StepFile::strip_flatten(&data);
-    let step = StepFile::parse(&flat);
+    let flat = StepFile::strip_flatten(&data).expect("Could not preprocess STEP file");
+    let step = StepFile::parse(&flat).expect("Could not parse STEP file");
 
     for sid in &surface_ids {
         eprintln!("\n=== Surface #{} ===", sid);
