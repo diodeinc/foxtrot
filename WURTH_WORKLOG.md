@@ -1582,3 +1582,20 @@ reaches mesh validation but retains an f32 defect.
 Evidence: `local/dome-cycle.log`, `/tmp/trust-radius-old-regression.log`,
 `/tmp/trust-radius-regression.log`, `/tmp/trust-fit-workspace-tests.log`,
 `local/repair-trust-fit-cohort`; frozen worker `local/repair-trust-fit-worker`.
+
+### Share the surface tensor-product accumulator before changing arithmetic
+
+Point and derivative evaluation now use one tensor-product accumulator. Keep
+the summation order, anchor choice and coordinate translation unchanged.
+Workspace tests pass and the HTAH-D10L10 STL is byte-identical to the preceding
+frozen worker with one Rayon thread. This is only a refactor; the HTAH f64
+degenerate remains. Evidence: `/tmp/tensor-refactor-tests.log`,
+`local/repair-tensor-refactor-worker`, `/tmp/htah-{dump,refactor}.stl`.
+
+The HTAH diagnostic identifies face #4324 / surface #84, an ordinary cubic
+curve extruded in z. Boundary points with identical z get v coordinates that
+differ by a few ULPs because summing the u basis perturbs the v-only coordinate.
+Overlapping collinear trims become a tiny crossing. The inserted intersection
+and an original vertex have identical XYZ but different UV, creating the f64
+degenerate. Trace: `local/htah-face84.log`. Correct per-axis partition-of-unity
+evaluation next; do not weld arbitrary XYZ aliases or discard the facet.

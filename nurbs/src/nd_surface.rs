@@ -174,25 +174,9 @@ impl<const D: usize> NDBSplineSurface<D> {
         uspan: usize, Nu: &VecF, vspan: usize, Nv: &VecF,
         difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
     ) -> (TVec<f64, D>, TVec<f64, D>) {
-        let p = self.u_knots.degree();
-        let q = self.v_knots.degree();
-
-        let uind = uspan - p;
-        // The nonnegative tensor-product basis is largest at the pair of
-        // largest axis terms. This anchor preserves tiny endpoint coordinates.
-        let uanchor = Nu.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
-        let vanchor = Nv.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
-        let origin = self.control_points[uind + uanchor][vspan - q + vanchor];
-        let mut S = TVec::zeros();
-        for l in 0..=q {
-            let mut temp = TVec::zeros();
-            let vind = vspan - q + l;
-            for k in 0..=p {
-                temp += Nu[k] * difference(self.control_points[uind + k][vind], origin);
-            }
-            S += Nv[l] * temp;
-        }
-        (origin, S)
+        let (origin, jet) = self.tensor_product::<0>([uspan, vspan],
+            std::slice::from_ref(Nu), std::slice::from_ref(Nv), difference);
+        (origin, jet[0][0])
     }
 
     /// Returns all derivatives of the surface.  If `D = surface_derivs()`,
@@ -212,39 +196,39 @@ impl<const D: usize> NDBSplineSurface<D> {
     pub(crate) fn surface_derivs_relative<const E: usize>(&self, uv: DVec2, spans: [usize; 2],
         difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
     ) -> (TVec<f64, D>, Vec<Vec<TVec<f64, D>>>) {
+        let Nu = self.u_knots.basis_funs_derivs_for_span(spans[0], uv.x, min(E, self.u_knots.degree()));
+        let Nv = self.v_knots.basis_funs_derivs_for_span(spans[1], uv.y, min(E, self.v_knots.degree()));
+        self.tensor_product::<E>(spans, &Nu, &Nv, difference)
+    }
+
+    fn tensor_product<const E: usize>(&self, spans: [usize; 2],
+        Nu: &[impl AsRef<[f64]>], Nv: &[impl AsRef<[f64]>],
+        difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
+    ) -> (TVec<f64, D>, Vec<Vec<TVec<f64, D>>>) {
         let p = self.u_knots.degree();
         let q = self.v_knots.degree();
-
-        // Simple initialization of du
-        let du = min(E, p);
-        let dv = min(E, q);
-
         // The output matrix goes all the way to order d, even if some of the
         // surfaces are lower order (those values will be locked at 0)
         let mut SKL = vec![vec![TVec::zeros(); E + 1]; E + 1];
 
         let [uspan, vspan] = spans;
-        let Nu_deriv = self.u_knots.basis_funs_derivs_for_span(uspan, uv.x, du);
-
-        let Nv_deriv = self.v_knots.basis_funs_derivs_for_span(vspan, uv.y, dv);
-
         // Tensor-product partition of unity removes the common coordinate
         // offset from every derivative, including mixed partial derivatives.
-        let uanchor = Nu_deriv[0].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
-        let vanchor = Nv_deriv[0].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let uanchor = Nu[0].as_ref().iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let vanchor = Nv[0].as_ref().iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
         let origin = self.control_points[uspan - p + uanchor][vspan - q + vanchor];
         let mut temp = vec![TVec::zeros(); q + 1];
-        for k in 0..=du {
+        for (k, Nu) in Nu.iter().map(AsRef::as_ref).enumerate() {
             for s in 0..=q {
                 temp[s] = TVec::zeros();
                 for r in 0..=p {
-                    temp[s] += Nu_deriv[k][r] * difference(self.control_points[uspan - p + r][vspan - q + s], origin);
+                    temp[s] += Nu[r] * difference(self.control_points[uspan - p + r][vspan - q + s], origin);
                 }
             }
-            let dd = min(E - k, dv);
+            let dd = min(E - k, Nv.len() - 1);
             for l in 0..=dd {
                 for s in 0..=q {
-                    SKL[k][l] += Nv_deriv[l][s] * temp[s];
+                    SKL[k][l] += Nv[l].as_ref()[s] * temp[s];
                 }
             }
         }
