@@ -774,6 +774,7 @@ fn open_shell(
             // Per-face failures are common on large boards and summarised
             // once at the end of triangulate(); keep the per-face detail off
             // the console (console logging is expensive in wasm workers).
+            stats.num_errors += 1;
             debug!("Failed to triangulate {:?}: {}", s[*face], err);
         }
     }
@@ -805,6 +806,7 @@ fn closed_shell(
             // Per-face failures are common on large boards and summarised
             // once at the end of triangulate(); keep the per-face detail off
             // the console (console logging is expensive in wasm workers).
+            stats.num_errors += 1;
             debug!("Failed to triangulate {:?}: {}", s[*face], err);
         }
     }
@@ -1425,6 +1427,33 @@ fn resolve_crossing_edges(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_unsupported_face_surfaces_in_both_shell_types() {
+        for shell_type in ["OPEN_SHELL", "CLOSED_SHELL"] {
+            let data = format!(
+                "ISO-10303-21;HEADER;ENDSEC;DATA;\
+                 #1=CARTESIAN_POINT('',(0.,0.,0.));\
+                 #2=DIRECTION('',(0.,0.,1.));\
+                 #3=AXIS2_PLACEMENT_3D('',#1,#2,$);\
+                 #4=TOROIDAL_SURFACE('',#3,2.,1.);\
+                 #5=OFFSET_SURFACE('',#4,1.,.F.);\
+                 #6=ADVANCED_FACE('',(),#5,.T.);\
+                 #7={shell_type}('',(#6));\
+                 #8=SHELL_BASED_SURFACE_MODEL('',(#7));\
+                 ENDSEC;END-ISO-10303-21;"
+            );
+            let flat = StepFile::strip_flatten(data.as_bytes());
+            let step = StepFile::parse(&flat);
+            let (mesh, stats) = triangulate(&step);
+
+            assert_eq!(stats.num_shells, 1, "{shell_type}");
+            assert_eq!(stats.num_faces, 1, "{shell_type}");
+            assert_eq!(stats.num_errors, 1, "{shell_type}");
+            assert_eq!(stats.num_panics, 0, "{shell_type}");
+            assert!(mesh.triangles.is_empty(), "{}", shell_type);
+        }
+    }
 
     #[test]
     fn triangulates_face_surface_in_closed_shell() {
