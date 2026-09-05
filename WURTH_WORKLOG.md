@@ -1942,3 +1942,17 @@ Compressed and gzip-verified historical pass-16/pass-17 per-case logs and
 completed continuous-sampling cohort STLs. These now use `.log.gz` and
 `.stl.gz`; reports, metrics, inputs and workers remain. This restores about
 7 GB while preserving evidence; free space is approximately 12–13 GB.
+
+### Gate exact f64 degenerates as well as exported STL degenerates
+
+The worker's adaptive f64 collinearity diagnostic is now an acceptance check,
+not just a report field. Float32 rounding can move an exactly collinear f64
+triangle off its line, so an apparently valid STL cannot override a defective
+upstream mesh. Validate the optional metric and compare it across repeated
+runs; legacy workers which omit it retain their existing behavior.
+
+All 19 harness tests pass, including invalid/nonfinite f64 metrics. Rechecking
+the six flagged Würth models rejects all six, including two that previously
+passed the STL-only gate. Evidence: `/tmp/f64-gate-tests.log` and
+`local/repair-f64-gate-wurth`. Pass 18 predates this strengthened gate and
+cavity-shell traversal; its totals are not current all-corpus certification.

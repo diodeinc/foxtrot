@@ -222,11 +222,14 @@ def run_file(entry, args):
                 "log_warn",
                 "log_error",
             )
+            # Older workers do not report an f64 diagnostic. When present,
+            # validate it and do not let f32 rounding hide an upstream defect.
+            degenerate_f64 = metrics.get("degenerate_f64", 0)
             if any(
-                not isinstance(metrics.get(k), (int, float))
-                or not math.isfinite(metrics[k])
-                or metrics[k] < 0
-                for k in required
+                not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+                for value in [metrics.get(k) for k in required] + [degenerate_f64]
             ):
                 raise ValueError("invalid worker metrics")
             geometry = mesh_metrics(directory / "mesh.stl")
@@ -235,7 +238,7 @@ def run_file(entry, args):
             sample.update(metrics)
             sample["process_ms"] = metrics["parse_ms"] + metrics["triangulate_ms"]
             if "metrics" in result and any(
-                result["metrics"][k] != metrics[k]
+                result["metrics"].get(k) != metrics.get(k)
                 for k in (
                     "triangles",
                     "faces",
@@ -243,6 +246,7 @@ def run_file(entry, args):
                     "panics",
                     "log_warn",
                     "log_error",
+                    "degenerate_f64",
                 )
             ):
                 result["status"] = "nondeterministic"
@@ -250,7 +254,7 @@ def run_file(entry, args):
             result["geometry"] = geometry
             if metrics["errors"] or metrics["panics"] or metrics["log_error"]:
                 result["status"] = "tessellation_error"
-            elif not geometry["validation"]["valid"]:
+            elif degenerate_f64 or not geometry["validation"]["valid"]:
                 result["status"] = "invalid_mesh"
             if index >= args.warmup:
                 result["samples"].append(sample)

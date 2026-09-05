@@ -30,6 +30,8 @@ data = dict(read_ms=1, parse_ms=2, triangulate_ms=3, export_ms=4,
 if mode == 'partial': data['errors'] = 1
 if mode == 'nonfinite': data['parse_ms'] = float('nan')
 if mode == 'counts': data['triangles'] = 2
+if mode == 'f64_invalid': data['degenerate_f64'] = 1
+if mode == 'f64_nonfinite': data['degenerate_f64'] = float('nan')
 marker = metrics.with_suffix('.count')
 count = int(marker.read_text()) if marker.exists() else 0
 marker.write_text(str(count + 1))
@@ -213,6 +215,8 @@ class CorpusTests(unittest.TestCase):
             "nonfinite": "harness_error",
             "counts": "harness_error",
             "invalid": "invalid_mesh",
+            "f64_invalid": "invalid_mesh",
+            "f64_nonfinite": "harness_error",
             "vary": "nondeterministic",
             "stale": "harness_error",
         }
