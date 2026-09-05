@@ -1440,8 +1440,30 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
         Entity::SeamCurve(v) => {
             curve(s, edge_curve, v.curve_3d)?
         },
-        // The Line type ignores pnt / dir and just uses u and v
-        Entity::Line(_) => Curve::new_line(),
+        Entity::Line(line) => {
+            let origin = cartesian_point(s, line.pnt)?;
+            let vector = s.entity(line.dir).ok_or(Error::InvalidStepEntity("Vector"))?;
+            let d = direction(s, vector.orientation)?;
+            let scale = d.amax();
+            if !(scale > 0. && scale.is_finite() && vector.magnitude.0 > 0.
+                 && vector.magnitude.0.is_finite()) {
+                return Err(Error::InvalidGeometry("line vector must be finite and nonzero"));
+            }
+            let d = d / scale;
+            let controls = [edge_curve.edge_start, edge_curve.edge_end].iter().map(|&v| {
+                let p = vertex_point(s, v)?;
+                let offset = p - origin;
+                Ok(p - (offset - d * (offset.dot(&d) / d.norm_squared())))
+            }).collect::<Result<Vec<_>, Error>>()?;
+            // A trimmed LINE is a degree-one spline. Preserve its geometry
+            // through the same sampling and shared-endpoint pipeline as every
+            // other spline, rather than replacing it with its vertex chord.
+            Curve::BSplineCurveWithKnots {
+                curve: SampledCurve::new(nurbs::BSplineCurve::new(true,
+                    KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]), controls)),
+                dir: edge_curve.same_sense,
+            }
+        },
         e => {
             warn!("Could not get edge from {:?}", e);
             return Err(Error::UnknownCurveType);
@@ -1640,6 +1662,34 @@ mod tests {
         let mut edges = vec![(0, 3), (5, 4)];
         cancel_retraced_edges(&pts, &mut edges);
         assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn line_geometry_survives_shared_topological_endpoints() {
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(0.,0.,0.));
+            #2=CARTESIAN_POINT('',(3.,0.,0.));
+            #3=VERTEX_POINT('',#1);
+            #4=VERTEX_POINT('',#2);
+            #5=CARTESIAN_POINT('',(0.,-0.005,0.));
+            #6=CARTESIAN_POINT('',(0.,0.005,0.));
+            #7=DIRECTION('',(2.,0.,0.));
+            #8=VECTOR('',#7,2.);
+            #9=LINE('',#5,#8);
+            #10=LINE('',#6,#8);
+            #11=EDGE_CURVE('',#3,#4,#9,.T.);
+            #12=EDGE_CURVE('',#4,#3,#10,.F.);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let a = edge_curve(&step, Id::new(11), true).unwrap();
+        let b = edge_curve(&step, Id::new(12), false).unwrap();
+        assert_eq!(a.len(), 4);
+        assert_eq!(b.len(), 4);
+        assert_eq!(a[0], b[0]);
+        assert_eq!(a[3], b[3]);
+        assert_eq!(a[1], DVec3::new(0.375, -0.005, 0.));
+        assert_eq!(b[1], DVec3::new(0.375, 0.005, 0.));
     }
 
     #[test]

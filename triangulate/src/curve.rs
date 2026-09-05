@@ -53,7 +53,6 @@ pub enum Curve {
         world_from_plane: DMat4,
         hyperbola: bool,
     },
-    Line,
     BSplineCurveWithKnots {
         curve: SampledCurve<3>,
         dir: bool,
@@ -117,10 +116,6 @@ impl Curve {
                              focal_dist, 2.0 * focal_dist, false)
     }
 
-    pub fn new_line() -> Self {
-        Self::Line
-    }
-
     fn curve_points<const N: usize>(u: DVec3, v: DVec3, curve: &SampledCurve<N>,
                                      is_loop: bool, dir: bool) -> Result<Vec<DVec3>, Error>
         where NDBSplineCurve<N>: AbstractCurve
@@ -166,7 +161,6 @@ impl Curve {
 
     pub fn build(&self, u: DVec3, v: DVec3, is_loop: bool) -> Result<Vec<DVec3>, Error> {
         match self {
-            Self::Line => Ok(vec![u, v]),
             Self::BSplineCurveWithKnots { curve, dir } => Self::curve_points(u, v, curve, is_loop, *dir),
             Self::NURBSCurve { curve, dir } => Self::curve_points(u, v, curve, is_loop, *dir),
             Self::OpenConic { plane_from_world, world_from_plane, hyperbola } => {

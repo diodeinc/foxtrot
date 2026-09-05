@@ -1119,3 +1119,18 @@ errors. WR-SMB's six canceled faces clear but two other faces now expose lowerin
 failures. Remaining CIRCM12 cancellations are torus seams, not this curve bug.
 All eleven KiCad crossing-cohort files still reach mesh validation with no face
 errors. Evidence: `local/repair-closed-trim-{identical,smb,check,kicad}`.
+
+### LINE geometry and shared topology
+
+The 49 affected faces in 33 files use distinct parallel LINE origins but shared
+topological endpoints. The old LINE branch ignored origin and direction and
+replaced both curves by the same chord. Project the trim endpoints onto the
+infinite line and represent the result as a degree-one spline, using the
+existing sample/shared-endpoint/reduction pipeline. Remove the endpoint-only
+Curve variant. No proximity threshold or model-specific branch is introduced.
+
+The offset-line regression fails before and passes after. Workspace tests and
+eight checkpoints pass. All 33 files clear their face errors: 32 pass; WE-TPC
+8012 retains invalid mesh facets. All eleven KiCad crossing-cohort models still
+reach mesh validation but remain invalid meshes, not complete repairs. Evidence:
+`local/repair-line-{offsets,check,kicad}` and `/tmp/line-tests.log`.
