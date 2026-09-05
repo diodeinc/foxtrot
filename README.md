@@ -57,21 +57,31 @@ To regenerate, run
 cargo run --release --example gen_exp -- path/to/APs/10303-214e3-aim-long.exp step/src/ap214.rs
 ```
 
-## Regression testing
-The `test_assets/` directory contains STEP files used for tessellation
-regression testing. To add components from a KiCad board:
-```sh
-pip install zstandard  # one-time dependency
-python3 scripts/ingest_kicad_pcb.py path/to/layout.kicad_pcb
-```
-This extracts embedded 3D models, deduplicates them into `test_assets/`,
-and regenerates `test_assets/baseline.json`. You can pass multiple `.kicad_pcb`
-files at once. After running, commit the new assets and updated baseline.
+## Regression testing and benchmarking
+STEP models are not vendored into this repository. Two public libraries
+provide a large, varied corpus of real-world component models for testing
+and benchmarking the parser and tessellator:
 
-To run the regression suite against the baseline:
+- [Würth Elektronik KiCad Library](https://github.com/WurthElektronik/KiCad-Library)
+  — several thousand vendor-authored models under `3dmodels/`, exported from
+  Solid Edge, FreeCAD, and other tools, spanning AP203, AP214, and AP242.
+- [KiCad packages3D](https://gitlab.com/kicad/libraries/kicad-packages3D/)
+  — the official KiCad 3D model library, mostly FreeCAD/OCCT-generated
+  generic packages (`CC-BY-SA-4.0 WITH KiCad-libraries-exception`).
+
+Clone either one and point the regression harness at a directory of
+`.step`/`.stp` files with `TEST_ASSETS_DIR`. It reports per-file timing,
+triangle and face counts, tessellation errors, and panics, and can save or
+compare against a JSON baseline:
 ```sh
-cargo run --release --example regression_test -- --compare test_assets/baseline.json
+TEST_ASSETS_DIR=path/to/KiCad-Library/3dmodels/Inductor_SMD_Wurth.3dshapes \
+  cargo run --release --example regression_test -- --save-baseline baseline.json
+TEST_ASSETS_DIR=path/to/KiCad-Library/3dmodels/Inductor_SMD_Wurth.3dshapes \
+  cargo run --release --example regression_test -- --compare baseline.json
 ```
+
+To extract STEP models embedded in a KiCad board or footprint for local
+testing, use `scripts/extract_steps.py` (requires `pip install zstandard`).
 
 ## License
 © 2021 [Formlabs](https://formlabs.com)
