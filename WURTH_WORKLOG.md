@@ -1337,3 +1337,12 @@ OLRM's bounds match OCCT; areas are 3041.8511 versus 3031.1182 (about 0.35%).
 Foxtrot's exported mesh has no degenerates, while OCCT's has 64. Therefore the
 reference run reports `oracle_invalid_mesh`, not a clean equivalence pass:
 `local/repair-box-trust-olrm-reference`. No bad facets are discarded.
+
+Separate distance-model construction from trust-region iteration before
+introducing knot-cell traversal. This removes duplicated direction handling
+and keeps the model's residual, quadratic, bounds and convergence state
+together. Workspace tests pass before the new knot-projection regression is
+added. OLRM's STL triangle-record multiset is exactly identical to the trust
+worker (only ordering differs); all six focused model statuses are unchanged.
+Evidence: `local/repair-distance-model-remaining`, `/tmp/distance-model-tests.log`.
+KiCad's six regression cases remain two ok / four invalid with the trust worker.

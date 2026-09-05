@@ -11,6 +11,18 @@ pub struct SampledSurface<const N: usize> {
     kd: Vec<u32>,
 }
 
+const PROJECTION_TOL: f64 = 64. * f64::EPSILON;
+
+struct DistanceModel {
+    residual: DVec3,
+    position_scale: DVec3,
+    gradient: DVec2,
+    hessian: [f64; 3],
+    lo: DVec2,
+    hi: DVec2,
+    converged: bool,
+}
+
 /// Squared distance matching `(a - b).norm_squared()` term order, so kd-tree
 /// lookups compute bit-identical distances to the previous linear scan.
 fn dist2(a: DVec3, b: DVec3) -> f64 {
@@ -159,90 +171,71 @@ where
                    uv.y.clamp(self.surf.min_v(), self.surf.max_v()))
     }
 
-    fn newtons_method_inner(&self, P: DVec3, uv_0: DVec2, max_iter: usize) -> Option<DVec2> {
+    fn distance_model(&self, P: DVec3, uv: DVec2, ranges: DVec2) -> DistanceModel {
         // Fixed unit-domain coordinates preserve the surface differential's
         // rank and scale continuously, including at collapsed boundaries.
-        const STATIONARITY_TOL: f64 = 64.0 * f64::EPSILON;
+        let derivs = self.surf.derivs_relative_to::<2>(uv, P);
+        let r = derivs[0][0];
+        let columns = [derivs[1][0] * ranges.x, derivs[0][1] * ranges.y];
+        let norms = DVec2::new(columns[0].norm(), columns[1].norm());
+        let unit = [0, 1].map(|i| if norms[i] > 0. { columns[i] / norms[i] } else { DVec3::zeros() });
+        let gradient = DVec2::new(dot(&r, &unit[0]), dot(&r, &unit[1]));
+        let mut projected = gradient;
+        let domains = [
+            (self.surf.min_u(), self.surf.max_u()),
+            (self.surf.min_v(), self.surf.max_v()),
+        ];
+        for i in 0..2 {
+            let (min, max) = domains[i];
+            if (uv[i] == min && gradient[i] >= 0.) || (uv[i] == max && gradient[i] <= 0.) {
+                projected[i] = 0.;
+            }
+        }
+        // Test each parameter direction at its own scale. A large normal
+        // offset or a long u direction must not erase a resolvable thin v
+        // direction. Position roundoff is likewise componentwise.
+        let position_scale = (P + r).abs() + P.abs();
+        let stationary = [0, 1].map(|i| {
+            projected[i].abs() <= PROJECTION_TOL * (norms[i] + dot(&unit[i].abs(), &position_scale))
+        });
+        let g = DVec2::new(dot(&r, &columns[0]), dot(&r, &columns[1]));
+        let h = [
+            columns[0].norm_squared() + dot(&r, &derivs[2][0]) * ranges.x * ranges.x,
+            dot(&columns[0], &columns[1]) + dot(&r, &derivs[1][1]) * ranges.x * ranges.y,
+            columns[1].norm_squared() + dot(&r, &derivs[0][2]) * ranges.y * ranges.y,
+        ];
+        let lo = DVec2::new(domains[0].0 - uv.x, domains[1].0 - uv.y).component_div(&ranges);
+        let hi = DVec2::new(domains[0].1 - uv.x, domains[1].1 - uv.y).component_div(&ranges);
+        let uv_step = quadratic_step(g, h, lo, hi).component_mul(&ranges);
+        // Only the full-domain model step may establish representability
+        // convergence, never a step shortened by the trust region.
+        let converged = (0..2).all(|i| stationary[i] || uv[i] + uv_step[i] == uv[i]);
+        DistanceModel { residual: r, position_scale, gradient: g, hessian: h, lo, hi, converged }
+    }
+
+    fn newtons_method_inner(&self, P: DVec3, uv_0: DVec2, max_iter: usize) -> Option<DVec2> {
+        let ranges = DVec2::new(self.surf.max_u() - self.surf.min_u(), self.surf.max_v() - self.surf.min_v());
         let mut uv_i = self.constrain_uv(uv_0);
         let mut radius: f64 = 1.;
         for _ in 0..max_iter {
-            let derivs = self.surf.derivs_relative_to::<2>(uv_i, P);
-            let r = derivs[0][0];
-            let S = P + r;
-            let ranges = DVec2::new(
-                self.surf.max_u() - self.surf.min_u(),
-                self.surf.max_v() - self.surf.min_v(),
-            );
-            let columns = [derivs[1][0] * ranges.x, derivs[0][1] * ranges.y];
-            let norms = DVec2::new(columns[0].norm(), columns[1].norm());
-            let unit = [
-                if norms.x > 0.0 {
-                    columns[0] / norms.x
-                } else {
-                    DVec3::zeros()
-                },
-                if norms.y > 0.0 {
-                    columns[1] / norms.y
-                } else {
-                    DVec3::zeros()
-                },
-            ];
-            let gradient = DVec2::new(dot(&r, &unit[0]), dot(&r, &unit[1]));
-            let mut projected = gradient;
-            let domains = [
-                (self.surf.min_u(), self.surf.max_u()),
-                (self.surf.min_v(), self.surf.max_v()),
-            ];
-            for i in 0..2 {
-                let (min, max) = domains[i];
-                if (uv_i[i] == min && gradient[i] >= 0.0)
-                    || (uv_i[i] == max && gradient[i] <= 0.0)
-                {
-                    projected[i] = 0.0;
-                }
-            }
-            // Test each parameter direction at its own scale. A large normal
-            // offset or a long u direction must not erase a resolvable thin v
-            // direction. Position roundoff is likewise componentwise.
-            let position_scale = S.abs() + P.abs();
-            let stationary = [0, 1].map(|i| {
-                projected[i].abs()
-                    <= STATIONARITY_TOL * (norms[i] + dot(&unit[i].abs(), &position_scale))
-            });
-            if stationary.iter().all(|&v| v) {
-                return Some(uv_i);
-            }
-
-            let g = DVec2::new(dot(&r, &columns[0]), dot(&r, &columns[1]));
-            let h = [
-                columns[0].norm_squared() + dot(&r, &derivs[2][0]) * ranges.x * ranges.x,
-                dot(&columns[0], &columns[1]) + dot(&r, &derivs[1][1]) * ranges.x * ranges.y,
-                columns[1].norm_squared() + dot(&r, &derivs[0][2]) * ranges.y * ranges.y,
-            ];
-            let lo = DVec2::new(domains[0].0 - uv_i.x, domains[1].0 - uv_i.y).component_div(&ranges);
-            let hi = DVec2::new(domains[0].1 - uv_i.x, domains[1].1 - uv_i.y).component_div(&ranges);
-            let normalized_step = quadratic_step(g, h, lo, hi);
-            let uv_step = DVec2::new(normalized_step.x * ranges.x, normalized_step.y * ranges.y);
-            // Only the full-domain model step may establish representability
-            // convergence, never a step shortened by the trust region.
-            if (0..2).all(|i| stationary[i] || uv_i[i] + uv_step[i] == uv_i[i]) {
-                return Some(uv_i);
-            }
+            let m = self.distance_model(P, uv_i, ranges);
+            if m.converged { return Some(uv_i); }
             let mut accepted = None;
             for _ in 0..40 {
-                let step = quadratic_step(g, h, lo.sup(&DVec2::repeat(-radius)), hi.inf(&DVec2::repeat(radius)));
+                let step = quadratic_step(m.gradient, m.hessian, m.lo.sup(&DVec2::repeat(-radius)), m.hi.inf(&DVec2::repeat(radius)));
                 let candidate = self.constrain_uv(uv_i + step.component_mul(&ranges));
                 let candidate_r = self.surf.derivs_relative_to::<0>(candidate, P)[0][0];
                 let q = (candidate - uv_i).component_div(&ranges);
-                let predicted = dot(&q, &(g + 0.5 * DVec2::new(h[0] * q.x + h[1] * q.y,
+                let h = m.hessian;
+                let predicted = dot(&q, &(m.gradient + 0.5 * DVec2::new(h[0] * q.x + h[1] * q.y,
                     h[1] * q.x + h[2] * q.y)));
                 // Subtract squared distances in factored form. Near a normal
                 // projection their difference is below the rounding error of
                 // either squared norm; account for position evaluation error
                 // rather than stalling before first-order convergence.
-                let change = 0.5 * dot(&(candidate_r - r), &(candidate_r + r));
-                let roundoff = STATIONARITY_TOL
-                    * dot(&(candidate_r.abs() + r.abs()), &position_scale);
+                let change = 0.5 * dot(&(candidate_r - m.residual), &(candidate_r + m.residual));
+                let roundoff = PROJECTION_TOL
+                    * dot(&(candidate_r.abs() + m.residual.abs()), &m.position_scale);
                 if predicted < 0. && change <= 0.1 * predicted + roundoff {
                     accepted = Some(candidate);
                     if change <= 0.75 * predicted { radius = (2. * radius).min(1.); }
