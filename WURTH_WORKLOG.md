@@ -1753,3 +1753,22 @@ degenerates rather than one; Bourns L39.4/W20.3 similarly goes from six to
 eight. These are not repaired. Their representable construction identity must
 be reconciled before CDT, without welding intentional seams/poles. Traces:
 `local/{ki,cmanc}-endpoint.log`; the temporary instrumentation is removed.
+
+### Reuse an unambiguous incident endpoint after rounded construction
+
+When a newly interpolated intersection equals exactly one of its owner's
+endpoints in XYZ, reuse that endpoint's existing UV/vertex identity. The
+otherwise generated child edge has no representable 3D length. Matching both
+endpoints is deliberately not enough: those chart representatives may encode
+a seam or pole. This affects only newly constructed intersections, not global
+vertex welding, existing topology, tolerance snapping or facet deletion.
+
+The focused regression fails before and passes after, covers both unique and
+ambiguous endpoint identity, and checks a nonzero face offset. Workspace tests
+and all eight checkpoints pass. KI-0603 loses all three f64 degenerates; CMANC
+7848050219 and CMBNC 7448050219 each lose their remaining f64 degenerate. Their
+f32 failures persist. The 36-file and 19-file investigation status counts
+remain unchanged (8/20/8 and 16/3 respectively), with no new status failures.
+Evidence: `/tmp/intersection-endpoint-{before,workspace-tests}.log`,
+`local/repair-intersection-endpoint-{investigate,check,kicad}` and frozen
+`local/repair-intersection-endpoint-worker`.

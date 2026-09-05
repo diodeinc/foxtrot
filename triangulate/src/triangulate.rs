@@ -1586,13 +1586,22 @@ fn resolve_crossing_edges(
                         else { (edges[i].1, edges[i].0, t[0]) };
                     let (pa, pb) = (pts[a], pts[b]);
                     let p = (pa.0 + (pb.0 - pa.0) * f, pa.1 + (pb.1 - pa.1) * f);
+                    let va = verts[v_start + a];
+                    let vb = verts[v_start + b];
+                    let pos = va.pos + (vb.pos - va.pos) * f;
+                    // A rounded construction at one incident endpoint is
+                    // that vertex, not a zero-length geometric child edge.
+                    // Matching both endpoints is ambiguous (a seam or pole).
+                    let p = match (pos == va.pos, pos == vb.pos) {
+                        (true, false) => pa,
+                        (false, true) => pb,
+                        _ => p,
+                    };
                     let index = *vertices.entry(key(p)).or_insert_with(|| {
-                        let va = verts[v_start + a];
-                        let vb = verts[v_start + b];
                         let index = pts.len();
                         pts.push(p);
                         verts.push(mesh::Vertex {
-                            pos: va.pos + (vb.pos - va.pos) * f,
+                            pos,
                             norm: DVec3::zeros(), color: DVec3::zeros(),
                         });
                         index
@@ -1728,6 +1737,33 @@ mod tests {
                 assert_eq!((verts[4].pos.x, verts[4].pos.y), (0.1, 0.2));
                 assert!((pts[4].1 - y).abs() <= 2. * f64::EPSILON * y);
                 assert_eq!(pts[4].1, verts[4].pos.z);
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_intersections_reuse_only_an_unambiguous_incident_endpoint() {
+        for collapsed_edge in [false, true] {
+            let mut pts = vec![(0.1, 0.), (0.1, 1.), (0., 1e-20), (1., 1e-20)];
+            let mut edges = vec![(0, 1, true), (2, 3, false)];
+            let vertex = |x, y| mesh::Vertex {
+                pos: DVec3::new(1e9 + x, 1e9 + y, 0.),
+                norm: DVec3::zeros(), color: DVec3::zeros(),
+            };
+            // Exercise face-local indices inside a mesh with prior vertices.
+            let mut verts = vec![vertex(-1., -1.)];
+            verts.extend(pts.iter().map(|&(x, y)| vertex(x, y)));
+            if collapsed_edge { verts[2] = verts[1]; }
+            resolve_crossing_edges(&mut pts, &mut edges, &mut verts, 1);
+            if collapsed_edge {
+                // Coincident endpoints do not identify a unique chart
+                // representative: retain the seam/pole parameter split.
+                assert_eq!(pts.len(), 5);
+                assert_eq!(pts[4], (0.1, 1e-20));
+            } else {
+                assert_eq!(pts.len(), 4);
+                assert_eq!(verts.len(), 5);
+                assert_eq!(edges, vec![(0, 1, true), (2, 0, false), (0, 3, false)]);
             }
         }
     }
