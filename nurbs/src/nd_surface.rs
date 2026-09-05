@@ -212,24 +212,29 @@ impl<const D: usize> NDBSplineSurface<D> {
         let mut SKL = vec![vec![TVec::zeros(); E + 1]; E + 1];
 
         let [uspan, vspan] = spans;
-        // Tensor-product partition of unity removes the common coordinate
-        // offset from every derivative, including mixed partial derivatives.
+        // The largest tensor basis selects a nearby coordinate origin.
         let uanchor = Nu[0].as_ref().iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
         let vanchor = Nv[0].as_ref().iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
         let origin = self.control_points[uspan - p + uanchor][vspan - q + vanchor];
         let mut temp = vec![TVec::zeros(); q + 1];
         for (k, Nu) in Nu.iter().map(AsRef::as_ref).enumerate() {
             for s in 0..=q {
+                // Apply partition of unity separately on each axis. A
+                // coordinate independent of u must not acquire u roundoff,
+                // including in derivatives of a coordinate varying with v.
+                let anchor = difference(self.control_points[uspan - p + uanchor][vspan - q + s], origin);
                 temp[s] = TVec::zeros();
                 for r in 0..=p {
-                    temp[s] += Nu[r] * difference(self.control_points[uspan - p + r][vspan - q + s], origin);
+                    temp[s] += Nu[r] * (difference(self.control_points[uspan - p + r][vspan - q + s], origin) - anchor);
                 }
+                if k == 0 { temp[s] += anchor; }
             }
             let dd = min(E - k, Nv.len() - 1);
             for l in 0..=dd {
                 for s in 0..=q {
-                    SKL[k][l] += Nv[l].as_ref()[s] * temp[s];
+                    SKL[k][l] += Nv[l].as_ref()[s] * (temp[s] - temp[vanchor]);
                 }
+                if l == 0 { SKL[k][l] += temp[vanchor]; }
             }
         }
         (origin, SKL)
@@ -268,6 +273,38 @@ impl<const D: usize> NDBSplineSurface<D> {
 mod tests {
     use super::*;
     use nalgebra_glm::DVec4;
+
+    #[test]
+    fn extrusion_coordinates_and_derivatives_are_independent_of_the_other_axis() {
+        use crate::AbstractSurface;
+        let profile = || KnotVector::from_multiplicities(3, &[0., 0.41, 1.], &[4, 1, 4]);
+        let height = || KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
+        let controls: Vec<Vec<_>> = (0..5).map(|i| [0.00988, 0.00989].iter().map(|&z|
+            DVec3::new(i as f64, (i * i) as f64, z)).collect()).collect();
+        for transposed in [false, true] {
+            let (u, v, points) = if transposed {
+                (height(), profile(), (0..2).map(|j| controls.iter().map(|row| row[j]).collect()).collect())
+            } else { (profile(), height(), controls.clone()) };
+            let a = NDBSplineSurface::new(true, true, u.clone(), v.clone(), points.clone());
+            let b = NDBSplineSurface::new(true, true, u, v, points.iter().map(|row|
+                row.iter().map(|p| DVec4::new(p.x, p.y, p.z, 1.)).collect()).collect());
+            let check = |jets: Vec<Vec<DVec3>>, expected_z: f64| {
+                assert_eq!(jets[0][0].z, expected_z);
+                let (profile, height) = if transposed { (jets[0][1], jets[1][0]) }
+                    else { (jets[1][0], jets[0][1]) };
+                assert_eq!(profile.z, 0.);
+                assert_eq!((height.x, height.y), (0., 0.));
+                assert_eq!(jets[1][1], DVec3::zeros());
+            };
+            let uv = |t| if transposed { DVec2::new(1e-12, t) } else { DVec2::new(t, 1e-12) };
+            let reference = DVec3::new(0., 0., 0.00988);
+            let expected = a.derivs_relative_to::<2>(uv(0.), reference)[0][0].z;
+            for i in 0..=64 {
+                check(a.derivs_relative_to::<2>(uv(i as f64 / 64.), reference), expected);
+                check(b.derivs_relative_to::<2>(uv(i as f64 / 64.), reference), expected);
+            }
+        }
+    }
 
     #[test]
     fn clamped_corner_preserves_small_coordinates() {

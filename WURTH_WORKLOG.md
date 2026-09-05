@@ -1633,3 +1633,24 @@ satisfy the gate. Machine-readable per-facet source IDs, coordinates and hashes:
 `.amp/in/artifacts/repair-pass14/f32-diagnostics.json`. Original probe logs,
 scripts and analysis: `local/f32-rca/`. No diagnostic instrumentation remains
 in production code.
+
+### Preserve partition of unity on both tensor axes
+
+Accumulate differences from a local anchor separately in each axis, restoring
+the anchor only for derivative order zero. Constant coordinates along an axis
+then contribute exactly zero to its derivatives, including mixed derivatives.
+The shared point/jet accumulator applies this identity without extrusion or
+surface-type branches. A nonrational/unit-weight-rational extrusion test in
+both axis orders fails before the change and passes after, checking residual
+height independence and exact derivative zeros over 65 parameter samples.
+
+Workspace tests pass. The 95-file Würth cohort has 64 ok / 31 invalid_mesh,
+no face errors and no status regressions. HTAH-D10L10 and HTG5-D10L10 both
+lose their f64 degenerates and pass the complete exported-mesh gate; TBL
+691378100020 also changes from invalid_mesh to ok. USB 692221030100 loses one
+of three f64 degenerates. All 15 KiCad f64-defect cohort files still have
+invalid exported meshes, but five lose one or more f64 degenerates; three now
+fail only after f32 export. Evidence: `/tmp/extrusion-partition-before.log`,
+`/tmp/tensor-partition-workspace-tests.log`,
+`local/repair-tensor-partition-{wurth,kicad}` and frozen
+`local/repair-tensor-partition-worker`.
