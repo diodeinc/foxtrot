@@ -120,11 +120,28 @@ impl<const N: usize> SampledSurface<N>
         out
     }
 
+    fn constrain_uv(&self, mut uv: DVec2) -> DVec2 {
+        let domains = [
+            (self.surf.min_u(), self.surf.max_u(), self.surf.u_open),
+            (self.surf.min_v(), self.surf.max_v(), self.surf.v_open),
+        ];
+        for (value, (min, max, open)) in uv.iter_mut().zip(domains) {
+            if open {
+                *value = value.clamp(min, max);
+            } else if *value < min || *value > max {
+                // Newton steps can cross arbitrarily many periods. Keep
+                // in-domain endpoints unchanged to preserve their knot side.
+                *value = min + (*value - min).rem_euclid(max - min);
+            }
+        }
+        uv
+    }
+
     fn newtons_method_inner(&self, P: DVec3, uv_0: DVec2, max_iter: usize) -> Option<DVec2> {
         let eps1 = 0.01; // a Euclidean distance error bound
         let eps2 = 0.01; // a cosine error bound
 
-        let mut uv_i = uv_0;
+        let mut uv_i = self.constrain_uv(uv_0);
         for _ in 0..max_iter {
             // The surface and its derivatives at uv_i
             let derivs = self.surf.derivs::<2>(uv_i);
@@ -187,43 +204,7 @@ impl<const N: usize> SampledSurface<N>
                 },
                 Some(m) => m * K_i,
             };
-            let mut uv_ip1 = uv_i + delta_i;
-
-            // clamp uv_{i+p} by doing:
-            // if u_{i+1} < min_u: u_{i+1} = min_u if u_open else max_u - (min_u - u_{i+1})
-            // if u_{i+1} > max_u: u_{i+1} = max_u if u_open else min_u + (u_{i+1} - max_u)
-            // if v_{i+1} < min_v: v_{i+1} = min_v if v_open else max_v - (min_v - v_{i+1})
-            // if v_{i+1} > max_v: v_{i+1} = max_v if v_open else min_v + (v_{i+1} - max_v)
-
-            if uv_ip1.x < self.surf.min_u() {
-                uv_ip1.x = if self.surf.u_open {
-                    self.surf.min_u()
-                } else {
-                    self.surf.max_u() - (self.surf.min_u() - uv_ip1.x)
-                };
-            }
-            if uv_ip1.x > self.surf.max_u() {
-                uv_ip1.x = if self.surf.u_open {
-                    self.surf.max_u()
-                } else {
-                    self.surf.min_u() + (uv_ip1.x - self.surf.max_u())
-                };
-            }
-
-            if uv_ip1.y < self.surf.min_v() {
-                uv_ip1.y = if self.surf.v_open {
-                    self.surf.min_v()
-                } else {
-                    self.surf.max_v() - (self.surf.min_v() - uv_ip1.y)
-                };
-            }
-            if uv_ip1.y > self.surf.max_v() {
-                uv_ip1.y = if self.surf.v_open {
-                    self.surf.max_v()
-                } else {
-                    self.surf.min_v() + (uv_ip1.y - self.surf.max_v())
-                };
-            }
+            let uv_ip1 = self.constrain_uv(uv_i + delta_i);
 
             // If the values didn't change much, we can stop iterating
             // if |(u_{i+1} - u_i) * S_u(u_i, v_i) + (v_{i+1} - v_i) * S_v(u_i, v_i) | < \epsilon_1
@@ -269,6 +250,29 @@ fn symmetric2x2(a: f64, b: f64, d: f64) -> DMat2x2 {
 mod tests {
     use super::*;
     use crate::KnotVector;
+
+    #[test]
+    fn constrains_multiple_periods_and_preserves_domain_endpoints() {
+        let sampled = SampledSurface::new(NDBSplineSurface::new(
+            false,
+            true,
+            KnotVector::from_multiplicities(1, &[2.0, 5.0], &[2, 2]),
+            KnotVector::from_multiplicities(1, &[-7.0, -3.0], &[2, 2]),
+            vec![vec![DVec3::zeros(); 2]; 2],
+        ));
+        for period in [-100.0, -2.0, 0.0, 2.0, 100.0] {
+            assert_eq!(
+                sampled.constrain_uv(DVec2::new(3.0 + 3.0 * period, -100.0)),
+                DVec2::new(3.0, -7.0),
+            );
+        }
+        for endpoint in [2.0, 5.0] {
+            assert_eq!(
+                sampled.constrain_uv(DVec2::new(endpoint, 100.0)),
+                DVec2::new(endpoint, -3.0),
+            );
+        }
+    }
 
     #[test]
     fn samples_only_the_valid_knot_domain() {
