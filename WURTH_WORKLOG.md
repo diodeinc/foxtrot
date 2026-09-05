@@ -384,3 +384,50 @@ after atomic per-case results confirm validation is finished. Final merging
 checks complete path/hash coverage and an identical worker hash across shards.
 Results will be in `local/{wurth,kicad}-repair-pass2`. These runs are pending,
 not yet proof that the remaining geometry and precision issues are resolved.
+
+### Complete second checkpoint and inverse-projection repair
+
+Pass 2 finished with exact manifest/hash coverage, Würth before KiCad:
+
+| Corpus | Completed | ok | tessellation_error | invalid_mesh | worker error |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Würth | 7,328 | 4,655 | 1,852 | 819 | 2 |
+| KiCad | 7,251 | 6,403 | 550 | 298 | 0 |
+
+The two worker errors are the already identified non-STEP Parasolid inputs
+(the harness calls nonzero worker exit `crash`; these are returned parse errors,
+not Rust panics). All retained failure meshes have been validated before gzip
+compression. These totals show progress, NOT completion of the repair task.
+In particular, newly supported surfaces and stricter empty-face accounting
+expose remaining failures rather than hiding them.
+
+The strict seven-model Spade checkpoint passes four models. The sphere case
+242117113 and old CDT panic case 649008221732 now pass; 97730256332R fails because
+its geometry #250 projects to a retraced, empty region. The former apparent
+success omitted this face. This is why empty-face validation must remain.
+
+Separate subsequent changes normalize arbitrary periodic Newton steps, reject
+undefined explicit STEP references (including #707 -> #0 in WE-RFI-0402), and
+correct the spherical hole regression's winding. Reference validation uses the
+existing dense entity table, distinguishes `$` from explicit #0, and checks
+unknown records while ignoring quoted literal hashes.
+
+The inverse solver now uses derivative-scaled, damped Gauss–Newton with a
+line search, replacing second-derivative Hessian inversion and its incompatible
+absolute-distance/small-step/singular-inverse acceptance rules. Convergence is
+componentwise first-order stationarity, including active domain boundaries.
+Periodic steps retain their actual travel direction across stored UV seams.
+The objective comparison accounts for floating-point evaluation uncertainty;
+this is not an exact-arithmetic monotonicity certificate. Ten NURBS tests cover
+curved and periodic surfaces, normal offsets, boundaries, length/domain scales,
+singular derivatives, and a resolvable 1e-16-thick patch. Supported workspace
+tests and all 19 Python harness tests pass.
+
+The strict seven-model inverse-projection checkpoint passes five models:
+97730256332R now includes all nine faces without tessellation errors or degenerate
+STL facets. 79527141 still has one face error and 615032243321 still has eight.
+Results: `local/repair-cdt-projection`. Independent OCCT BRep area/volume checks
+are being recorded separately, without relying on a possibly degenerate oracle
+STL. A third complete Würth-then-KiCad run is underway with frozen
+`local/repair-pass3-worker`; its added `degenerate_f64` metric distinguishes
+in-memory defects from binary-STL quantization.
