@@ -15,6 +15,7 @@ type Engine = ConstrainedDelaunayTriangulation<Point2<f64>, (), bool>;
 /// but every input index remains mapped to that vertex.
 pub struct Triangulation {
     points: Vec<Point>,
+    coordinate_scale: f64,
     edges: Vec<(usize, usize)>,
     engine: Engine,
     input_handles: Vec<FixedVertexHandle>,
@@ -69,8 +70,33 @@ impl Triangulation {
         if points.len() < 3 {
             return Err(Error::TooFewPoints);
         }
-        for &p in points {
-            spade::validate_vertex(&Point2::new(p.0, p.1)).map_err(|_| Error::InvalidInput)?;
+        // A binary similarity changes neither represented geometry nor exact
+        // predicate signs. Fit the whole input into Spade's exponent interval;
+        // never snap small components to zero or rescale axes independently.
+        let mut min = f64::INFINITY;
+        let mut max = 0.0_f64;
+        for &(x, y) in points {
+            for value in [x, y] {
+                if !value.is_finite() {
+                    return Err(Error::InvalidInput);
+                }
+                let value = value.abs();
+                if value != 0.0 {
+                    min = min.min(value);
+                    max = max.max(value);
+                }
+            }
+        }
+        let mut coordinate_scale = 1.0;
+        while min * coordinate_scale < spade::MIN_ALLOWED_VALUE {
+            coordinate_scale *= 2.0;
+        }
+        while max * coordinate_scale > spade::MAX_ALLOWED_VALUE {
+            coordinate_scale *= 0.5;
+        }
+        if min * coordinate_scale < spade::MIN_ALLOWED_VALUE {
+            // No uniform binary scale can represent this dynamic range.
+            return Err(Error::InvalidInput);
         }
         let edges: Vec<_> = edges.into_iter().copied().collect();
         if edges
@@ -80,7 +106,11 @@ impl Triangulation {
             return Err(Error::InvalidEdge);
         }
         Ok(Self {
-            points: points.to_vec(),
+            points: points
+                .iter()
+                .map(|&(x, y)| (x * coordinate_scale, y * coordinate_scale))
+                .collect(),
+            coordinate_scale,
             edges,
             engine: Engine::new(),
             input_handles: Vec::with_capacity(points.len()),
@@ -250,6 +280,10 @@ impl Triangulation {
 
     /// Returns whether `point` is covered by an emitted triangle.
     pub fn inside(&self, point: Point) -> bool {
+        let point = (
+            point.0 * self.coordinate_scale,
+            point.1 * self.coordinate_scale,
+        );
         self.triangles()
             .any(|(a, b, c)| contains(self.points[a], self.points[b], self.points[c], point))
     }
@@ -324,6 +358,47 @@ fn contains(a: Point, b: Point, c: Point, p: Point) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_scaling_preserves_topology_and_query_units() {
+        let points = [(0., 0.), (4., 0.), (3., 3.), (0., 2.), (1., 1.)];
+        let edges = [(0, 1), (1, 2), (2, 3), (3, 0)];
+        let reference = Triangulation::build_with_edges(&points, &edges).unwrap();
+        let triangles: Vec<_> = reference.triangles().collect();
+        for scale in [f64::from_bits(1), 2.0_f64.powi(-200), 2.0_f64.powi(1000)] {
+            let scaled: Vec<_> = points
+                .iter()
+                .map(|&(x, y)| (x * scale, y * scale))
+                .collect();
+            let t = Triangulation::build_with_edges(&scaled, &edges).unwrap();
+            t.check();
+            assert_eq!(t.triangles().collect::<Vec<_>>(), triangles);
+            assert!(t.inside((scale, scale)));
+            assert!(!t.inside((5.0 * scale, scale)));
+        }
+    }
+
+    #[test]
+    fn small_components_are_preserved_not_welded() {
+        let tiny = 2.0_f64.powi(-160);
+        let points = [(0., 0.), (1., 0.), (1., 1.), (0., 1.), (tiny, 0.5)];
+        let t =
+            Triangulation::build_with_edges(&points, &[(0, 1), (1, 2), (2, 3), (3, 0)]).unwrap();
+        assert_eq!(t.engine.num_vertices(), 5);
+        assert!(t.points[4].0 > 0.0);
+        assert_eq!(t.points[4].0 / t.coordinate_scale, tiny);
+        assert_eq!(t.triangles().count(), 4);
+        assert_eq!(
+            Triangulation::build(&[(0., 0.), (1e300, 0.), (0., 1e-300)]).err(),
+            Some(Error::InvalidInput)
+        );
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                Triangulation::build(&[(0., 0.), (1., 0.), (0., invalid)]).err(),
+                Some(Error::InvalidInput)
+            );
+        }
+    }
 
     #[test]
     fn holes_and_nested_loops_use_even_odd_parity() {

@@ -505,3 +505,27 @@ for both periodic axes, both radial directions and positive/negative periods.
 
 Full pass 4 uses the frozen plane-fix worker, not experimental source. It runs
 every Würth input first, then every KiCad input, with hash-checked coverage.
+
+Pass 4 completes all 7,328 Würth files (5,563 ok, 987 tessellation errors,
+775 invalid meshes, three parser-return failures) and all 7,251 KiCad files
+(6,458 ok, 496 tessellation errors, 297 invalid meshes). No timeouts or harness
+errors occur. Full per-file qualified RCA exports are in
+`.amp/in/artifacts/repair-pass4/{wurth,kicad}/`; coverage and hashes are checked
+against the complete reports. Early face projection failures are distinguished
+from CDT failures and parser exits. Mesh validity still does not imply accuracy.
+
+WR-FPC 68610414422 surface #10973 concretely reproduces the remaining exponent
+problem on a spline: finite projected x=1.7655773007981676e-46, y=3..11, is below
+Spade's 2^-142 minimum. The CDT now applies one exact positive power-of-two
+similarity to fit all nonzero components into Spade's accepted range. It does
+not translate, weld, discard or independently rescale coordinates. Inputs whose
+dynamic range cannot fit remain errors. Public point queries retain input units.
+Seven CDT unit tests and two doctests pass, including identical indexed topology
+from smallest-subnormal to 2^1000 scales and preservation of tiny components.
+The FPC representative now strictly passes: 185,250 triangles, zero face errors,
+panics or f64-degenerate facets. All 547 Würth and 90 KiCad pass-4 InvalidInput
+files are selected for targeted rerun; other failure classes remain actionable.
+
+Disk maintenance removes 3,519 obsolete generated pass-2 compressed scratch
+meshes (4,727,878,200 bytes), preserving its reports/logs/metrics/manifests and
+frozen worker. Baseline and newer complete pass-3/pass-4 evidence remain.
