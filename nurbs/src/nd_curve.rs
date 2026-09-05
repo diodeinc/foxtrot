@@ -30,6 +30,28 @@ impl<const D: usize> NDBSplineCurve<D> {
         self.knots.max_t()
     }
 
+    /// Sufficient structural test for a C1 periodic cut: repeated controls
+    /// and a translated knot sequence, with simple knots at both cut ends.
+    /// Geometric closedness alone does not imply a smooth periodic seam.
+    pub fn has_smooth_periodic_seam(&self) -> bool {
+        let p = self.knots.degree();
+        let n = self.control_points.len();
+        if p < 2 || n <= p
+            || self.knots[p - 1] == self.min_u() || self.knots[p + 1] == self.min_u()
+            || self.knots[n - 1] == self.max_u() || self.knots[n + 1] == self.max_u()
+            || self.control_points[..p] != self.control_points[n - p..] {
+            return false;
+        }
+        let period = self.max_u() - self.min_u();
+        let shift = n - p;
+        (0..self.knots.len() - shift).all(|i| {
+            let (a, b) = (self.knots[i], self.knots[i + shift]);
+            // Only uncertainty from representing/subtracting knot values;
+            // no world-space or source-geometry tolerance is used.
+            (b - a - period).abs() <= 4. * f64::EPSILON * (a.abs() + b.abs() + period.abs())
+        })
+    }
+
     /// Converts a point at position t onto the 3D line, using basis functions
     /// of order `p + 1` respectively.
     ///
@@ -131,6 +153,25 @@ impl<const D: usize> NDBSplineCurve<D> {
 mod tests {
     use super::*;
     use nalgebra_glm::DVec3;
+
+    #[test]
+    fn periodic_seam_requires_matching_controls_and_translated_knots() {
+        let knots = [-2., -1., 0., 1., 2., 3., 4., 5., 6.];
+        let controls = [DVec3::x(), DVec3::y(), -DVec3::x(), -DVec3::y(), DVec3::x(), DVec3::y()];
+        let make = |knots: &[f64], controls: &[DVec3]| NDBSplineCurve::new(false,
+            KnotVector::from_multiplicities(2, knots, &[1; 9]), controls.to_vec());
+        assert!(make(&knots, &controls).has_smooth_periodic_seam());
+        let mut different = controls;
+        different[5].x += 1e-12;
+        assert!(!make(&knots, &different).has_smooth_periodic_seam());
+        let mut different = knots;
+        different[8] += 1e-10;
+        assert!(!make(&different, &controls).has_smooth_periodic_seam());
+        let corner = NDBSplineCurve::new(false,
+            KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),
+            controls[..5].to_vec());
+        assert!(!corner.has_smooth_periodic_seam());
+    }
 
     #[test]
     fn clamped_endpoint_preserves_small_coordinates() {

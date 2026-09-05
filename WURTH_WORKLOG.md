@@ -1232,3 +1232,33 @@ and become identical in f32, even without redundant subdivisions. Source
 curve #4785 has simple non-clamped knots and three exactly repeated closing
 controls, not a sharp seam. Faces #4778/#5927 are affected. Temporary probes
 are removed; retained trace: `local/cap-density-probe.log`. This is unresolved.
+
+### Smooth periodic cut sample placement
+
+Separate parameter scheduling from curve evaluation first (commit 5a67935).
+Workspace tests pass and WCAP-AI3H-P10D22L30's STL is byte-identical across that
+refactor. Then identify a smooth periodic cut from repeated controls, simple
+cut-end knots and the translated knot sequence, not from the closed flag alone.
+Balance the cut sample between its parameter neighbors and evaluate that point
+on the curve. Keep the topological endpoints and all genuine corner samples.
+This changes sampling placement, not source coordinates or exported facets.
+
+Tests cover both travel directions, starts near either cut end, f32 sample
+separation, and rejection of mismatched controls, knots and polygon corners.
+Workspace tests and eight checkpoints pass. The 347-file regression cohort is
+now 200 ok / 147 invalid meshes, with no regressions from the preceding density
+fix. All face errors remain clear. The known LINE-offset group stays 32 ok /
+one invalid; the 14 closed-curve models are two ok / ten invalid / two with face
+errors. KiCad's six-file regression group remains two ok / four invalid.
+Evidence: `local/repair-curve-seam-{regressions,check,lines,closed,kicad}`.
+
+Projection research continues separately. An 80-digit analysis distinguishes
+the original Cartesian-plus-weight STEP surface from its rounded homogeneous
+control net: WPCC's apparent derivative jumps are dominated by homogenization
+and evaluation error, not a macroscopic source crease. OLRM is at a clamped
+endpoint/pole, not an interior repeated knot; instrumented iterations leave the
+pole, activate a tiny second derivative direction, and cycle back. Do not
+interpret the initial f64-only analyzer as a proof of smoothness or a complete
+RCA. Corrected evidence: `.amp/in/artifacts/knot-projection-rca/`, including two
+80-digit evaluations, and `local/olrm-iterations.log`. No projection repair is
+claimed for these four remaining files.

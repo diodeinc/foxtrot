@@ -113,7 +113,8 @@ impl<const N: usize> SampledCurve<N>
     pub fn as_polyline(&self, ranges: &[(f64, f64)], num_points_per_knot: usize) -> Vec<DVec3> {
         assert!(num_points_per_knot > 0);
         let trim_length: f64 = ranges.iter().map(|&(a, b)| (b - a).abs()).sum();
-        let mut result = Vec::new();
+        let smooth_seam = self.curve.has_smooth_periodic_seam();
+        let mut result: Vec<f64> = Vec::new();
         for &(u_start, u_end) in ranges {
             let (u_min, u_max) = if u_start < u_end {
                 (u_start, u_end)
@@ -146,6 +147,17 @@ impl<const N: usize> SampledCurve<N>
                 segment.reverse();
             }
             let skip = usize::from(!result.is_empty());
+            if skip != 0 && smooth_seam {
+                // The periodic cut is not a corner. Balance its sample
+                // between its neighbors instead of crowding a trim endpoint.
+                // Evaluate the new parameter on the curve, not a vertex chord.
+                let join = result.len() - 1;
+                let left = result[join - 1];
+                let right = segment[1] + (result[join] - segment[0]);
+                let middle = left + (right - left) * 0.5;
+                result[join] = self.min_u() + (middle - self.min_u())
+                    .rem_euclid(self.max_u() - self.min_u());
+            }
             result.extend(segment.into_iter().skip(skip));
         }
         result.into_iter().map(|u| self.curve.point(u)).collect()
@@ -174,6 +186,24 @@ mod tests {
             KnotVector::from_multiplicities(1, &[-1., 0., 1., 2., 3., 4.], &[1; 6]),
             vec![DVec3::zeros(), DVec3::x(), DVec3::y(), DVec3::zeros()]));
         assert!(curve.samples.iter().all(|&(u, _)| u >= curve.min_u() && u <= curve.max_u()));
+    }
+
+    #[test]
+    fn smooth_periodic_cut_samples_remain_separated_from_trim_endpoints() {
+        let controls = [(2., 1.), (2., 2.), (1., 2.), (1., 1.), (2., 1.), (2., 2.)];
+        let curve = SampledCurve::new(NDBSplineCurve::new(false,
+            KnotVector::from_multiplicities(2, &[-2., -1., 0., 1., 2., 3., 4., 5., 6.], &[1; 9]),
+            controls.iter().map(|&(x,y)| DVec3::new(x,y,0.)).collect()));
+        assert!(curve.curve.has_smooth_periodic_seam());
+        for start in [1e-12, 4. - 1e-12] {
+            for ranges in [[(start, 0.), (4., start)], [(start, 4.), (0., start)]] {
+                let points = curve.as_polyline(&ranges, 8);
+                assert_eq!(points[0], curve.curve.point(start));
+                assert_eq!(points.first(), points.last());
+                assert!(points.windows(2).all(|p|
+                    p[0].map(|x| x as f32) != p[1].map(|x| x as f32)));
+            }
+        }
     }
 
     #[test]
