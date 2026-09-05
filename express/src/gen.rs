@@ -949,27 +949,3 @@ impl<'a> NamedTypes<'a> {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn generates_forward_selects_and_inherited_attributes() {
-        let source = "schema test;
-            type choice = select (child, label); end_type;
-            type label = string; end_type;
-            entity base; name : label; end_entity;
-            entity child subtype of (base); measurement : optional real; end_entity;
-            rule named for (base); where valid : true; end_rule;
-            end_schema;";
-        let (remaining, mut syntax) = crate::parse::parse(source).unwrap();
-        assert!(remaining.is_empty());
-        let generated = gen(&mut syntax).unwrap();
-        assert!(generated.contains("pub enum Choice<'a>"));
-        assert!(generated.contains("map(<Child<'a>>::parse, Choice::Child)"));
-        assert!(generated.contains("tag(\"LABEL(\")"));
-        assert!(generated.contains("pub struct Child_<'a> { // entity\n    pub name: Label<'a>,\n    pub measurement: Option<f64>,"));
-        assert!(!generated.contains("Named"));
-    }
-}

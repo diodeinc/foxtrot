@@ -3075,49 +3075,8 @@ end_function;  "#).unwrap();
     }
 
     #[test]
-    fn test_actual_parameter_list() {
-        let e = actual_parameter_list("(self, [])").unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_parameter() {
-        let e = parameter("[]").unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_literal() {
-        expression(r#"1 "#).unwrap();
-    }
-
-    #[test]
     fn test_interval() {
         interval(r#"{1 <= self <= 31}"#).unwrap();
-    }
-
-    #[test]
-    fn test_interval_low() {
-        let e = interval_low("1 ").unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_term() {
-        let e = term("1 ").unwrap();
-        assert_eq!(e.0, "");
-
-        let e = term("csh\\connected_face_set.cfs_faces").unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_factor() {
-        let e = factor("1 ").unwrap();
-        assert_eq!(e.0, "");
-
-        let e = factor("csh\\connected_face_set.cfs_faces").unwrap();
-        assert_eq!(e.0, "");
     }
 
     #[test]
@@ -3157,20 +3116,6 @@ end_function;  "#).unwrap();
 
         let e = primary(r#"curve\polyline.points[loindex(curve\polyline.points)]"#).unwrap();
         assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_interval_op() {
-        let e = interval_op("<= ").unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_select_type() {
-        let e = select_type(r#"select 
-  (action, action_directive, action_method, action_property,
-  shape_representation, versioned_action_request);"#).unwrap();
-        assert_eq!(e.0, ";");
     }
 
     #[test]

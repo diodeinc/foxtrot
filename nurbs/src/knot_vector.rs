@@ -182,22 +182,3 @@ impl std::ops::Index<usize> for KnotVector {
         &self.U[i]
     }
 }
-
-////////////////////////////////////////////////////////////////////////////////
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    /*
-    #[test]
-    fn test_find_span() {
-        let k = KnotVector {
-            U: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-        };
-        assert!(k.find_span(0, 0.0) == 2);
-        assert!(k.find_span(0, 0.99) == 2);
-        assert!(k.find_span(1, 0.99) == 2);
-        assert!(k.find_span(2, 0.99) == 2);
-    }
-    */
-}
