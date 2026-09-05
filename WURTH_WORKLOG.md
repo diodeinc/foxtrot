@@ -818,3 +818,39 @@ Freed disk by deleting only superseded generated mesh files from pass 5
 (1,253 files, 493,630,272 bytes) and old `final`/pass-1 outputs (4,578 files,
 5,409,207,138 bytes). Source corpora, manifests, reports, metrics, logs and
 frozen workers remain; current pass-6 and repair-check evidence is retained.
+
+### Full pass 7 and rational-curve quotient recurrence
+
+Completed all Würth files then all KiCad files with frozen seam-parity worker.
+Würth: 6,896 ok, 234 invalid meshes, 195 tessellation errors, 3 source crashes.
+KiCad: 7,102 ok, 129 invalid meshes, 20 tessellation errors. Exact path/hash
+coverage and shard-worker consistency verified; per-file exports are under
+`.amp/in/artifacts/repair-pass7/`. There are 114 new Würth failures relative to
+pass 6 (101 invalid meshes, 13 tessellation errors) and six new KiCad failures
+(one invalid mesh, five tessellation errors). Rerunning every one with the
+pre-seam `repair-anchor-worker` reproduces the same status. Thus the newly
+failing files predate seam cancellation; the changed spline arithmetic/trim
+path remains under investigation. Evidence: `local/*-pass7-regression-anchor`.
+
+Found an independent algebraic error in the rational curve quotient recurrence:
+the i-th weight derivative was multiplied by C[k-1] instead of C[k-i]. For
+x(u)=u/(1+u²), the old second derivative at zero is -2 instead of 0. The analytic
+regression fails before and passes after the one-index repair; workspace tests
+and all eight checkpoints pass. No tolerance or fallback changes.
+Evidence: `local/repair-quotient-check`, worker `local/repair-quotient-worker`.
+
+Remaining dome inverse failure is now localized to rational derivative
+roundoff: near the pole the analytic constant z coordinate acquires an apparent
+u tangent of order 1e-16. Normalizing this tiny tangent mixes a 2.9e-11 normal
+offset into the stationarity test. A Cartesian-relative homogeneous evaluation
+is being investigated rather than weakening convergence. Diagnostic probes
+were removed after capture (`/tmp/dome-inverse-probe.log`).
+
+WR-MJ area error now has direct triangle evidence, not only grid-density
+inference: surface #171 alone has area 983.719 versus OCCT 62.408. Its largest
+triangle contributes 27.149, spans radial parameters 0.484448–0.816114, and
+bridges the narrow bend cluster near 0.66. The five largest triangles contribute
+128.123, already twice the correct whole-face area. Retained raw chart points,
+triangle indices and XYZ positions: `local/wrmj-triangle-probe.log`; quantified
+triangles: `local/wrmj-triangle-quantification.json` (angular coordinate is in
+radians; divide by 2π for this surface's raw u). This defect remains unfixed.
