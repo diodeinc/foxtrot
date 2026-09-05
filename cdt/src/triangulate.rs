@@ -168,52 +168,21 @@ impl Triangulation {
         // Pick this triangle's centroid as our starting point
         center = centroid(points[pa], points[pb], points[pc]);
 
-        // Sort with a special comparison function that puts the first
-        // three keys at the start of the list, and uses partial_cmp
-        // otherwise.  The order of the first three keys is not
-        // guaranteed, which we fix up below.
-        scratch.sort_unstable_by(|k, r|
-            if k.0 == pa || k.0 == pb || k.0 == pc {
-                std::cmp::Ordering::Less
-            } else if r.0 == pa || r.0 == pb || r.0 == pc {
-                std::cmp::Ordering::Greater
-            } else {
-                // Compare by radius first, then break ties with pseudoangle
-                // This should be reproducible, i.e. two identical points should
-                // end up next to each other in the list, although with
-                // floating-point values, you _never know_.
-                match k.1.partial_cmp(&r.1).unwrap_or(std::cmp::Ordering::Equal) {
-                    std::cmp::Ordering::Equal => {
-                        let pk = points[k.0];
-                        let pr = points[r.0];
-                        let ak = pseudo_angle((pk.0 - center.0, pk.1 - center.1));
-                        let ar = pseudo_angle((pr.0 - center.0, pr.1 - center.1));
-                        ak.partial_cmp(&ar).unwrap_or(std::cmp::Ordering::Equal)
-                    },
-                    e => e,
-                }
-            });
-
-        // Sanity-check that our three target points are at the head of the
-        // list, as expected.
-        if ((scratch[0].0 == pa) as u8 +
-            (scratch[1].0 == pa) as u8 +
-            (scratch[2].0 == pa) as u8 != 1) ||
-           ((scratch[0].0 == pb) as u8 +
-            (scratch[1].0 == pb) as u8 +
-            (scratch[2].0 == pb) as u8 != 1) ||
-           ((scratch[0].0 == pc) as u8 +
-            (scratch[1].0 == pc) as u8 +
-            (scratch[2].0 == pc) as u8 != 1)
-        {
-            return Err(Error::CannotInitialize);
+        // The sweep must use distances from its actual center, not the
+        // bounding-box center used to choose the seed. Keep the seed out of
+        // the sort: ordering every seed before itself is not a valid comparator.
+        scratch.retain(|p| !arr.contains(&p.0));
+        for (index, distance) in &mut scratch {
+            *distance = distance2(center, points[*index]);
         }
-
-        // Apply sorting to initial three points, ignoring distance
-        // values at this point because they're unused.
-        scratch[0].0 = pa;
-        scratch[1].0 = pb;
-        scratch[2].0 = pc;
+        scratch.sort_unstable_by(|k, r| k.1.total_cmp(&r.1).then_with(|| {
+            let pk = points[k.0];
+            let pr = points[r.0];
+            let ak = pseudo_angle((pk.0 - center.0, pk.1 - center.1));
+            let ar = pseudo_angle((pr.0 - center.0, pr.1 - center.1));
+            ak.total_cmp(&ar).then(k.0.cmp(&r.0))
+        }));
+        scratch.splice(0..0, [(pa, 0.0), (pb, 0.0), (pc, 0.0)]);
 
         // These are the points used in the Triangulation struct
         let mut sorted_points = PointVec::with_capacity(points.len());
@@ -1419,6 +1388,24 @@ fn min3(buf: &[(usize, f64)], points: &[(f64, f64)]) -> Result<[usize; 3], Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn radial_order_uses_seed_center() {
+        let pts = [
+            (-10.0, -10.0), (10.0, 10.0), (-10.0, 10.0), (10.0, -10.0),
+            (0.0, 0.0), (0.0, 1.0), (1.0, 0.0), (2.0, 0.0), (-1.9, 0.0),
+        ];
+        let t = Triangulation::new(&pts).unwrap();
+        let center = centroid(t.points[PointIndex::new(0)],
+                              t.points[PointIndex::new(1)],
+                              t.points[PointIndex::new(2)]);
+        let radii: Vec<_> = t.points.iter().skip(3)
+            .map(|p| distance2(center, *p)).collect();
+        assert!(radii.windows(2).all(|pair| pair[0] <= pair[1]));
+        let mut remap: Vec<_> = t.remap.iter().copied().collect();
+        remap.sort_unstable();
+        assert_eq!(remap, (0..pts.len()).collect::<Vec<_>>());
+    }
 
     #[test]
     fn seed_requires_three_geometrically_distinct_noncollinear_points() {
