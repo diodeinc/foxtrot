@@ -1304,3 +1304,36 @@ records iterates alternating between u=0.5 and u=0.49999999999999106. The
 one-sided unit gradients have opposite signs, but the solver assumes one
 smooth quadratic across the knot. This observation is about the represented
 surface, not proof that the original decimal surface has a macroscopic crease.
+
+### Bounded distance quadratics preserve poles
+
+OLRM surface #114 loses a tangent direction at its clamped pole. Independently
+normalizing that vanishing Jacobian column makes the angular step discontinuous
+and unbounded. The 100-digit source evaluation locates an interior stationary
+point at u=0.00112246588893905226, v=0.51055254769788338, 1.51367736e-13 inside
+the pole (`local/olrm_high_precision.py`, `local/olrm-high-precision.out`).
+
+Replace the normalized/damped Hessian with the actual distance quadratic in
+fixed unit-domain coordinates. In two dimensions its box-constrained minimum
+is among the stationary interior point and four edge minima/corners. Compare
+candidate quadratic values in factored form so a thin direction is not erased
+by another direction's common contribution. A shrinking box trust region
+handles negative curvature without a spectral shift or model-specific cases.
+Use query-relative residuals consistently and apply convergence per direction.
+Only the full-domain step, never a shortened trust step, permits representability
+termination. The intermediate line-search version is rejected: a direction
+chosen for negative curvature need not have a negative linear slope, and that
+version introduces 20 face errors in the regression cohort.
+
+Workspace tests pass, including a vanishing-tangent projection, a quadratic
+with a 1e-32 thin direction, and an indefinite quadratic. Eight checkpoints
+pass. The 54-file lowering cohort is 41 ok / 11 invalid / two face errors:
+OLRM now passes, SMB has zero face errors and zero f64 degenerates but retains
+f32-degenerate facets, and WPCC-RX/TX remain unresolved. The 347-file cohort is
+205 ok / 142 invalid, exactly the active-knot worker's statuses and no face
+errors (`local/repair-box-trust-{lowering,check,regressions}`).
+
+OLRM's bounds match OCCT; areas are 3041.8511 versus 3031.1182 (about 0.35%).
+Foxtrot's exported mesh has no degenerates, while OCCT's has 64. Therefore the
+reference run reports `oracle_invalid_mesh`, not a clean equivalence pass:
+`local/repair-box-trust-olrm-reference`. No bad facets are discarded.

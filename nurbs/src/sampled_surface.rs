@@ -69,6 +69,38 @@ fn kd_nearest(
     }
 }
 
+/// Minimize a quadratic on a rectangle. A minimum is either its stationary
+/// interior point or a minimum on one of four edges, including the corners.
+fn quadratic_step(g: DVec2, h: [f64; 3], lo: DVec2, hi: DVec2) -> DVec2 {
+    let [a, b, d] = h;
+    let mut best = DVec2::zeros();
+    let mut consider = |q: DVec2| {
+        // Compare in factored form so a resolved thin direction is not
+        // erased by the common contribution of a much larger direction.
+        let sum = q + best;
+        let change = dot(&(q - best), &(g + 0.5 * DVec2::new(
+            a * sum.x + b * sum.y, b * sum.x + d * sum.y)));
+        if change < 0. {
+            best = q;
+        }
+    };
+    for x in [lo.x, hi.x] {
+        for y in [lo.y, hi.y] {
+            consider(DVec2::new(x, y));
+        }
+        if d > 0. { consider(DVec2::new(x, (-(g.y + b * x) / d).clamp(lo.y, hi.y))); }
+    }
+    for y in [lo.y, hi.y] {
+        if a > 0. { consider(DVec2::new((-(g.x + b * y) / a).clamp(lo.x, hi.x), y)); }
+    }
+    let det = a.mul_add(d, -b * b);
+    if a > 0. && det > 0. {
+        let q = DVec2::new(b.mul_add(g.y, -d * g.x), b.mul_add(g.x, -a * g.y)) / det;
+        if (0..2).all(|i| q[i] >= lo[i] && q[i] <= hi[i]) { consider(q); }
+    }
+    best
+}
+
 impl<const N: usize> SampledSurface<N>
 where
     NDBSplineSurface<N>: AbstractSurface,
@@ -128,17 +160,15 @@ where
     }
 
     fn newtons_method_inner(&self, P: DVec3, uv_0: DVec2, max_iter: usize) -> Option<DVec2> {
-        // Work in unit-domain coordinates, then normalize each Jacobian
-        // column.  Thus neither knot magnitudes nor the physical units of the
-        // model determine conditioning or convergence.
+        // Fixed unit-domain coordinates preserve the surface differential's
+        // rank and scale continuously, including at collapsed boundaries.
         const STATIONARITY_TOL: f64 = 64.0 * f64::EPSILON;
-        const DAMPING: f64 = 1e-12;
-        const ARMIJO: f64 = 1e-4;
         let mut uv_i = self.constrain_uv(uv_0);
+        let mut radius: f64 = 1.;
         for _ in 0..max_iter {
-            let derivs = self.surf.derivs::<2>(uv_i);
-            let S = derivs[0][0];
-            let r = S - P;
+            let derivs = self.surf.derivs_relative_to::<2>(uv_i, P);
+            let r = derivs[0][0];
+            let S = P + r;
             let ranges = DVec2::new(
                 self.surf.max_u() - self.surf.min_u(),
                 self.surf.max_v() - self.surf.min_v(),
@@ -159,7 +189,6 @@ where
             ];
             let gradient = DVec2::new(dot(&r, &unit[0]), dot(&r, &unit[1]));
             let mut projected = gradient;
-            let mut free = [true, true];
             let domains = [
                 (self.surf.min_u(), self.surf.max_u()),
                 (self.surf.min_v(), self.surf.max_v()),
@@ -170,74 +199,43 @@ where
                     || (uv_i[i] == max && gradient[i] <= 0.0)
                 {
                     projected[i] = 0.0;
-                    free[i] = false;
                 }
             }
             // Test each parameter direction at its own scale. A large normal
             // offset or a long u direction must not erase a resolvable thin v
             // direction. Position roundoff is likewise componentwise.
             let position_scale = S.abs() + P.abs();
-            if (0..2).all(|i| {
+            let stationary = [0, 1].map(|i| {
                 projected[i].abs()
                     <= STATIONARITY_TOL * (norms[i] + dot(&unit[i].abs(), &position_scale))
-            }) {
+            });
+            if stationary.iter().all(|&v| v) {
                 return Some(uv_i);
             }
 
-            // The squared-distance Hessian includes surface curvature even
-            // when the closest point has a nonzero normal residual. Omitting
-            // it makes convergence arbitrarily slow near a curvature center.
-            let fit_unit = [
-                if free[0] { unit[0] } else { DVec3::zeros() },
-                if free[1] { unit[1] } else { DVec3::zeros() },
+            let g = DVec2::new(dot(&r, &columns[0]), dot(&r, &columns[1]));
+            let h = [
+                columns[0].norm_squared() + dot(&r, &derivs[2][0]) * ranges.x * ranges.x,
+                dot(&columns[0], &columns[1]) + dot(&r, &derivs[1][1]) * ranges.x * ranges.y,
+                columns[1].norm_squared() + dot(&r, &derivs[0][2]) * ranges.y * ranges.y,
             ];
-            let curvature = |i: usize, j: usize, derivative: DVec3| {
-                if free[i] && free[j] && norms[i] > 0. && norms[j] > 0. {
-                    dot(&r, &(derivative * (ranges[i] / norms[i]) * (ranges[j] / norms[j])))
-                } else { 0. }
-            };
-            let mut a = fit_unit[0].norm_squared() + curvature(0, 0, derivs[2][0]);
-            let mut d = fit_unit[1].norm_squared() + curvature(1, 1, derivs[0][2]);
-            let mut correlation = dot(&fit_unit[0], &fit_unit[1]) + curvature(0, 1, derivs[1][1]);
-            let scale = a.abs().max(d.abs()).max(correlation.abs()).max(1.);
-            a /= scale;
-            d /= scale;
-            correlation /= scale;
-            // Shift the spectrum only as needed for a positive definite
-            // descent model, including singular and negative-curvature cases.
-            let eigen_min = 0.5 * (a + d) - (0.5 * (a - d)).hypot(correlation);
-            let shift = (DAMPING - eigen_min).max(0.);
-            a += shift;
-            d += shift;
-            let det = a * d - correlation * correlation;
-            let projected = projected / scale;
-            let q = DVec2::new(
-                (-d * projected.x + correlation * projected.y) / det,
-                (correlation * projected.x - a * projected.y) / det,
-            );
-            let normalized_step = DVec2::new(
-                if norms.x > 0.0 { q.x / norms.x } else { 0.0 },
-                if norms.y > 0.0 { q.y / norms.y } else { 0.0 },
-            );
+            let lo = DVec2::new(domains[0].0 - uv_i.x, domains[1].0 - uv_i.y).component_div(&ranges);
+            let hi = DVec2::new(domains[0].1 - uv_i.x, domains[1].1 - uv_i.y).component_div(&ranges);
+            let normalized_step = quadratic_step(g, h, lo, hi);
             let uv_step = DVec2::new(normalized_step.x * ranges.x, normalized_step.y * ranges.y);
-            // As with curve projection, only the full Newton step may
-            // establish representability convergence, never a backtracked one.
-            if uv_i + uv_step == uv_i {
+            // Only the full-domain model step may establish representability
+            // convergence, never a step shortened by the trust region.
+            if (0..2).all(|i| stationary[i] || uv_i[i] + uv_step[i] == uv_i[i]) {
                 return Some(uv_i);
             }
-            // A shifted indefinite Hessian can request arbitrarily large
-            // travel. Start line search within one normalized domain rather
-            // than spending its iteration budget shrinking an unbounded step.
-            let mut alpha = 1.0 / normalized_step.amax().max(1.0);
             let mut accepted = None;
             for _ in 0..40 {
-                let candidate = self.constrain_uv(uv_i + alpha * uv_step);
-                let candidate_r = self.surf.point(candidate) - P;
-                let mut actual_q = DVec2::zeros();
-                for i in 0..2 {
-                    actual_q[i] = norms[i] * (candidate[i] - uv_i[i]) / ranges[i];
-                }
-                let slope = dot(&gradient, &actual_q);
+                let step = quadratic_step(g, h, lo.sup(&DVec2::repeat(-radius)), hi.inf(&DVec2::repeat(radius)));
+                let candidate = self.constrain_uv(uv_i + step.component_mul(&ranges));
+                let candidate_r = self.surf.derivs_relative_to::<0>(candidate, P)[0][0];
+                let q = (candidate - uv_i).component_div(&ranges);
+                let predicted = dot(&q, &(g + 0.5 * DVec2::new(h[0] * q.x + h[1] * q.y,
+                    h[1] * q.x + h[2] * q.y)));
                 // Subtract squared distances in factored form. Near a normal
                 // projection their difference is below the rounding error of
                 // either squared norm; account for position evaluation error
@@ -245,11 +243,12 @@ where
                 let change = 0.5 * dot(&(candidate_r - r), &(candidate_r + r));
                 let roundoff = STATIONARITY_TOL
                     * dot(&(candidate_r.abs() + r.abs()), &position_scale);
-                if slope < 0.0 && change <= ARMIJO * slope + roundoff {
+                if predicted < 0. && change <= 0.1 * predicted + roundoff {
                     accepted = Some(candidate);
+                    if change <= 0.75 * predicted { radius = (2. * radius).min(1.); }
                     break;
                 }
-                alpha *= 0.5;
+                radius *= 0.25;
             }
             uv_i = accepted?;
         }
@@ -285,7 +284,8 @@ where
         }
         let result = seeds.into_iter()
             .filter_map(|seed| self.newtons_method_inner(p, seed, 256))
-            .min_by_key(|&uv| ordered_float::OrderedFloat((self.surf.point(uv) - p).norm_squared()));
+            .min_by_key(|&uv| ordered_float::OrderedFloat(
+                self.surf.derivs_relative_to::<0>(uv, p)[0][0].norm_squared()));
         if result.is_none() {
             error!("Could not find UV coordinates");
         }
@@ -326,6 +326,34 @@ mod tests {
 
     fn close(a: f64, b: f64, tolerance: f64) {
         assert!((a - b).abs() <= tolerance, "{} != {}", a, b);
+    }
+
+    #[test]
+    fn bounded_quadratic_preserves_thin_directions_and_handles_indefinite_curvature() {
+        let lo = DVec2::repeat(-1.);
+        let hi = DVec2::repeat(1.);
+        let q = quadratic_step(DVec2::new(-0.3, -0.7e-32), [1., 0., 1e-32], lo, hi);
+        close(q.x, 0.3, 1e-15);
+        close(q.y, 0.7, 1e-15);
+        let q = quadratic_step(DVec2::new(-0.1, 0.), [1., 2., 1.], lo, hi);
+        assert_eq!(q, DVec2::new(1., -1.));
+    }
+
+    #[test]
+    fn projection_near_a_pole_preserves_the_vanishing_tangent() {
+        // S(u,v) = (u, u*v, 0.001*u*v*(1-v)). At u=0 the v
+        // tangent vanishes, but an interior normal projection still exists.
+        let sampled = SampledSurface::new(NDBSplineSurface::new(true, true,
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
+            vec![vec![DVec3::zeros(); 3], vec![DVec3::new(1., 0., 0.),
+                DVec3::new(1., 0.5, 0.0005), DVec3::new(1., 1., 0.)]]));
+        let expected = DVec2::new(1e-10, 0.5);
+        let jet = sampled.surf.derivs::<1>(expected);
+        let p = jet[0][0] + jet[1][0].cross(&jet[0][1]).normalize() * 1e-7;
+        let uv = sampled.uv_from_point_newtons_method(p, DVec2::zeros()).unwrap();
+        close(uv.x, expected.x, 1e-14);
+        close(uv.y, expected.y, 1e-5);
     }
 
     #[test]
