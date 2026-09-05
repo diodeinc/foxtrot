@@ -52,15 +52,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     let (mesh, stats) = triangulate(&step);
     let triangulate_ms = start.elapsed().as_secs_f64() * 1000.0;
+    // Distinguish tessellation defects from precision lost by binary STL's
+    // f32 coordinates. The harness independently validates the exported mesh.
+    let degenerate_f64 = mesh.triangles.iter().filter(|triangle| {
+        let a = mesh.verts[triangle.verts.x as usize].pos;
+        let b = mesh.verts[triangle.verts.y as usize].pos;
+        let c = mesh.verts[triangle.verts.z as usize].pos;
+        (b - a).cross(&(c - a)).iter().all(|&value| value == 0.0)
+    }).count();
     let start = Instant::now();
     mesh.save_stl(&args[3])?;
     let export_ms = start.elapsed().as_secs_f64() * 1000.0;
     // Only numeric fields: strings and report serialization belong to the harness.
     std::fs::write(&args[2], format!(
-        "{{\"read_ms\":{},\"parse_ms\":{},\"triangulate_ms\":{},\"export_ms\":{},\"triangles\":{},\"vertices\":{},\"faces\":{},\"shells\":{},\"errors\":{},\"panics\":{},\"log_warn\":{},\"log_error\":{}}}",
+        "{{\"read_ms\":{},\"parse_ms\":{},\"triangulate_ms\":{},\"export_ms\":{},\"triangles\":{},\"vertices\":{},\"faces\":{},\"shells\":{},\"errors\":{},\"panics\":{},\"log_warn\":{},\"log_error\":{},\"degenerate_f64\":{}}}",
         read_ms, parse_ms, triangulate_ms, export_ms, mesh.triangles.len(),
         mesh.verts.len(), stats.num_faces, stats.num_shells, stats.num_errors,
         stats.num_panics, WARNINGS.load(Ordering::Relaxed), ERRORS.load(Ordering::Relaxed),
+        degenerate_f64,
     ))?;
     Ok(())
 }
