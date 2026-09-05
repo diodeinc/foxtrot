@@ -114,51 +114,51 @@ impl<const N: usize> SampledCurve<N>
         assert!(num_points_per_knot > 0);
         let trim_length: f64 = ranges.iter().map(|&(a, b)| (b - a).abs()).sum();
         let smooth_seam = self.curve.has_smooth_periodic_seam();
-        let mut result: Vec<f64> = Vec::new();
-        for &(u_start, u_end) in ranges {
-            let (u_min, u_max) = if u_start < u_end {
-                (u_start, u_end)
-            } else {
-                (u_end, u_start)
-            };
-            let mut segment = vec![u_min];
-            for i in 0..self.curve.knots.len() - 1 {
-                let a = self.curve.knots[i].max(u_min);
-                let b = self.curve.knots[i + 1].min(u_max);
-                if a >= b {
-                    continue;
+        let knots = &self.curve.knots;
+        let degree = knots.degree();
+        // Ordered cells carry a sampling measure and whether their end is a
+        // mandatory corner. Smooth knots and periodic cuts change the density,
+        // not the sampling phase: they need not create tiny endpoint edges.
+        let mut cells = Vec::new();
+        for &(start, end) in ranges {
+            let first = cells.len();
+            for i in degree..knots.len() - degree - 1 {
+                let a = knots[i].max(start.min(end));
+                let b = knots[i + 1].min(start.max(end));
+                if a >= b { continue; }
+                let measure = (b - a) / (knots[i + 1] - knots[i]).min(trim_length);
+                let cell = if start < end {
+                    (a, b, measure, b == knots[i + 1] && knots[i + degree] == b)
+                } else {
+                    (b, a, measure, a == knots[i] && knots[i + 1 - degree] == a)
+                };
+                cells.push(cell);
+            }
+            if start > end { cells[first..].reverse(); }
+            if let Some(last) = cells[first..].last_mut() { last.3 = !smooth_seam; }
+        }
+        let Some(last) = cells.last_mut() else {
+            return ranges.first().map_or_else(Vec::new, |&(a, b)|
+                vec![self.curve.point(a), self.curve.point(b)]);
+        };
+        last.3 = true;
+        let mut result = vec![cells[0].0];
+        for run in cells.split_inclusive(|cell| cell.3) {
+            let measure: f64 = run.iter().map(|cell| cell.2).sum();
+            let count = (measure * num_points_per_knot as f64).ceil() as usize;
+            let mut cell = 0;
+            let mut base = 0.;
+            for i in 1..count {
+                let sample = measure * (i as f64 / count as f64);
+                while cell + 1 < run.len() && sample > base + run[cell].2 {
+                    base += run[cell].2;
+                    cell += 1;
                 }
-                // Density belongs to the original span and complete trim,
-                // not the fragments introduced by a periodic cut. A genuinely
-                // short trim still gets its own full sampling budget.
-                let span_length = self.curve.knots[i + 1] - self.curve.knots[i];
-                let count = (num_points_per_knot as f64 * ((b - a) / span_length.min(trim_length)))
-                    .ceil() as usize;
-                for u in 0..count {
-                    let frac = (u as f64) / (count as f64);
-                    let u = a * (1.0 - frac) + b * frac;
-                    if u > u_min && u < u_max {
-                        segment.push(u);
-                    }
-                }
+                let (a, b, width, _) = run[cell];
+                let fraction = ((sample - base) / width).clamp(0., 1.);
+                result.push(a * (1. - fraction) + b * fraction);
             }
-            segment.push(u_max);
-            if u_start > u_end {
-                segment.reverse();
-            }
-            let skip = usize::from(!result.is_empty());
-            if skip != 0 && smooth_seam {
-                // The periodic cut is not a corner. Balance its sample
-                // between its neighbors instead of crowding a trim endpoint.
-                // Evaluate the new parameter on the curve, not a vertex chord.
-                let join = result.len() - 1;
-                let left = result[join - 1];
-                let right = segment[1] + (result[join] - segment[0]);
-                let middle = left + (right - left) * 0.5;
-                result[join] = self.min_u() + (middle - self.min_u())
-                    .rem_euclid(self.max_u() - self.min_u());
-            }
-            result.extend(segment.into_iter().skip(skip));
+            result.push(run.last().unwrap().1);
         }
         result.into_iter().map(|u| self.curve.point(u)).collect()
     }
@@ -231,6 +231,36 @@ mod tests {
         assert_eq!(points.len(), 9);
         assert!((points[4] - DVec3::new(0.015, 0.015 * 0.015, 0.)).norm() < 1e-15);
         assert_eq!(curve.as_polyline(&[(0.02, 0.01)], 8), points.into_iter().rev().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn smooth_knots_do_not_restart_sampling_next_to_trim_endpoints() {
+        let curve = SampledCurve::new(NDBSplineCurve::new(true,
+            KnotVector::from_multiplicities(2, &[0., 0.5, 1.], &[3, 1, 3]),
+            vec![DVec3::zeros(), DVec3::new(0.25, 0., 0.),
+                DVec3::new(0.75, 1., 0.), DVec3::new(1., 1., 0.)]));
+        for (a, b) in [(0.5 - 1e-12, 1.), (1., 0.5 - 1e-12),
+                       (0., 0.5 + 1e-12), (0.5 + 1e-12, 0.)] {
+            let points = curve.as_polyline(&[(a, b)], 8);
+            assert_eq!(points[0], curve.curve.point(a));
+            assert_eq!(*points.last().unwrap(), curve.curve.point(b));
+            assert!(points.len() >= 9);
+            assert!(points.windows(2).all(|p|
+                p[0].map(|x| x as f32) != p[1].map(|x| x as f32)));
+        }
+    }
+
+    #[test]
+    fn narrow_smooth_spans_retain_their_sampling_density() {
+        let curve = SampledCurve::new(NDBSplineCurve::new(true,
+            KnotVector::from_multiplicities(2, &[0., 1e-9, 1.], &[3, 1, 3]),
+            vec![DVec3::zeros(), DVec3::new(0., 1., 0.),
+                DVec3::new(1., 1., 0.), DVec3::new(1., 2., 0.)]));
+        let points = curve.as_polyline(&[(0., 1.)], 8);
+        assert_eq!(points.len(), 17);
+        for i in 0..=8 {
+            assert_eq!(points[i], curve.curve.point(1e-9 * i as f64 / 8.));
+        }
     }
 
     #[test]

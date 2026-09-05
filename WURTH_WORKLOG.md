@@ -1809,3 +1809,61 @@ checking that no Cargo build or corpus worker was running. Reclaimed about
 5 GB; free space rises from 8.9 to 14 GB. STEP inputs, frozen workers, RCA
 reports, manifests and diagnostic evidence are retained. Use nonincremental
 builds and avoid regenerating debug build caches unnecessarily.
+
+### Complete pass 17
+
+All 7,328 Würth files complete before all 7,251 KiCad files with the frozen
+active-bound worker. Coverage and worker hashes verify. Würth is 6,968 ok /
+350 invalid_mesh / 7 tessellation_error / 3 controlled parser rejections
+(the harness calls these `crash`). KiCad is 7,102 ok / 149 invalid_mesh.
+The focused transitions above exactly match the full sweep. Per-file exports:
+`.amp/in/artifacts/repair-pass17/{wurth,kicad}.{json,csv}`.
+
+The f64 diagnostic flags eight facets in six Würth files and 17 facets in
+seven KiCad files. Two of those Würth files pass the f32 gate: WR-USB
+632723130112 and CMB-XS 744821110. Keep these upstream findings open even
+though the exported STL gate passes. This diagnostic currently uses a rounded
+cross product; exact collinearity needs checking before promoting every flag
+to a proved degenerate geometric facet.
+
+### Carry spline sampling density continuously across smooth spans
+
+The previous sampler restarts its phase at every knot and emits that knot
+as a vertex. Near a trim endpoint this constructs a tiny edge even at a
+differentiable knot with no second topological vertex. The representative
+source study is in `local/sampling-provenance/{REPORT.md,representatives.json}`;
+it distinguishes generated samples from real endpoints and deliberately
+does not classify the entire corpus by proximity.
+
+Replace per-span sampling resets and the special periodic-cut balancing rule
+with ordered cells carrying parameter endpoints, sampling measure and a
+mandatory-corner flag. Integrate the existing per-span density over each
+continuous run and distribute samples in that measure. Preserve topological
+trim endpoints and every knot whose multiplicity can permit a tangent break.
+Narrow full spans still receive their density; short trims retain their full
+budget. No f32-dependent sampling, coordinate merging or facet removal.
+
+`cargo test --release --workspace`: all 130 tests pass. New regressions cover
+smooth knots immediately beside either endpoint in both directions, plus a
+1e-9-wide span which must retain its sampling density. Existing corner,
+periodic-cut and short-trim tests pass. The 452-file Würth cohort is 111 ok /
+331 invalid_mesh / 7 tessellation_error / 3 parser rejections; the 156-file
+KiCad cohort is 122 ok / 34 invalid_mesh. Relative to pass 17, 19 Würth and
+115 KiCad files recover with no status regressions in these cohorts. One
+Bourns f64 diagnostic disappears; the other flagged f64 cases remain.
+Evidence: `/tmp/curve-measure-workspace-tests.log`,
+`local/repair-curve-measure-{wurth,kicad}`, frozen
+`local/repair-curve-measure-worker`.
+
+All eight checkpoints pass the ordinary mesh gate. With OCCT enabled, four
+pass the coarse comparison, three OCCT exports themselves have invalid
+meshes, and WR-MJ 615032243321 still has the previously investigated geometry
+mismatch. CP_Radial_D10.0mm_P3.80mm now has zero f64/f32 diagnostic degenerates,
+but its area is 505.0375 mm² versus OCCT 566.2080 mm². The earlier area was
+506.8602 mm²: this material mismatch predates the sampling change and remains
+open. Evidence: `local/repair-curve-measure-occt` and
+`local/curve-measure-cp`. Do not equate passing the ordinary gate with complete
+geometry repair.
+
+Compressed historical pass-15 per-case logs and verified every gzip stream.
+Their paths now end in `.log.gz`; reports and frozen workers remain intact.
