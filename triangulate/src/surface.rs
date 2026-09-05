@@ -6,6 +6,63 @@ use glm::{DVec2, DVec3, DVec4, DMat4};
 use nurbs::{AbstractSurface, SampledSurface};
 use crate::{Error, mesh::Vertex};
 
+#[derive(Debug, Clone)]
+pub enum SplineChart {
+    Cartesian { v_scale: f64 },
+    Polar {
+        periodic: usize,
+        periodic_min: f64,
+        period: f64,
+        radial_origin: f64,
+        radial_scale: f64,
+        radial_min: f64,
+        radial_max: f64,
+    },
+}
+
+impl SplineChart {
+    fn lower(&self, raw: DVec2) -> DVec2 {
+        match *self {
+            Self::Cartesian { v_scale } => DVec2::new(raw.x, raw.y * v_scale),
+            Self::Polar { periodic, periodic_min, period, radial_origin, radial_scale, .. } => {
+                let other = 1 - periodic;
+                let radius = (raw[other] - radial_origin) / radial_scale;
+                let angle = 2.0 * PI * (raw[periodic] - periodic_min) / period;
+                let mut mapped = DVec2::zeros();
+                mapped[periodic] = radius * angle.cos();
+                mapped[other] = -radial_scale.signum() * radius * angle.sin();
+                mapped
+            },
+        }
+    }
+
+    fn raw(&self, mapped: DVec2) -> Option<DVec2> {
+        match *self {
+            Self::Cartesian { v_scale } => Some(DVec2::new(mapped.x, mapped.y / v_scale)),
+            Self::Polar { periodic, periodic_min, period, radial_origin, radial_scale,
+                          radial_min, radial_max } => {
+                let other = 1 - periodic;
+                let radius = mapped.norm();
+                let radial = radial_origin + radial_scale * radius;
+                // Account only for arithmetic error in a chart roundtrip.
+                // Sampling outside the represented radial domain is rejected.
+                let roundoff = 8.0 * EPSILON
+                    * (radial_origin.abs() + (radial_scale * radius).abs());
+                if radial < radial_min - roundoff || radial > radial_max + roundoff {
+                    return None;
+                }
+                let sin = -radial_scale.signum() * mapped[other];
+                let angle = sin.atan2(mapped[periodic]).rem_euclid(2.0 * PI);
+                let mut raw = DVec2::zeros();
+                raw[periodic] = periodic_min + period * angle / (2.0 * PI);
+                raw[other] = radial.clamp(radial_min, radial_max);
+                Some(raw)
+            },
+        }
+    }
+
+}
+
 // Represents a surface in 3D space, with a function to project a 3D point
 // on the surface down to a 2D space.
 #[derive(Debug, Clone)]
@@ -28,7 +85,7 @@ pub enum Surface {
         mat_i: DMat4,
         angle: f64,
     },
-    NURBS(SampledSurface<4>),
+    NURBS { surf: SampledSurface<4>, chart: SplineChart },
     Sphere {
         location: DVec3,
         mat: DMat4,     // uv to world
@@ -48,6 +105,45 @@ pub enum Surface {
 }
 
 impl Surface {
+    pub fn new_nurbs(surf: SampledSurface<4>) -> Self {
+        let u_periodic = !surf.surf.u_open;
+        let v_periodic = !surf.surf.v_open;
+        let chart = if u_periodic ^ v_periodic {
+            let periodic = if u_periodic { 0 } else { 1 };
+            let radial = 1 - periodic;
+            let (radial_min, radial_max) = if radial == 0 {
+                (surf.surf.min_u(), surf.surf.max_u())
+            } else {
+                (surf.surf.min_v(), surf.surf.max_v())
+            };
+            let min_point = surf.surf.rational_boundary_is_point(radial, radial_min);
+            let max_point = surf.surf.rational_boundary_is_point(radial, radial_max);
+            if min_point && max_point {
+                SplineChart::Cartesian { v_scale: surf.surf.aspect_ratio() }
+            } else {
+                let span = radial_max - radial_min;
+                let (radial_origin, radial_scale) = if min_point {
+                    (radial_min, span)
+                } else if max_point {
+                    (radial_max, -span)
+                } else {
+                    (radial_min - span, span)
+                };
+                let (periodic_min, periodic_max) = if periodic == 0 {
+                    (surf.surf.min_u(), surf.surf.max_u())
+                } else {
+                    (surf.surf.min_v(), surf.surf.max_v())
+                };
+                SplineChart::Polar { periodic, periodic_min,
+                    period: periodic_max - periodic_min, radial_origin, radial_scale,
+                    radial_min, radial_max }
+            }
+        } else {
+            SplineChart::Cartesian { v_scale: surf.surf.aspect_ratio() }
+        };
+        Surface::NURBS { surf, chart }
+    }
+
     fn fallback_perpendicular(axis: DVec3) -> DVec3 {
         let candidate = if axis.x.abs() < 0.9 {
             DVec3::new(1.0, 0.0, 0.0)
@@ -159,6 +255,14 @@ impl Surface {
         surf.uv_from_point(p).ok_or(Error::CouldNotLower)
     }
 
+    fn spline_raw(surf: &SampledSurface<4>, chart: &SplineChart,
+                  mapped: DVec2) -> Option<DVec2> {
+        chart.raw(mapped).map(|raw| DVec2::new(
+            Self::spline_parameter(raw.x, surf.surf.min_u(), surf.surf.max_u(), surf.surf.u_open),
+            Self::spline_parameter(raw.y, surf.surf.min_v(), surf.surf.max_v(), surf.surf.v_open),
+        ))
+    }
+
     /// Lowers a 3D point on a specific surface into a 2D space defined by
     /// the surface type.  This should only be called from `lower_verts`,
     /// to ensure that `prepare` is called first.
@@ -241,7 +345,7 @@ impl Surface {
                     radius * polar_angle.sin(),
                 ))
             },
-            Surface::NURBS(surf) => Self::surf_lower(p, surf),
+            Surface::NURBS { surf, chart } => Ok(chart.lower(Self::surf_lower(p, surf)?)),
             Surface::Sphere { mat_i, radius, .. } => {
                 // mat_i is constructed in prepare to be a reasonable basis
                 let p = (mat_i * p_).xyz() / *radius;
@@ -429,7 +533,7 @@ impl Surface {
             Surface::Cylinder { .. } => "lower:Cylinder",
             Surface::Plane { .. } => "lower:Plane",
             Surface::Cone { .. } => "lower:Cone",
-            Surface::NURBS(_) => "lower:NURBS",
+            Surface::NURBS { .. } => "lower:NURBS",
             Surface::Sphere { .. } => "lower:Sphere",
             Surface::Torus { .. } => "lower:Torus",
         }
@@ -456,25 +560,12 @@ impl Surface {
             v.norm = self.normal(v.pos, proj);
             pts.push((proj.x, proj.y));
         }
-        // If this is a BSpline surface, calculate an aspect ratio based on the
-        // control points net, then use it to transform projected points.  This
-        // means that positions in 2D (UV) space are closer to positions in 3D
-        // space, so the triangulation is better.
-        let aspect_ratio = match self {
-            Surface::NURBS(surf) => Some(surf.surf.aspect_ratio()),
-            _ => None,
-        };
-        if let Some(aspect_ratio) = aspect_ratio {
-            for p in pts.iter_mut() {
-                p.1 *= aspect_ratio;
-            }
-        }
         Ok(pts)
     }
 
     fn periodic_uv_periods(&self) -> (Option<f64>, Option<f64>) {
         match self {
-            Surface::NURBS(surf) => {
+            Surface::NURBS { surf, .. } => {
                 let u_period = if surf.surf.u_open {
                     None
                 } else {
@@ -655,6 +746,9 @@ impl Surface {
         if ranges.is_empty() {
             return;
         }
+        if matches!(self, Surface::NURBS { chart: SplineChart::Polar { .. }, .. }) {
+            return;
+        }
         let (u_period, v_period) = self.periodic_uv_periods();
         if u_period.is_none() && v_period.is_none() {
             return;
@@ -694,7 +788,8 @@ impl Surface {
                     .xyz();
                 Some(pos)
             },
-            Surface::NURBS(s) => Some(s.surf.point(uv)),
+            Surface::NURBS { surf, chart } =>
+                Self::spline_raw(surf, chart, uv).map(|raw| surf.surf.point(raw)),
             Surface::Torus { mat, minor_radius, major_radius,
                              polar_major, radial_start, .. } => {
                 if major_radius.abs() < EPSILON || minor_radius.abs() < EPSILON {
@@ -810,30 +905,19 @@ impl Surface {
         pts: &mut Vec<(f64, f64)>,
         verts: &mut Vec<Vertex>,
         surf: &SampledSurface<4>,
+        chart: &SplineChart,
     ) {
         const SAMPLES: usize = 16;
 
         let (xmin, xmax, ymin, ymax) = Self::bbox(pts);
-        let aspect_ratio = surf.surf.aspect_ratio();
-        if !aspect_ratio.is_finite() || aspect_ratio.abs() <= EPSILON {
-            return;
-        }
-
         for x in 0..SAMPLES {
             let x_frac = (x as f64 + 1.0) / (SAMPLES as f64 + 1.0);
             let projected_u = x_frac * xmax + (1.0 - x_frac) * xmin;
             for y in 0..SAMPLES {
                 let y_frac = (y as f64 + 1.0) / (SAMPLES as f64 + 1.0);
                 let projected_v = y_frac * ymax + (1.0 - y_frac) * ymin;
-                let raw_uv = DVec2::new(
-                    Self::spline_parameter(
-                        projected_u, surf.surf.min_u(), surf.surf.max_u(), surf.surf.u_open,
-                    ),
-                    Self::spline_parameter(
-                        projected_v / aspect_ratio,
-                        surf.surf.min_v(), surf.surf.max_v(), surf.surf.v_open,
-                    ),
-                );
+                let projected = DVec2::new(projected_u, projected_v);
+                let Some(raw_uv) = Self::spline_raw(surf, chart, projected) else { continue; };
                 let pos = surf.surf.point(raw_uv);
                 pts.push((projected_u, projected_v));
                 verts.push(Vertex {
@@ -854,8 +938,8 @@ impl Surface {
         }
 
         match self {
-            Surface::NURBS(surf) => {
-                self.add_spline_steiner_points(pts, verts, surf);
+            Surface::NURBS { surf, chart } => {
+                self.add_spline_steiner_points(pts, verts, surf, chart);
                 return;
             },
             _ => (),
@@ -949,7 +1033,8 @@ impl Surface {
                 let norm = DVec3::new(proj.x, proj.y, 0.0).normalize();
                 (mat * norm.to_homogeneous()).xyz()
             },
-            Surface::NURBS(surf) => Self::surf_normal(uv, surf),
+            Surface::NURBS { surf, chart } => Self::spline_raw(surf, chart, uv)
+                .map(|raw| Self::surf_normal(raw, surf)).unwrap_or_else(DVec3::zeros),
             Surface::Torus { mat, mat_i, major_radius, .. } => {
                 let p = (*mat_i * DVec4::new(p.x, p.y, p.z, 1.0)).xyz();
                 let major_angle = p.y.atan2(p.z);
@@ -1102,7 +1187,7 @@ mod tests {
 
     #[test]
     fn periodic_unwrapping_preserves_nonuniform_boundary_parameters() {
-        let surface = Surface::NURBS(SampledSurface::new(NURBSSurface::new(
+        let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
             false, true,
             KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),
             KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
@@ -1110,15 +1195,111 @@ mod tests {
                 .map(|&(x, y)| vec![DVec4::new(x, y, 0., 1.), DVec4::new(x, y, 1., 1.)])
                 .collect(),
         )));
-        let original = vec![(0., 1.), (0.1, 1.), (0.6, 1.), (1., 1.),
-                            (1., 0.), (0.6, 0.), (0.1, 0.), (0., 0.)];
-        let mut points = original.clone();
+        let raw = vec![(0., 1.), (0.1, 1.), (0.6, 1.), (1., 1.),
+                       (1., 0.), (0.6, 0.), (0.1, 0.), (0., 0.)];
+        let (surf, chart) = match &surface {
+            Surface::NURBS { surf, chart } => (surf, chart),
+            _ => unreachable!(),
+        };
+        let mut points: Vec<_> = raw.iter().map(|&(u, v)| {
+            let p = chart.lower(DVec2::new(u, v));
+            (p.x, p.y)
+        }).collect();
+        let original = points.clone();
         let edges: Vec<_> = (0..points.len()).map(|i| (i, (i + 1) % points.len())).collect();
         surface.unwrap_periodic(&mut points, &edges, &[(0, edges.len(), false)]);
-        for (&before, &after) in original.iter().zip(&points) {
-            let a = surface.raise(DVec2::new(before.0, before.1)).unwrap();
-            let b = surface.raise(DVec2::new(after.0.rem_euclid(4.), after.1)).unwrap();
+        assert_eq!(points, original, "polar charts bypass seam unwrapping");
+        for (&raw, &after) in raw.iter().zip(&points) {
+            let a = surf.surf.point(DVec2::new(raw.0, raw.1));
+            let b = surface.raise(DVec2::new(after.0, after.1)).unwrap();
             assert!((a - b).norm() < 1e-14, "unwrapping must not relocate boundary geometry");
+        }
+    }
+
+    #[test]
+    fn polar_charts_roundtrip_with_positive_orientation() {
+        for periodic in [0, 1] {
+            for scale in [-3.0, 3.0] {
+                let chart = SplineChart::Polar {
+                    periodic, periodic_min: 2.0, period: 5.0,
+                    radial_origin: if scale > 0.0 { -1.0 } else { 2.0 },
+                    radial_scale: scale, radial_min: -1.0, radial_max: 2.0,
+                };
+                let other = 1 - periodic;
+                let mut raw = DVec2::zeros();
+                raw[periodic] = 3.1;
+                raw[other] = 0.4;
+                let mapped = chart.lower(raw);
+                let back = chart.raw(mapped).unwrap();
+                assert!((back - raw).norm() < 1e-12);
+
+                let h = 1e-6;
+                let mut du = raw;
+                let mut dv = raw;
+                du.x += h;
+                dv.y += h;
+                let a = (chart.lower(du) - mapped) / h;
+                let b = (chart.lower(dv) - mapped) / h;
+                assert!(a.x * b.y - a.y * b.x > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn full_periodic_spline_disks_and_bands_preserve_area() {
+        for periodic in [0, 1] {
+            for pole in [None, Some(false), Some(true)] {
+                let w = 0.5_f64.sqrt();
+                let circle = [(1., 0., 1.), (1., 1., w), (0., 1., 1.), (-1., 1., w),
+                    (-1., 0., 1.), (-1., -1., w), (0., -1., 1.), (1., -1., w), (1., 0., 1.)];
+                let mut controls: Vec<Vec<DVec4>> = circle.iter().map(|&(x, y, w)| {
+                    [0., 1.].iter().map(|&v| {
+                        let radius = match pole { None => 1., Some(false) => v, Some(true) => 1. - v };
+                        let z = if pole.is_some() { radius } else { v };
+                        DVec4::new(x * radius * w, y * radius * w, z * w, w)
+                    }).collect()
+                }).collect();
+                let angular = KnotVector::from_multiplicities(2, &[0., 1., 2., 3., 4.], &[3, 2, 2, 2, 3]);
+                let radial = KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
+                let (u_knots, v_knots) = if periodic == 0 { (angular, radial) } else {
+                    controls = (0..2).map(|v| controls.iter().map(|row| row[v]).collect()).collect();
+                    (radial, angular)
+                };
+                let mut surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
+                    periodic != 0, periodic != 1, u_knots, v_knots, controls,
+                )));
+                assert!(matches!(surface, Surface::NURBS { chart: SplineChart::Polar { .. }, .. }));
+                let mut vertices = Vec::new();
+                let mut edges = Vec::new();
+                let radii = if pole.is_some() { vec![1.] } else { vec![2., 1.] };
+                for (ring, radius) in radii.into_iter().enumerate() {
+                    let start = vertices.len();
+                    for i in 0..64 {
+                        let angle = (if ring == 0 { 1. } else { -1. }) * 2. * PI * i as f64 / 64.;
+                        let uv = DVec2::new(radius * angle.cos(), radius * angle.sin());
+                        vertices.push(Vertex { pos: surface.raise(uv).unwrap(),
+                            norm: DVec3::zeros(), color: DVec3::zeros() });
+                        edges.push((start + i, start + (i + 1) % 64));
+                    }
+                }
+                if pole.is_some() {
+                    vertices.push(Vertex { pos: surface.raise(DVec2::zeros()).unwrap(),
+                        norm: DVec3::zeros(), color: DVec3::zeros() });
+                }
+                let mut points = surface.lower_verts(&mut vertices, &edges, true).unwrap();
+                surface.add_steiner_points(&mut points, &mut vertices);
+                let mut t = cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
+                t.run().unwrap();
+                let mut area = 0.;
+                for (a, b, c) in t.triangles() {
+                    let cross = (vertices[b].pos - vertices[a].pos)
+                        .cross(&(vertices[c].pos - vertices[a].pos));
+                    assert!(cross.norm() > 0.0);
+                    area += 0.5 * cross.norm();
+                }
+                let expected = if pole.is_some() { PI * 2.0_f64.sqrt() } else { 2. * PI };
+                assert!((area / expected - 1.).abs() < 0.01, "area {} != {}", area, expected);
+            }
         }
     }
 
@@ -1163,7 +1344,7 @@ mod tests {
                 DVec4::new(u as f64, v as f64, (u * v) as f64 * 0.25, 1.0)
             }).collect()
         }).collect();
-        let surface = Surface::NURBS(SampledSurface::new(NURBSSurface::new(
+        let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
             true, true, knots(), knots(), control_points,
         )));
         let mut points = vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];

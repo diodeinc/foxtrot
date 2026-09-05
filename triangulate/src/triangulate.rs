@@ -1085,7 +1085,7 @@ fn extrusion_surface(curve: HomogeneousCurve, vector: DVec3, boundary: &[DVec3])
     ]).collect();
     let surface = NURBSSurface::new(curve.open, true, curve.knots,
         KnotVector::from_multiplicities(1, &[range.0, range.1], &[2, 2]), controls);
-    Ok(Surface::NURBS(SampledSurface::new(surface)))
+    Ok(Surface::new_nurbs(SampledSurface::new(surface)))
 }
 
 fn revolution_surface(curve: HomogeneousCurve, origin: DVec3, axis: DVec3)
@@ -1114,7 +1114,7 @@ fn revolution_surface(curve: HomogeneousCurve, origin: DVec3, axis: DVec3)
     let circle_knots = KnotVector::from_multiplicities(
         2, &[0.0, 0.25, 0.5, 0.75, 1.0], &[3, 2, 2, 2, 3]);
     let surface = NURBSSurface::new(false, curve.open, circle_knots, curve.knots, controls);
-    Ok(Surface::NURBS(SampledSurface::new(surface)))
+    Ok(Surface::new_nurbs(SampledSurface::new(surface)))
 }
 
 fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3]) -> Result<Surface, Error> {
@@ -1207,7 +1207,7 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3]) -> Result
                 v_knot_vec,
                 control_points_list,
             );
-            Ok(Surface::NURBS(SampledSurface::new(surf)))
+            Ok(Surface::new_nurbs(SampledSurface::new(surf)))
         },
         Entity::ComplexEntity(v) if v.len() == 2 => {
             let bspline = if let Entity::BSplineSurfaceWithKnots(b) = &v[0] {
@@ -1258,7 +1258,7 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3]) -> Result
                 v_knot_vec,
                 control_points_list,
             );
-            Ok(Surface::NURBS(SampledSurface::new(surf)))
+            Ok(Surface::new_nurbs(SampledSurface::new(surf)))
 
         },
         e => {
@@ -1632,7 +1632,7 @@ mod tests {
     }
 
     fn nurbs(surface: Surface) -> SampledSurface<4> {
-        match surface { Surface::NURBS(s) => s, _ => panic!("expected NURBS") }
+        match surface { Surface::NURBS { surf, .. } => surf, _ => panic!("expected NURBS") }
     }
 
     #[test]
