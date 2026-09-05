@@ -19,4 +19,8 @@ pub trait AbstractSurface {
     /// The zeroth entry is S(uv) - reference, evaluated before restoring
     /// world coordinates. Higher derivatives are translation invariant.
     fn derivs_relative_to<const E: usize>(&self, uv: DVec2, reference: DVec3) -> Vec<Vec<DVec3>>;
+
+    /// Evaluate the specified knot cell, including its one-sided derivatives
+    /// at cell boundaries. The parameter must lie in the closed cell.
+    fn derivs_in_span<const E: usize>(&self, uv: DVec2, spans: [usize; 2], reference: DVec3) -> Vec<Vec<DVec3>>;
 }

@@ -203,12 +203,13 @@ impl<const D: usize> NDBSplineSurface<D> {
     ///
     /// ALGORITHM A3.6
     pub fn surface_derivs<const E: usize>(&self, uv: DVec2) -> Vec<Vec<TVec<f64, D>>> {
-        let (origin, mut derivatives) = self.surface_derivs_relative::<E>(uv, |p, origin| p - origin);
+        let spans = [self.u_knots.find_span(uv.x), self.v_knots.find_span(uv.y)];
+        let (origin, mut derivatives) = self.surface_derivs_relative::<E>(uv, spans, |p, origin| p - origin);
         derivatives[0][0] += origin;
         derivatives
     }
 
-    pub(crate) fn surface_derivs_relative<const E: usize>(&self, uv: DVec2,
+    pub(crate) fn surface_derivs_relative<const E: usize>(&self, uv: DVec2, spans: [usize; 2],
         difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
     ) -> (TVec<f64, D>, Vec<Vec<TVec<f64, D>>>) {
         let p = self.u_knots.degree();
@@ -222,10 +223,9 @@ impl<const D: usize> NDBSplineSurface<D> {
         // surfaces are lower order (those values will be locked at 0)
         let mut SKL = vec![vec![TVec::zeros(); E + 1]; E + 1];
 
-        let uspan = self.u_knots.find_span(uv.x);
+        let [uspan, vspan] = spans;
         let Nu_deriv = self.u_knots.basis_funs_derivs_for_span(uspan, uv.x, du);
 
-        let vspan = self.v_knots.find_span(uv.y);
         let Nv_deriv = self.v_knots.basis_funs_derivs_for_span(vspan, uv.y, dv);
 
         // Tensor-product partition of unity removes the common coordinate

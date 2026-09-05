@@ -19,11 +19,15 @@ impl AbstractSurface for NURBSSurface {
     }
 
     fn derivs_relative_to<const E: usize>(&self, uv: DVec2, reference: DVec3) -> Vec<Vec<DVec3>> {
+        self.derivs_in_span::<E>(uv, [self.u_knots.find_span(uv.x), self.v_knots.find_span(uv.y)], reference)
+    }
+
+    fn derivs_in_span<const E: usize>(&self, uv: DVec2, spans: [usize; 2], reference: DVec3) -> Vec<Vec<DVec3>> {
         let shift = |p: nalgebra_glm::DVec4| nalgebra_glm::DVec4::new(
             (-reference.x).mul_add(p.w, p.x),
             (-reference.y).mul_add(p.w, p.y),
             (-reference.z).mul_add(p.w, p.z), p.w);
-        let (origin, mut derivs) = self.surface_derivs_relative::<E>(uv,
+        let (origin, mut derivs) = self.surface_derivs_relative::<E>(uv, spans,
             |p, origin| crate::rational_difference(shift(p), shift(origin)));
         let origin = shift(origin);
         derivs[0][0].w += origin.w;
@@ -56,6 +60,22 @@ mod tests {
     use super::*;
     use crate::KnotVector;
     use nalgebra_glm::DVec4;
+
+    #[test]
+    fn knot_cell_derivatives_preserve_both_sides_of_a_crease() {
+        let surface = NURBSSurface::new(true, true,
+            KnotVector::from_multiplicities(1, &[0., 0.5, 1.], &[2, 1, 2]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [(0., 0.5), (0.5, 0.), (1., 0.5)].iter().map(|&(x, z)|
+                vec![DVec4::new(x, 0., z, 1.), DVec4::new(x, 1., z, 1.)]).collect());
+        let uv = DVec2::new(0.5, 0.3);
+        let left = surface.derivs_in_span::<1>(uv, [1, 1], DVec3::zeros());
+        let right = surface.derivs_in_span::<1>(uv, [2, 1], DVec3::zeros());
+        assert_eq!(left[0][0], right[0][0]);
+        assert_eq!(left[1][0], DVec3::new(1., 0., -1.));
+        assert_eq!(right[1][0], DVec3::new(1., 0., 1.));
+        assert_eq!(surface.derivs::<1>(uv), right);
+    }
 
     #[test]
     fn relative_jets_retain_displacements_below_world_coordinate_precision() {

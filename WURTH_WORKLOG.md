@@ -1290,3 +1290,17 @@ small surface is far from the origin, without a second evaluation algorithm.
 The translated-plane regression verifies residuals below a world-coordinate
 ULP for both surface types. Workspace tests pass. This commit exposes the
 evaluation primitive only; solver integration is a separate logic change.
+
+### One-sided surface derivatives at knot boundaries
+
+Allow derivative evaluation in an explicit knot cell, reusing the existing
+basis-derivative algorithm. Ordinary evaluation still selects its original
+cell. A two-plane crease regression verifies coincident positions, distinct
+left/right tangents, and unchanged default right-side selection. Workspace
+tests pass (`/tmp/cell-derivatives-tests.log`). Solver use is separate.
+
+This is needed by the remaining WPCC failures: `local/box-probe-remaining`
+records iterates alternating between u=0.5 and u=0.49999999999999106. The
+one-sided unit gradients have opposite signs, but the solver assumes one
+smooth quadratic across the knot. This observation is about the represented
+surface, not proof that the original decimal surface has a macroscopic crease.
