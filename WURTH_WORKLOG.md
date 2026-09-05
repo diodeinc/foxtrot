@@ -353,3 +353,34 @@ intermediate collinear vertex belongs to the exterior hull. Interior vertices
 do not have hull slots; the walk must follow incident triangle edges instead.
 Zero-area surface charts, precision collapse, and malformed geometry references
 also remain open. Full repaired-corpus verification is still pending.
+
+### Second repair checkpoint (in progress)
+
+The bespoke radial-sweep CDT lost information in its hull ordering and required
+multiple interacting repair paths. It is replaced by Spade 2.15.1 constrained
+Delaunay triangulation, preserving original vertex provenance and even/odd trim
+parity. Crossing constraints are rejected rather than silently split by CDT.
+The obsolete Steiner-point-dropping retry is removed. Empty per-face output now
+counts as a failed STEP face, even when parity cancellation is valid standalone
+CDT input. Flat face traversal replaces per-face allocations and searches.
+
+Other separate logical commits correct revolution parameter orientation, close
+rational circle control nets exactly, and represent both spindle-torus branches
+through signed major radii. Spherical charts now choose an exterior projection
+pole from oriented boundary clearance, with signed solid-angle verification;
+hemispheres, large caps, bands, and reversed face sense have regression coverage.
+Sphere normalization is independent of length units (radii 1e-9, 1, and 1e9).
+The supported workspace tests pass after these changes.
+
+The first full repair checkpoint exhausted disk space while retaining failure
+meshes. `local/wurth-repair-pass1` is incomplete and is NOT coverage evidence;
+KiCad did not start in that checkpoint. Completed meshes are losslessly gzip
+compressed, preserving logs and metrics. No baseline results are overwritten.
+
+A new full run uses frozen `local/repair-pass2-worker`, first all 7,328 Würth
+inputs, then all 7,251 KiCad inputs. Eight disjoint manifest shards each use one
+worker and one Rayon thread. The supervisor compresses retained meshes only
+after atomic per-case results confirm validation is finished. Final merging
+checks complete path/hash coverage and an identical worker hash across shards.
+Results will be in `local/{wurth,kicad}-repair-pass2`. These runs are pending,
+not yet proof that the remaining geometry and precision issues are resolved.
