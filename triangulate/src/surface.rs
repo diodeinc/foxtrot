@@ -111,8 +111,11 @@ impl Surface {
             return Self::new_plane(normal, DVec3::zeros(), DVec3::zeros())
                 .expect("regular planar patch has a nonzero finite normal");
         }
-        let u_periodic = !surf.surf.u_open;
-        let v_periodic = !surf.surf.v_open;
+        // Bounded, nonperiodic splines can still have matching endpoint
+        // iso-curves. Identify the seam geometrically for the chart without
+        // changing their knots, endpoint derivatives or bounded inverse domain.
+        let u_periodic = !surf.surf.u_open || surf.surf.rational_boundaries_coincide(0, uncertainty);
+        let v_periodic = !surf.surf.v_open || surf.surf.rational_boundaries_coincide(1, uncertainty);
         let chart = if u_periodic ^ v_periodic {
             let periodic = if u_periodic { 0 } else { 1 };
             let radial = 1 - periodic;
@@ -1097,6 +1100,19 @@ impl Surface {
 mod tests {
     use super::*;
     use nurbs::{KnotVector, NURBSSurface};
+
+    #[test]
+    fn geometrically_closed_bounded_spline_uses_a_continuous_chart() {
+        let controls = [(1., 0.), (0., 1.), (-1., 0.), (0., -1.), (1., 1e-12)]
+            .iter().map(|&(x, y)| vec![DVec4::new(x, y, 0., 1.), DVec4::new(x, y, 1., 1.)]).collect();
+        let surf = SampledSurface::new(NURBSSurface::new(true, true,
+            KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]), controls));
+        let exact = Surface::new_nurbs(surf.clone(), 0.);
+        assert!(matches!(exact, Surface::NURBS { chart: SplineChart::Cartesian { .. }, .. }));
+        let closed = Surface::new_nurbs(surf, 1e-10);
+        assert!(matches!(closed, Surface::NURBS { chart: SplineChart::Polar { periodic: 0, .. }, .. }));
+    }
 
     #[test]
     fn a_declared_pole_maps_to_one_chart_point_without_inverting_its_angle() {

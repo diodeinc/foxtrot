@@ -931,3 +931,25 @@ The near-pole regression fails before the change, and tests retain a non-pole
 point away from the uncertainty region. Workspace tests, eight checkpoints and
 all 12 selected dome/infrared cases pass, including every pass-8 LED pole
 regression. Evidence: `local/repair-pole-{check,dome}`.
+
+KiCad CP_Elec_5x5.4 crossing RCA: bounded degree-(2,13) surface #116 has endpoint
+iso-curves matching within its declared 2e-6 length uncertainty, but both spline
+closure flags are false. The face repeats EDGE_CURVE #90 as its seam. Independent
+inverse projection maps both occurrences to the same endpoint of the bounded
+domain, collapsing the rectangular trim into two retraced lines. Floating-point
+arithmetic changes only decide which seam side wins; they are not the cause.
+
+After a separately verified iso-boundary extraction refactor, chart selection
+also recognizes matching geometric endpoint boundaries. A positive-weight
+control-hull test with matching normalized rational weights bounds separation
+along the complete iso-curves, not a sparse sample test. This only selects the
+continuous chart; it does not rewrite closedness flags, knot periodicity or
+bounded Newton domains. Tests reject resolvable gaps and different rational
+bases, and distinguish zero from declared uncertainty. Workspace tests and
+eight checkpoints pass; the CP_Elec crossing is resolved.
+
+The capacitor is **not geometrically certified**: OCCT comparison reports
+area 169.176084 versus 160.459846 (5.43% difference), with matching bounds;
+signed volume 103.280538 versus 106.651604. Retain this approximation defect
+alongside WR-MJ rather than enlarging the oracle tolerance. Evidence:
+`local/repair-closed-{check,capacitor,capacitor-occt}`.

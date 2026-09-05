@@ -100,6 +100,28 @@ impl<const D: usize> NDBSplineSurface<D> {
         })
     }
 
+    /// Sufficient control-hull test for matching endpoint iso-curves. Equal
+    /// normalized positive weights give both curves the same rational basis,
+    /// so control distances bound their pointwise separation everywhere.
+    pub fn rational_boundaries_coincide(&self, parameter: usize, uncertainty: f64) -> bool {
+        let (min, max) = match parameter {
+            0 => (self.min_u(), self.max_u()),
+            1 => (self.min_v(), self.max_v()),
+            _ => return false,
+        };
+        if D < 2 { return false; }
+        let a = self.boundary_controls(parameter, min);
+        let b = self.boundary_controls(parameter, max);
+        let (Some(first_a), Some(first_b)) = (a.first(), b.first()) else { return false; };
+        let w = D - 1;
+        if first_a[w] <= 0.0 || first_b[w] <= 0.0 { return false; }
+        a.iter().zip(&b).all(|(a, b)| {
+            a[w] > 0.0 && b[w] > 0.0 && a[w] / first_a[w] == b[w] / first_b[w]
+                && (0..w).fold(0.0_f64, |distance, i|
+                    distance.hypot(a[i] / a[w] - b[i] / b[w])) <= uncertainty
+        })
+    }
+
     fn boundary_controls(&self, parameter: usize, value: f64) -> Vec<TVec<f64, D>> {
         match parameter {
             0 => {
@@ -343,5 +365,22 @@ mod tests {
             assert!(!surface.rational_boundary_is_point(1, 0., scale * 0.5));
             assert!(surface.rational_boundary_is_point(1, 0., scale));
         }
+    }
+
+    #[test]
+    fn coincident_boundaries_require_matching_rational_basis_and_resolved_gap() {
+        let knots = || KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]);
+        let row = vec![DVec4::new(0., 0., 0., 1.), DVec4::new(0., 0.5, 0., 0.5), DVec4::new(0., 2., 0., 1.)];
+        let mut controls = vec![row.clone(), row.clone(), row.clone()];
+        for p in &mut controls[1] { p.x = p.w; }
+        for p in &mut controls[2] { p.x = 1e-8 * p.w; }
+        let mut surface = NDBSplineSurface::new(true, true, knots(), knots(), controls);
+        assert!(!surface.rational_boundaries_coincide(0, 0.));
+        assert!(!surface.rational_boundaries_coincide(0, 0.5e-8));
+        assert!(surface.rational_boundaries_coincide(0, 1e-8));
+        for p in &mut surface.control_points[2] { *p *= 2.; }
+        assert!(surface.rational_boundaries_coincide(0, 1e-8));
+        surface.control_points[2][1] *= 2.;
+        assert!(!surface.rational_boundaries_coincide(0, 1e-8));
     }
 }
