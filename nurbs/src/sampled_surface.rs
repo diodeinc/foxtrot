@@ -120,21 +120,11 @@ where
         out
     }
 
-    fn constrain_uv(&self, mut uv: DVec2) -> DVec2 {
-        let domains = [
-            (self.surf.min_u(), self.surf.max_u(), self.surf.u_open),
-            (self.surf.min_v(), self.surf.max_v(), self.surf.v_open),
-        ];
-        for (value, (min, max, open)) in uv.iter_mut().zip(domains) {
-            if open {
-                *value = value.clamp(min, max);
-            } else if *value < min || *value > max {
-                // Newton steps can cross arbitrarily many periods. Keep
-                // in-domain endpoints unchanged to preserve their knot side.
-                *value = min + (*value - min).rem_euclid(max - min);
-            }
-        }
-        uv
+    fn constrain_uv(&self, uv: DVec2) -> DVec2 {
+        // Closure describes geometry, not the domain of the projection solve.
+        // Both knot endpoints are eligible constrained minima, also at seams.
+        DVec2::new(uv.x.clamp(self.surf.min_u(), self.surf.max_u()),
+                   uv.y.clamp(self.surf.min_v(), self.surf.max_v()))
     }
 
     fn newtons_method_inner(&self, P: DVec3, uv_0: DVec2, max_iter: usize) -> Option<DVec2> {
@@ -171,14 +161,13 @@ where
             let mut projected = gradient;
             let mut free = [true, true];
             let domains = [
-                (self.surf.min_u(), self.surf.max_u(), self.surf.u_open),
-                (self.surf.min_v(), self.surf.max_v(), self.surf.v_open),
+                (self.surf.min_u(), self.surf.max_u()),
+                (self.surf.min_v(), self.surf.max_v()),
             ];
             for i in 0..2 {
-                let (min, max, open) = domains[i];
-                if open
-                    && ((uv_i[i] == min && gradient[i] >= 0.0)
-                        || (uv_i[i] == max && gradient[i] <= 0.0))
+                let (min, max) = domains[i];
+                if (uv_i[i] == min && gradient[i] >= 0.0)
+                    || (uv_i[i] == max && gradient[i] <= 0.0)
                 {
                     projected[i] = 0.0;
                     free[i] = false;
@@ -238,14 +227,7 @@ where
                 let candidate_r = self.surf.point(candidate) - P;
                 let mut actual_q = DVec2::zeros();
                 for i in 0..2 {
-                    // A periodic seam changes the stored representative, not
-                    // the direction travelled along the parameter domain.
-                    let delta = if domains[i].2 {
-                        candidate[i] - uv_i[i]
-                    } else {
-                        alpha * uv_step[i]
-                    };
-                    actual_q[i] = norms[i] * delta / ranges[i];
+                    actual_q[i] = norms[i] * (candidate[i] - uv_i[i]) / ranges[i];
                 }
                 let slope = dot(&gradient, &actual_q);
                 // Subtract squared distances in factored form. Near a normal
@@ -276,7 +258,30 @@ where
             best.1 as usize
         };
         let best_uv = self.samples[best_idx].0;
-        self.uv_from_point_newtons_method(p, best_uv)
+        // A closed boundary has two parameter representatives. The nearest
+        // geometric sample cannot distinguish them, so solve each bounded
+        // representative rather than wrapping iterates across the cut.
+        let mut seeds = vec![best_uv];
+        for (i, (min, max, open)) in [
+            (self.surf.min_u(), self.surf.max_u(), self.surf.u_open),
+            (self.surf.min_v(), self.surf.max_v(), self.surf.v_open),
+        ].iter().copied().enumerate() {
+            if !open && (best_uv[i] == min || best_uv[i] == max) {
+                let other = if best_uv[i] == min { max } else { min };
+                for j in 0..seeds.len() {
+                    let mut alias = seeds[j];
+                    alias[i] = other;
+                    seeds.push(alias);
+                }
+            }
+        }
+        let result = seeds.into_iter()
+            .filter_map(|seed| self.newtons_method_inner(p, seed, 256))
+            .min_by_key(|&uv| ordered_float::OrderedFloat((self.surf.point(uv) - p).norm_squared()));
+        if result.is_none() {
+            error!("Could not find UV coordinates");
+        }
+        result
     }
 
     // NOTE: do not add warm-start ("hint") seeding from an adjacent contour
@@ -367,7 +372,21 @@ mod tests {
     }
 
     #[test]
-    fn periodic_projection_can_descend_across_the_seam() {
+    fn closed_surface_projection_retains_a_seam_endpoint_minimum() {
+        let sampled = SampledSurface::new(NDBSplineSurface::new(false, true,
+            KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [(0., 0.), (1., 0.), (1., 1.), (0., 1.), (0., 1e-12)].iter()
+                .map(|&(x, y)| vec![DVec3::new(x, y, 0.), DVec3::new(x, y, 1.)]).collect()));
+        // Geometric closure (with rounded endpoint data) is not an instruction
+        // to wrap a local bounded minimization across the two knot endpoints.
+        let uv = sampled.uv_from_point(DVec3::new(-1e-12, 0., 0.37)).unwrap();
+        assert_eq!(uv.x, 0.);
+        close(uv.y, 0.37, 1e-12);
+    }
+
+    #[test]
+    fn closed_surface_projection_samples_both_sides_of_the_seam() {
         let w = 0.5_f64.sqrt();
         let circle = [
             (1., 0., 1.),
@@ -397,8 +416,12 @@ mod tests {
         ));
         let expected = DVec2::new(0.01, 0.6);
         let uv = sampled
-            .uv_from_point_newtons_method(sampled.surf.point(expected), DVec2::new(3.99, 0.4))
+            .uv_from_point(sampled.surf.point(expected))
             .unwrap();
+        close(uv.x, expected.x, 1e-10);
+        close(uv.y, expected.y, 1e-10);
+        let expected = DVec2::new(3.99, 0.4);
+        let uv = sampled.uv_from_point(sampled.surf.point(expected)).unwrap();
         close(uv.x, expected.x, 1e-10);
         close(uv.y, expected.y, 1e-10);
     }
@@ -486,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn constrains_multiple_periods_and_preserves_domain_endpoints() {
+    fn projection_domain_is_bounded_even_for_closed_surfaces() {
         let sampled = SampledSurface::new(NDBSplineSurface::new(
             false,
             true,
@@ -494,10 +517,10 @@ mod tests {
             KnotVector::from_multiplicities(1, &[-7.0, -3.0], &[2, 2]),
             vec![vec![DVec3::zeros(); 2]; 2],
         ));
-        for period in [-100.0, -2.0, 0.0, 2.0, 100.0] {
+        for parameter in [-100.0_f64, -2.0, 0.0, 2.0, 3.0, 100.0] {
             assert_eq!(
-                sampled.constrain_uv(DVec2::new(3.0 + 3.0 * period, -100.0)),
-                DVec2::new(3.0, -7.0),
+                sampled.constrain_uv(DVec2::new(parameter, -100.0)),
+                DVec2::new(parameter.clamp(2.0, 5.0), -7.0),
             );
         }
         for endpoint in [2.0, 5.0] {

@@ -13,7 +13,7 @@ impl<const N: usize> SampledCurve<N>
     pub fn new(curve: NDBSplineCurve<N>) -> Self {
         const N: usize = 8;
         let mut samples = Vec::new();
-        for i in 0..curve.knots.len() - 1 {
+        for i in curve.knots.degree()..curve.knots.len() - 1 - curve.knots.degree() {
             // Skip multiple knots
             if curve.knots[i] == curve.knots[i + 1] {
                 continue;
@@ -37,11 +37,7 @@ impl<const N: usize> SampledCurve<N>
         let min = self.min_u();
         let max = self.max_u();
         let range = max - min;
-        let constrain = |u: f64| {
-            if self.curve.open { u.clamp(min, max) }
-            else if u < min || u > max { min + (u - min).rem_euclid(range) }
-            else { u }
-        };
+        let constrain = |u: f64| u.clamp(min, max);
         let mut u = constrain(u_0);
         for _ in 0..256 {
             let derivs = self.curve.derivs::<2>(u);
@@ -54,8 +50,7 @@ impl<const N: usize> SampledCurve<N>
             // First-order stationarity, not a fixed world-space distance or
             // a signed cosine test. A normal offset cannot mask tangential error.
             if gradient.abs() <= TOL * (speed + dot(&unit.abs(), &position_scale))
-                || (self.curve.open
-                    && ((u == min && gradient >= 0.0) || (u == max && gradient <= 0.0))) {
+                || (u == min && gradient >= 0.0) || (u == max && gradient <= 0.0) {
                 return Some(u);
             }
             // Use distance curvature when it defines a descent direction;
@@ -75,7 +70,7 @@ impl<const N: usize> SampledCurve<N>
             for _ in 0..40 {
                 let candidate = constrain(u + alpha * step);
                 let candidate_r = self.curve.point(candidate) - P;
-                let delta = if self.curve.open { candidate - u } else { alpha * step };
+                let delta = candidate - u;
                 let slope = gradient * speed * (delta / range);
                 let change = 0.5 * dot(&(candidate_r - r), &(candidate_r + r));
                 let roundoff = TOL * dot(&(candidate_r.abs() + r.abs()), &position_scale);
@@ -103,7 +98,12 @@ impl<const N: usize> SampledCurve<N>
         let best_u = self.samples.iter()
             .min_by_key(|(_u, pos)| OrderedFloat((pos - p).norm()))
             .unwrap().0;
-        self.u_from_point_newtons_method(p, best_u)
+        let alias = if !self.curve.open && best_u == self.min_u() { Some(self.max_u()) }
+                    else if !self.curve.open && best_u == self.max_u() { Some(self.min_u()) }
+                    else { None };
+        std::iter::once(best_u).chain(alias)
+            .filter_map(|seed| self.u_from_point_newtons_method(p, seed))
+            .min_by_key(|&u| OrderedFloat((self.curve.point(u) - p).norm_squared()))
     }
 
     pub fn as_polyline(&self, u_start: f64, u_end: f64, num_points_per_knot: usize) -> Vec<DVec3> {
@@ -148,6 +148,25 @@ impl<const N: usize> SampledCurve<N>
 mod tests {
     use super::*;
     use crate::KnotVector;
+
+    #[test]
+    fn closed_curve_projection_searches_both_bounded_seam_representatives() {
+        let curve = SampledCurve::new(NDBSplineCurve::new(false,
+            KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),
+            [(0., 0.), (1., 0.), (1., 1.), (0., 1.), (0., 1e-12)].iter()
+                .map(|&(x, y)| DVec3::new(x, y, 0.)).collect()));
+        assert_eq!(curve.u_from_point(DVec3::new(-1e-12, 0., 0.)), Some(0.));
+        assert!((curve.u_from_point(DVec3::new(0.01, 0., 0.)).unwrap() - 0.01).abs() < 1e-12);
+        assert!((curve.u_from_point(DVec3::new(0., 0.01, 0.)).unwrap() - 3.99).abs() < 1e-12);
+    }
+
+    #[test]
+    fn projection_samples_only_the_active_knot_domain() {
+        let curve = SampledCurve::new(NDBSplineCurve::new(false,
+            KnotVector::from_multiplicities(1, &[-1., 0., 1., 2., 3., 4.], &[1; 6]),
+            vec![DVec3::zeros(), DVec3::x(), DVec3::y(), DVec3::zeros()]));
+        assert!(curve.samples.iter().all(|&(u, _)| u >= curve.min_u() && u <= curve.max_u()));
+    }
 
     #[test]
     fn short_trims_sample_their_own_knot_interval() {

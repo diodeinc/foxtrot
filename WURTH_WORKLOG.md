@@ -1067,3 +1067,34 @@ File groups overlap. Evidence: `.amp/in/artifacts/pass10-canceled-faces/`.
 Unlike the earlier endpoint-only hypothesis, this analysis examines infinite
 LINE origins/directions and uses exact decimal predicates. It does not infer
 zero area from two vertices or curvature merely from distinct spline controls.
+
+### Bounded projection and seam representatives
+
+DSUB 216612013 surface #192234 fails at (3.967504898759, 5.42,
+-2.484510124102), seeded at (0,0). The source is geometrically closed, but
+wrapping the local minimizer across its rounded knot endpoints prevents it from
+accepting an endpoint minimum. STEP closedness is not periodicity. OCCT's
+`StepToGeom::MakeBSplineSurface` infers periodic representation from multiplicity
+structure, not UClosed/VClosed; `GeomAPI_ProjectPointOnSurf` passes finite bounds
+to `Extrema_GenExtPS`, whose local root search is box-constrained and whose
+candidate minima include domain edges/corners. Reference repository:
+https://github.com/Open-Cascade-SAS/OCCT, files `StepToGeom.cxx`,
+`GeomAPI_ProjectPointOnSurf.cxx`, `Extrema_GenExtPS.cxx`.
+
+Use bounded local projection for curves and surfaces alike. When the nearest
+sample lies at a closed seam, enumerate its alternate endpoint representatives
+and select the bounded result with least squared distance. This is a defined
+candidate set, not a failure-triggered alternate solver; all candidates use the
+same minimizer. The initial bounded-only experiment correctly retained endpoint
+minima but failed the opposite-side circle test because the geometric sample
+tie picked the wrong seam representative. Enumerating both fixes that defect.
+Curve seed samples also now exclude intervals outside the active knot domain.
+
+The synthetic rounded-seam regression fails before and passes after; tests
+cover both sides of a closed circle, domain endpoints and restricted seed
+domains. Workspace tests and eight checkpoints pass. Of the 54 lowering-error
+files, 28 now pass, ten reach mesh validation, and 16 retain tessellation errors
+(14 files with 17 lowering failures, plus two with canceled boundaries).
+No distance tolerance changes or coordinate snapping are involved. Evidence:
+`local/repair-bounded-all-{lowering,check}`. Intermediate surface-only evidence
+is retained separately as `local/repair-bounded-{lowering,check}`.
