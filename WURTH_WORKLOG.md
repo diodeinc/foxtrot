@@ -1210,3 +1210,25 @@ sampler owns the complete trim, not isolated fragments. This is a behavior-only
 preserving refactor before changing sample allocation. Workspace tests pass;
 CNSA-1210's STL is byte-identical before/after with one worker thread. Updated
 full pass-11 per-file diagnostic exports: `.amp/in/artifacts/repair-pass11/`.
+
+### Sampling density belongs to the complete trim
+
+Allocate samples proportionally to the clipped fraction of the original knot
+span, with the complete directed trim length as the upper bound on that span.
+A genuinely short curved edge retains eight subdivisions, while a tiny seam
+fragment of a long loop receives one. Preserve every knot/corner and both trim
+endpoints; no coordinate snapping or facet deletion occurs. The periodic-cut
+regression fails before and passes after; the short-parabolic-trim and corner
+tests continue to pass. Workspace tests and eight checkpoints pass.
+
+CNSA-1210 now has zero face errors and zero f32 degenerates. Of the 347 pass-11
+Würth regressions, 110 now pass and 237 retain invalid facets; all face errors
+clear in this cohort. Two of six KiCad regressions pass, four retain invalid
+facets. Evidence: `local/repair-curve-density-{regressions,check,kicad}`.
+
+The remaining WCAP-AI3H-P10D22L30 facets expose a distinct sampling artifact:
+the shared endpoint and a smooth periodic seam sample differ by about 1e-12
+and become identical in f32, even without redundant subdivisions. Source
+curve #4785 has simple non-clamped knots and three exactly repeated closing
+controls, not a sharp seam. Faces #4778/#5927 are affected. Temporary probes
+are removed; retained trace: `local/cap-density-probe.log`. This is unresolved.

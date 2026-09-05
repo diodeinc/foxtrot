@@ -112,6 +112,7 @@ impl<const N: usize> SampledCurve<N>
 
     pub fn as_polyline(&self, ranges: &[(f64, f64)], num_points_per_knot: usize) -> Vec<DVec3> {
         assert!(num_points_per_knot > 0);
+        let trim_length: f64 = ranges.iter().map(|&(a, b)| (b - a).abs()).sum();
         let mut result = Vec::new();
         for &(u_start, u_end) in ranges {
             let (u_min, u_max) = if u_start < u_end {
@@ -121,15 +122,19 @@ impl<const N: usize> SampledCurve<N>
             };
             let mut segment = vec![self.curve.point(u_min)];
             for i in 0..self.curve.knots.len() - 1 {
-                // Sample the trimmed span itself. Filtering a whole-span grid
-                // can leave a short, curved trim with only its two endpoints.
                 let a = self.curve.knots[i].max(u_min);
                 let b = self.curve.knots[i + 1].min(u_max);
                 if a >= b {
                     continue;
                 }
-                for u in 0..num_points_per_knot {
-                    let frac = (u as f64) / (num_points_per_knot as f64);
+                // Density belongs to the original span and complete trim,
+                // not the fragments introduced by a periodic cut. A genuinely
+                // short trim still gets its own full sampling budget.
+                let span_length = self.curve.knots[i + 1] - self.curve.knots[i];
+                let count = (num_points_per_knot as f64 * ((b - a) / span_length.min(trim_length)))
+                    .ceil() as usize;
+                for u in 0..count {
+                    let frac = (u as f64) / (count as f64);
                     let u = a * (1.0 - frac) + b * frac;
                     if u > u_min && u < u_max {
                         segment.push(self.curve.point(u));
@@ -169,6 +174,22 @@ mod tests {
             KnotVector::from_multiplicities(1, &[-1., 0., 1., 2., 3., 4.], &[1; 6]),
             vec![DVec3::zeros(), DVec3::x(), DVec3::y(), DVec3::zeros()]));
         assert!(curve.samples.iter().all(|&(u, _)| u >= curve.min_u() && u <= curve.max_u()));
+    }
+
+    #[test]
+    fn periodic_cut_does_not_multiply_sampling_density() {
+        let corners = [DVec3::new(1., 1., 0.), DVec3::new(2., 1., 0.),
+            DVec3::new(2., 2., 0.), DVec3::new(1., 2., 0.), DVec3::new(1., 1., 0.)];
+        let curve = SampledCurve::new(NDBSplineCurve::new(false,
+            KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),
+            corners.to_vec()));
+        let start = 1e-6;
+        let points = curve.as_polyline(&[(start, 0.), (4., start)], 8);
+        assert_eq!(points[0], curve.curve.point(start));
+        assert_eq!(points.first(), points.last());
+        assert!(corners.iter().all(|corner| points.contains(corner)));
+        assert!(points.len() <= curve.as_polyline(&[(4., 0.)], 8).len() + 1);
+        assert!(points.windows(2).all(|p| p[0].map(|x| x as f32) != p[1].map(|x| x as f32)));
     }
 
     #[test]
