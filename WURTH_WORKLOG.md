@@ -1898,3 +1898,47 @@ explicitly skips `voids`. These are #1965, #1998, #2030, #2047 and #2074,
 not the five complex spline faces tentatively discussed in the research
 report. The STEP file and OCCT each contain 48 faces; OCCT did not split a
 43-face source. Fixing void traversal is the next behavior change.
+
+### Complete pass 18
+
+The continuous-sampling worker completes all 7,328 Würth inputs before all
+7,251 KiCad inputs, with exact coverage/hash verification. Würth: 6,987 ok /
+331 invalid_mesh / 7 tessellation_error / 3 parser rejections. KiCad: 7,217 ok
+/ 34 invalid_mesh. The full sweep confirms all 134 cohort recoveries and no
+status regressions versus pass 17. Per-file exports and transitions:
+`.amp/in/artifacts/repair-pass18/`. The 13 flagged f64 cases remain open.
+
+### Include oriented cavity shells
+
+Mesh the outer shell and every BREP_WITH_VOIDS cavity through the same face-set
+traversal. Resolve oriented open/closed shells to their concrete face set and
+orientation, rejecting a nested oriented element rather than recursing (WR1).
+False orientation reverses triangle winding and render normals, not the order
+of faces. The source definitions are
+https://www.steptools.com/docs/stp_aim/html/t_brep_with_voids.html and
+https://www.steptools.com/docs/stp_aim/html/t_oriented_closed_shell.html.
+
+All 131 workspace tests pass, including a toroidal cavity test against analytic
+solid-minus-void volume and normal/winding signs. CP_Radial now processes all
+48 faces in two shells, with zero face errors or f64/f32 degenerates. Its area
+is 583.6274 mm² versus OCCT's STL 566.2080 mm² (coarse comparison now passes).
+The cavity's exact OCCT area is 79.1681 mm² and the old outer mesh already
+overestimates its reference area: the remaining roughly 3% total difference
+is not resolved by counting the five restored faces. No full equivalence claim.
+Evidence: `local/curve-measure-cp/void-{metrics,comparison}.json` and
+`/tmp/void-shell-workspace-tests.log`.
+
+Scanned both full corpora for BREP_WITH_VOIDS/oriented-shell declarations and
+tested all matching inputs: 468 Würth (432 ok / 36 invalid_mesh), then 211
+KiCad (209 ok / 1 invalid_mesh / 1 tessellation_error). No formerly passing
+file fails. Bourns L34.3/W20.3 was already invalid and now exposes two curve-
+projection errors on newly visited cavity faces (surfaces #46027/#46037).
+Those underlying projection failures remain open; skipping the cavity is not
+a fix. Evidence: `local/repair-void-shell-{wurth,kicad}`, frozen
+`local/repair-void-shell-worker`. A temporary mesh/edge-provenance probe is
+frozen as `local/void-mesh-probe-worker`; instrumentation is removed.
+
+Compressed and gzip-verified historical pass-16/pass-17 per-case logs and
+completed continuous-sampling cohort STLs. These now use `.log.gz` and
+`.stl.gz`; reports, metrics, inputs and workers remain. This restores about
+7 GB while preserving evidence; free space is approximately 12–13 GB.

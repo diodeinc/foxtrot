@@ -534,9 +534,11 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                                 &styled_item_colors, default_color, shape.uncertainty);
                         },
                     Entity::BrepWithVoids(b) =>
-                        // TODO: handle voids
-                        shell(s, b.outer.cast(), &mut mesh, &mut stats,
-                            &styled_item_colors, default_color, shape.uncertainty),
+                        for c in std::iter::once(b.outer.cast())
+                            .chain(b.voids.iter().map(|c| c.cast())) {
+                            shell(s, c, &mut mesh, &mut stats,
+                                &styled_item_colors, default_color, shape.uncertainty);
+                        },
                     _ => {
                         warn!("Skipping {:?} (not a known solid)", s[*id]);
                     },
@@ -719,14 +721,24 @@ fn shell(
     default_color: DVec3,
     uncertainty: f64,
 ) {
-    let faces = match &s[c] {
-        Entity::ClosedShell(shell) => &shell.cfs_faces,
-        Entity::OpenShell(shell) => &shell.cfs_faces,
-        h => {
-            warn!("Skipping {:?} (unknown Shell type)", h);
-            return;
-        },
+    let data = match &s[c] {
+        Entity::ClosedShell(shell) => Some((&shell.cfs_faces, true)),
+        Entity::OpenShell(shell) => Some((&shell.cfs_faces, true)),
+        // WR1 forbids an oriented shell as the element of another oriented
+        // shell. Resolve the concrete face set once, without recursive cases.
+        Entity::OrientedClosedShell(shell) => s.entity(shell.closed_shell_element)
+            .map(|element| (&element.cfs_faces, shell.orientation)),
+        Entity::OrientedOpenShell(shell) => s.entity(shell.open_shell_element)
+            .map(|element| (&element.cfs_faces, shell.orientation)),
+        _ => None,
     };
+    let Some((faces, orientation)) = data else {
+        error!("Invalid shell or oriented shell element {:?}", c);
+        stats.num_errors += 1;
+        return;
+    };
+    let v_start = mesh.verts.len();
+    let t_start = mesh.triangles.len();
     for face in faces {
         if let Err(err) = advanced_face(
             s,
@@ -742,6 +754,14 @@ fn shell(
             // the console (console logging is expensive in wasm workers).
             stats.num_errors += 1;
             debug!("Failed to triangulate {:?}: {}", s[*face], err);
+        }
+    }
+    // conditional_reverse acts on face orientation, not face-set order.
+    // Reverse both render normals and geometric winding for cavity walls.
+    if !orientation {
+        for v in &mut mesh.verts[v_start..] { v.norm = -v.norm; }
+        for t in &mut mesh.triangles[t_start..] {
+            t.verts = U32Vec3::new(t.verts.x, t.verts.z, t.verts.y);
         }
     }
     stats.num_shells += 1;
@@ -1567,6 +1587,52 @@ fn resolve_crossing_edges(
 mod tests {
     use super::*;
     use nurbs::AbstractSurface;
+
+    #[test]
+    fn brep_voids_include_cavity_faces_with_reversed_normals_and_volume() {
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(0.,0.,0.));
+            #2=DIRECTION('',(0.,0.,1.));
+            #3=DIRECTION('',(1.,0.,0.));
+            #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+            #5=TOROIDAL_SURFACE('',#4,4.,1.);
+            #6=TOROIDAL_SURFACE('',#4,4.,0.5);
+            #7=CARTESIAN_POINT('',(5.,0.,0.));
+            #8=CARTESIAN_POINT('',(4.5,0.,0.));
+            #9=VERTEX_POINT('',#7);
+            #10=VERTEX_POINT('',#8);
+            #11=VERTEX_LOOP('',#9);
+            #12=VERTEX_LOOP('',#10);
+            #13=FACE_BOUND('',#11,.T.);
+            #14=FACE_BOUND('',#12,.T.);
+            #15=ADVANCED_FACE('',(#13),#5,.T.);
+            #16=ADVANCED_FACE('',(#14),#6,.T.);
+            #17=CLOSED_SHELL('',(#15));
+            #18=CLOSED_SHELL('',(#16));
+            #19=ORIENTED_CLOSED_SHELL('',*,#18,.F.);
+            #20=BREP_WITH_VOIDS('',#17,(#19));
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let (mesh, stats) = triangulate(&step);
+        assert_eq!((stats.num_shells, stats.num_faces, stats.num_errors), (2, 2, 0));
+        let mut volume = 0.;
+        for t in &mesh.triangles {
+            let [a, b, c] = [t.verts.x, t.verts.y, t.verts.z]
+                .map(|i| mesh.verts[i as usize]);
+            let cross = (b.pos - a.pos).cross(&(c.pos - a.pos));
+            assert!(cross.dot(&a.norm) > 0.);
+            volume += a.pos.dot(&b.pos.cross(&c.pos)) / 6.;
+        }
+        let expected = 2. * std::f64::consts::PI.powi(2) * 4. * (1. - 0.25);
+        assert!((volume / expected - 1.).abs() < 0.02);
+        for v in &mesh.verts {
+            let center = DVec3::new(v.pos.x, v.pos.y, 0.).normalize() * 4.;
+            let radial = v.pos - center;
+            let expected_sign = if radial.norm() > 0.75 { 1. } else { -1. };
+            assert!(v.norm.dot(&radial) * expected_sign > 0.);
+        }
+    }
 
     #[test]
     fn seam_only_and_vertex_loop_faces_cover_a_complete_torus() {
