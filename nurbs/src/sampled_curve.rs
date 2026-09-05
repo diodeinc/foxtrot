@@ -1,36 +1,6 @@
 use nalgebra_glm::{dot, DVec3};
 use crate::{abstract_curve::AbstractCurve, nd_curve::NDBSplineCurve};
 
-// Remove only vertices whose deletion leaves the represented 3D polyline
-// exactly unchanged. In particular, preserve corners and collinear reversals.
-fn simplify_polyline(points: &mut Vec<DVec3>) {
-    let between = |a: DVec3, b: DVec3, c: DVec3| {
-        if (0..3).any(|i| b[i] < a[i].min(c[i]) || b[i] > a[i].max(c[i])) {
-            return false;
-        }
-        // Stay within the exact orientation predicates' exponent envelope.
-        // Outside it, retain samples rather than risk deleting real curvature.
-        if [a, b, c].iter().flat_map(|p| p.iter()).any(|&v|
-            !v.is_finite() || (v != 0.0 && (v.abs() < 2.0_f64.powi(-142) || v.abs() > 2.0_f64.powi(201)))) {
-            return false;
-        }
-        (0..3).all(|i| {
-            let project = |p: DVec3| robust::Coord { x: p[i], y: p[(i + 1) % 3] };
-            robust::orient2d(project(a), project(b), project(c)) == 0.0
-        })
-    };
-    let mut kept = 0;
-    for i in 0..points.len() {
-        let p = points[i];
-        while kept >= 2 && between(points[kept - 2], points[kept - 1], p) {
-            kept -= 1;
-        }
-        points[kept] = p;
-        kept += 1;
-    }
-    points.truncate(kept);
-}
-
 #[derive(Debug)]
 pub struct SampledCurve<const N: usize> {
     curve: NDBSplineCurve<N>,
@@ -169,7 +139,6 @@ impl<const N: usize> SampledCurve<N>
             }
         }
         result.push(self.curve.point(u_max));
-        simplify_polyline(&mut result);
 
         if u_start > u_end {
             result.reverse();
@@ -182,31 +151,6 @@ impl<const N: usize> SampledCurve<N>
 mod tests {
     use super::*;
     use crate::KnotVector;
-
-    #[test]
-    fn polyline_reduction_preserves_bends_reversals_and_small_curvature() {
-        let a = DVec3::zeros();
-        let b = DVec3::new(1., 2., 3.);
-        let c = b * 2.;
-        let mut line = vec![a, b, c];
-        simplify_polyline(&mut line);
-        assert_eq!(line, vec![a, c]);
-        for points in [vec![a, b, a], vec![a, b, DVec3::new(2., 4., 6. + 1e-14)],
-                       vec![a, b * 1e-200, DVec3::new(2e-200, 4e-200, 7e-200)]] {
-            let mut reduced = points.clone();
-            simplify_polyline(&mut reduced);
-            assert_eq!(reduced, points);
-        }
-    }
-
-    #[test]
-    fn straight_high_degree_trims_do_not_create_redundant_vertices() {
-        let curve = SampledCurve::new(NDBSplineCurve::new(true,
-            KnotVector::from_multiplicities(3, &[0., 1.], &[4, 4]),
-            (0..4).map(|i| DVec3::new(i as f64, -0.107370820668693, 0.4)).collect()));
-        let points = curve.as_polyline(0.4, 0.40000001, 8);
-        assert_eq!(points, vec![curve.curve.point(0.4), curve.curve.point(0.40000001)]);
-    }
 
     #[test]
     fn short_trims_sample_their_own_knot_interval() {

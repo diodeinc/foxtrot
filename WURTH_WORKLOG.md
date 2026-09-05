@@ -1000,3 +1000,15 @@ the two Bourns models also contain six f64-degenerate facets each. This repairs
 crossing classification, not the final meshes. Evidence:
 `local/repair-predicate-{check,crossings}`. The pre-existing splitter iteration
 limit and representable intersection construction remain separate concerns.
+
+### Polyline ownership refactor
+
+Move exact polyline reduction from the NURBS sampler into the sole STEP edge
+consumer, retaining reduction before endpoint replacement for this refactor.
+The sampler now supplies samples and the edge builder owns their reduction;
+there is no new wrapper or configuration branch. Move reduction tests with
+the responsibility. Workspace tests and eight checkpoints pass with unchanged
+vertex/triangle/error counts. WR-MJ's complete STL facet multiset is byte-identical
+between frozen workers (digest `ba285c587e894f0118b64ee0118bd1107d578ccd165af774825e86712e6be4b9`).
+Tiny area-sum changes in three checkpoint reports arise from ordering, not new
+geometry. Evidence: `local/repair-polyline-owner-check`.
