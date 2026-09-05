@@ -145,16 +145,17 @@ impl<const D: usize> NDBSplineSurface<D> {
         let q = self.v_knots.degree();
 
         let uind = uspan - p;
+        let origin = self.control_points[uind][vspan - q];
         let mut S = TVec::zeros();
         for l in 0..=q {
             let mut temp = TVec::zeros();
             let vind = vspan - q + l;
             for k in 0..=p {
-                temp += Nu[k] * self.control_points[uind + k][vind];
+                temp += Nu[k] * (self.control_points[uind + k][vind] - origin);
             }
             S += Nv[l] * temp;
         }
-        S
+        S + origin
     }
 
     /// Returns all derivatives of the surface.  If `D = surface_derivs()`,
@@ -182,12 +183,15 @@ impl<const D: usize> NDBSplineSurface<D> {
         let vspan = self.v_knots.find_span(uv.y);
         let Nv_deriv = self.v_knots.basis_funs_derivs_for_span(vspan, uv.y, dv);
 
+        // Tensor-product partition of unity removes the common coordinate
+        // offset from every derivative, including mixed partial derivatives.
+        let origin = self.control_points[uspan - p][vspan - q];
         let mut temp = vec![TVec::zeros(); q + 1];
         for k in 0..=du {
             for s in 0..=q {
                 temp[s] = TVec::zeros();
                 for r in 0..=p {
-                    temp[s] += Nu_deriv[k][r] * self.control_points[uspan - p + r][vspan - q + s];
+                    temp[s] += Nu_deriv[k][r] * (self.control_points[uspan - p + r][vspan - q + s] - origin);
                 }
             }
             let dd = min(E - k, dv);
@@ -197,6 +201,7 @@ impl<const D: usize> NDBSplineSurface<D> {
                 }
             }
         }
+        SKL[0][0] += origin;
         SKL
     }
 
@@ -233,6 +238,23 @@ impl<const D: usize> NDBSplineSurface<D> {
 mod tests {
     use super::*;
     use nalgebra_glm::DVec4;
+
+    #[test]
+    fn constant_coordinates_have_exactly_zero_derivatives() {
+        let knots = || KnotVector::from_multiplicities(2, &[0., 0.01], &[3, 3]);
+        let surface = NDBSplineSurface::new(true, true, knots(), knots(),
+            (0..3).map(|i| (0..3).map(|j|
+                DVec4::new(8.58999999999999, i as f64, (j * j) as f64, 1.)).collect()).collect());
+        for i in 0..=16 {
+            let uv = DVec2::new(0.01 * i as f64 / 16., 0.0037);
+            assert_eq!(surface.surface_point(uv).x, 8.58999999999999);
+            let derivatives = surface.surface_derivs::<2>(uv);
+            assert_eq!(derivatives[0][0].x, 8.58999999999999);
+            for k in 0..=2 { for l in 0..=2-k {
+                if k + l > 0 { assert_eq!(derivatives[k][l].x, 0.); }
+            } }
+        }
+    }
 
     #[test]
     fn bilinear_plane_recognition_is_exact_and_rejects_folds() {

@@ -40,11 +40,12 @@ impl<const D: usize> NDBSplineCurve<D> {
         let span = self.knots.find_span(u);
         let N = self.knots.basis_funs_for_span(span, u);
 
+        let origin = self.control_points[span - p];
         let mut C = TVec::zeros();
         for i in 0..=p {
-            C += N[i] * self.control_points[span - p + i]
+            C += N[i] * (self.control_points[span - p + i] - origin)
         }
-        C
+        C + origin
     }
 
     /// Computes the derivatives of the curve of order up to and including `d` at location `t`,
@@ -59,12 +60,17 @@ impl<const D: usize> NDBSplineCurve<D> {
         let span = self.knots.find_span(u);
         let N_derivs = self.knots.basis_funs_derivs_for_span(span, u, du);
 
+        // Partition of unity: a constant contributes only to the position,
+        // never its derivatives. Evaluate local differences before summation
+        // instead of cancelling large translated control coordinates.
+        let origin = self.control_points[span - p];
         let mut CK = vec![TVec::zeros(); E + 1];
         for k in 0..=du {
             for j in 0..=p {
-                CK[k] += N_derivs[k][j] * self.control_points[span - p + j]
+                CK[k] += N_derivs[k][j] * (self.control_points[span - p + j] - origin)
             }
         }
+        CK[0] += origin;
         CK
     }
 
@@ -100,5 +106,25 @@ impl<const D: usize> NDBSplineCurve<D> {
             result.reverse();
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra_glm::DVec3;
+
+    #[test]
+    fn constant_coordinates_have_exactly_zero_derivatives() {
+        let curve = NDBSplineCurve::new(true,
+            KnotVector::from_multiplicities(3, &[0., 0.0396321528446033, 0.0396624224503112], &[4, 3, 4]),
+            (0..7).map(|i| DVec3::new(i as f64, (i * i) as f64, 8.58999999999999)).collect());
+        for i in 0..=32 {
+            let u = curve.max_u() * i as f64 / 32.;
+            assert_eq!(curve.curve_point(u).z, 8.58999999999999);
+            let derivatives = curve.curve_derivs::<3>(u);
+            assert_eq!(derivatives[0].z, 8.58999999999999);
+            assert!(derivatives[1..].iter().all(|d| d.z == 0.));
+        }
     }
 }

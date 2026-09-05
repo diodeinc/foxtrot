@@ -615,3 +615,17 @@ both adjacent representable parameters. Of the 20 selected Würth curve-failure
 files, 17 now strictly pass, one has only mesh degeneracy, and two retain other
 projection nonconvergence. Both selected KiCad files remain nonconvergent and
 require a separate RCA. Reports: `local/{wurth,kicad}-quantization-check`.
+
+The remaining FLYLT EP7 projection cycle is traced below the optimizer. All
+seven curve controls have exactly the same z=8.58999999999999, but direct sums
+of derivative basis coefficients times translated controls produce a nonzero
+z derivative. Its normal-offset target amplifies this false tangential signal.
+Curve and tensor-product surface evaluation now use differences from one local
+control, adding that control back only to the position. Partition of unity
+makes this algebraically identical while preserving constant coordinates and
+their zero derivatives exactly, without tolerances or extra optimizer states.
+Both constant-coordinate regression tests fail before the fix and pass after.
+Workspace tests and all eight strict checkpoints pass (`local/repair-partition-check`).
+FLYLT now processes all 518 faces with zero errors/panics/f64 degenerates;
+`local/flylt-partition.log` has no projection nonconvergence. Other remaining
+curves still need separate positive-curvature/knot-side treatment.
