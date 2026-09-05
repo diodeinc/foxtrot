@@ -107,6 +107,10 @@ pub enum Surface {
 
 impl Surface {
     pub fn new_nurbs(surf: SampledSurface<4>) -> Self {
+        if let Some(normal) = surf.surf.bilinear_plane_normal() {
+            return Self::new_plane(normal, DVec3::zeros(), DVec3::zeros())
+                .expect("regular planar patch has a nonzero finite normal");
+        }
         let u_periodic = !surf.surf.u_open;
         let v_periodic = !surf.surf.v_open;
         let chart = if u_periodic ^ v_periodic {
@@ -1399,6 +1403,31 @@ mod tests {
         assert_eq!(points.len(), 4 + 16 * 16);
         assert_eq!(vertices.len(), 16 * 16);
         assert!(vertices.iter().all(|vertex| vertex.norm.norm() > 0.99));
+    }
+
+    #[test]
+    fn planar_bilinear_splines_use_world_coordinate_predicates() {
+        let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
+            true, true,
+            KnotVector::from_multiplicities(1, &[-1., 7.5], &[2, 2]),
+            KnotVector::from_multiplicities(1, &[-6.17, 1.], &[2, 2]),
+            vec![vec![DVec4::new(18., 4.665, -3.75, 1.), DVec4::new(18., 4.665, 3.42, 1.)],
+                 vec![DVec4::new(18., -3.835, -3.75, 1.), DVec4::new(18., -3.835, 3.42, 1.)]],
+        )));
+        assert!(matches!(surface, Surface::Plane { .. }));
+        let mut vertices: Vec<_> = [(3.665, -3.75), (4.665, -3.75), (4.665, 3.42), (3.665, 3.42)]
+            .iter().map(|&(y, z)| Vertex { pos: DVec3::new(18., y, z), norm: DVec3::zeros(), color: DVec3::zeros() }).collect();
+        let mut points: Vec<_> = vertices.iter().map(|v| {
+            let uv = surface.lower(v.pos).unwrap(); (uv.x, uv.y)
+        }).collect();
+        surface.add_steiner_points(&mut points, &mut vertices);
+        assert_eq!(vertices.len(), 4, "flat patches require no curvature samples");
+        let t = cdt::Triangulation::build_with_edges(&points, &[(0, 1), (1, 2), (2, 3), (3, 0)]).unwrap();
+        let area: f64 = t.triangles().map(|(a, b, c)| {
+            let area = (vertices[b].pos - vertices[a].pos).cross(&(vertices[c].pos - vertices[a].pos)).norm() * 0.5;
+            assert!(area > 0.); area
+        }).sum();
+        assert!((area - 7.17).abs() < 1e-12);
     }
 
     #[test]

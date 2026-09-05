@@ -562,3 +562,22 @@ alone does not resolve the planar spline chart defect: WR-TBL's floating-cross-
 zero count changes from 112 to 224 as the CDT changes. The next independently
 verified geometry reduction addresses that root cause rather than keeping
 redundant samples to accidentally influence the triangulator.
+
+Concrete f64-degeneracy RCA: WR-TBL 691313710008 contains 16 affected planar
+bilinear spline faces. On surface #1089, boundary inversion returns nominally
+zero u as values ranging from -1.3e-15 to +2.14e-13. Curvature samples at u=0
+then form positive-area chart slivers whose raised world points all have
+x=18 and y=3.665: they are exactly collinear. The diagnostic worker and logs
+are retained as `local/repair-degen-probe-worker`, `local/tbl-degen.log` and
+`local/tbl-uv.log`; temporary production instrumentation is removed.
+
+Convex, constant-weight bilinear patches now reduce to the existing Plane
+representation when exact robust predicates establish coplanarity and strict
+convexity. This bypasses both iterative inversion and unnecessary curvature
+sampling. One-ulp warped, folded, variable-weight and unsafe-predicate-range
+inputs do not take this reduction. Tests cover rotated planes, homogeneous
+weight scaling, one-ulp rejection, and a trimmed world-coordinate rectangle.
+All eight checkpoints pass in `local/repair-bilinear-check`. WR-TBL now has
+53,396 triangles (down from 228,454), zero face errors/panics, zero f64 or f32
+degenerates, and passes the unchanged strict mesh validator. A full sweep of
+the combined fixes is still required; known OCCT discrepancies remain open.

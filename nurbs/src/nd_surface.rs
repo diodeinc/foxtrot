@@ -11,6 +11,46 @@ pub struct NDBSplineSurface<const D: usize> {
     control_points: Vec<Vec<TVec<f64, D>>>,
 }
 
+impl NDBSplineSurface<4> {
+    /// A convex, constant-weight bilinear patch is a regular plane exactly
+    /// when its four controls are coplanar. No geometric tolerance is used.
+    pub fn bilinear_plane_normal(&self) -> Option<DVec3> {
+        if self.u_knots.degree() != 1 || self.v_knots.degree() != 1
+            || self.control_points.len() != 2
+            || self.control_points.iter().any(|row| row.len() != 2) {
+            return None;
+        }
+        let controls = [&self.control_points[0][0], &self.control_points[1][0],
+            &self.control_points[1][1], &self.control_points[0][1]];
+        let weight = controls[0].w;
+        if weight == 0.0 || !weight.is_finite() || controls.iter().any(|p| p.w != weight) {
+            return None;
+        }
+        // Equal weights allow predicates on the homogeneous numerators,
+        // avoiding division roundoff. Respect exact-predicate exponent bounds.
+        let points = controls.map(|p| DVec3::new(p.x, p.y, p.z));
+        if points.iter().flat_map(|p| p.iter()).any(|&v|
+            !v.is_finite() || (v != 0.0 && (v.abs() < 2.0_f64.powi(-142) || v.abs() > 2.0_f64.powi(201)))) {
+            return None;
+        }
+        let xyz = points.map(|p| robust::Coord3D { x: p.x, y: p.y, z: p.z });
+        if robust::orient3d(xyz[0], xyz[1], xyz[2], xyz[3]) != 0.0 {
+            return None;
+        }
+        let normal = (points[1] - points[0]).cross(&(points[3] - points[0]));
+        let dropped = normal.iamax();
+        if normal[dropped] == 0.0 { return None; }
+        let coordinates = [(dropped + 1) % 3, (dropped + 2) % 3];
+        let xy = points.map(|p| robust::Coord { x: p[coordinates[0]], y: p[coordinates[1]] });
+        // Strict convexity excludes collapsed or folded parameterizations.
+        if (0..4).any(|i| robust::orient2d(xy[i], xy[(i + 1) % 4], xy[(i + 2) % 4])
+            * normal[dropped].signum() <= 0.0) {
+            return None;
+        }
+        Some(normal)
+    }
+}
+
 /// Non-rational b-spline surface with 3D control points
 impl<const D: usize> NDBSplineSurface<D> {
     pub fn new(
@@ -193,6 +233,28 @@ impl<const D: usize> NDBSplineSurface<D> {
 mod tests {
     use super::*;
     use nalgebra_glm::DVec4;
+
+    #[test]
+    fn bilinear_plane_recognition_is_exact_and_rejects_folds() {
+        let knots = || KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
+        let controls = vec![
+            vec![DVec4::new(1., 2., 3., 1.), DVec4::new(2., 2., 6., 1.)],
+            vec![DVec4::new(3., 3., 3., 1.), DVec4::new(4., 3., 6., 1.)],
+        ];
+        let mut surface = NDBSplineSurface::new(true, true, knots(), knots(), controls);
+        let normal = DVec3::new(2., 1., 0.).cross(&DVec3::new(1., 0., 3.));
+        assert_eq!(surface.bilinear_plane_normal(), Some(normal));
+        for row in &mut surface.control_points { for point in row { *point *= 8.; } }
+        assert_eq!(surface.bilinear_plane_normal(), Some(normal * 64.));
+        let saved = surface.control_points[1][1];
+        surface.control_points[1][1].z = f64::from_bits(saved.z.to_bits() + 1);
+        assert!(surface.bilinear_plane_normal().is_none(), "one-ulp warp is not a plane");
+        surface.control_points[1][1] = surface.control_points[0][0];
+        assert!(surface.bilinear_plane_normal().is_none(), "folded patch is not a regular plane");
+        surface.control_points[1][1] = saved;
+        surface.control_points[1][1].w *= 2.;
+        assert!(surface.bilinear_plane_normal().is_none(), "variable weights need the rational chart");
+    }
 
     #[test]
     fn collapsed_boundary_uses_actual_nonclamped_endpoint_basis() {
