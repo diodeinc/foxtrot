@@ -291,3 +291,65 @@ all **5,093** KiCad CDT failures tied to exact return sites. The machine-readabl
 [coverage record](.amp/in/artifacts/corpus-coverage.json) retains these checks.
 `git diff --check` reports no whitespace errors. Temporary probe source and
 orchestration scripts are removed; no shared state is changed or code pushed.
+
+## Fundamental repair phase — 2026-09-05 (in progress)
+
+The user now requests repairs, separate local commits for each logical change,
+and full verification. The assessment above remains the immutable baseline;
+this section does **not** claim that all failures are fixed.
+
+Implemented and committed locally:
+
+- `18a48c3`: count failed faces in both shell types (10 unit tests and the
+  checked-in-model integration test pass; 19 harness tests pass).
+- `337b396`: preserve the complete baseline worklog.
+- `3dc446d`: parse ISO logical unknown as `.U.`, not `.UNKNOWN.`.
+- `2cfbfb9`: fallible STEP lexical/structural parsing. Preserve whitespace and
+  delimiters inside literals, handle doubled apostrophes and comments, reject
+  missing sections/unterminated records instead of panicking. Callers propagate
+  errors; out-of-range typed entity lookup returns `None`. Seven STEP tests
+  pass, and the supported workspace tests pass. Borrowed strings retain escaped
+  apostrophes, and legacy non-ASCII byte replacement remains a limitation.
+  Both Parasolid inputs now return a parse error without panic; they are still
+  invalid STEP inputs, not successful geometry conversions.
+- `50be439`: exact hyperbola and parabola edges with endpoint-derived direction
+  and adaptive tangent-angle sampling. All 16 affected KiCad models replayed:
+  all 95 unsupported-conic errors eliminated; five unrelated face errors remain
+  (one crossing constraint and four revolutions). Thirteen models have no face
+  errors at this checkpoint; `/dev/null` STL replay is not mesh verification.
+- `5ef65d8`: use exact orientation for CDT seed selection and reject a missing
+  noncollinear seed instead of reusing index zero and corrupting the remap.
+- `8d55632`: sort radial sweep distances around the actual seed center, not the
+  old bounding-box center. Remove the invalid seed comparator and its repair
+  branches by keeping seed indices outside the sort. Fourteen CDT unit tests
+  and two documentation tests pass.
+- `0d0fa20`, `ebcab4b`: represent linear extrusions and revolutions as exact
+  homogeneous tensor-product NURBS, reusing existing surface evaluation rather
+  than adding projection/normal special cases. Constructor point/normal tests
+  pass. All 79 affected Würth and 563 affected KiCad models replayed through a
+  dedicated worker: all 414 + 187 and 2,845 + 1,944 unsupported swept-surface
+  errors eliminated. Other tessellation errors remain; meshes were not checked
+  in this fast support-only replay.
+
+The conic equations follow ISO 10303-42 geometry_schema §§4.5.28–29 as published
+by STEP Tools. Sweeps use the homogeneous affine extrusion and exact rational
+quadratic circle product, not fitted geometry or per-model substitutions.
+
+The seven-model strict CDT checkpoint is `local/repair-cdt-order/report.md`.
+One previously failed model (`97730256332R`) becomes valid under the existing
+STL checks; others still fail, and `79527141` increases from two to three face
+errors. This is evidence that sorting alone is not a complete CDT fix.
+
+OCCT is installed in `local/occt-venv` for independent checks. The first check
+of `97730256332R` is **inconclusive**, not a pass:
+`local/repair-order-occt/report.md` reports `oracle_invalid_mesh` because OCCT's
+STL contains one degenerate facet. Foxtrot has no degenerate facets in this run,
+but its surface area is 51.2314 versus OCCT's 50.3344 and signed volume is
+19.1981 versus 19.4880. These discrepancies still need investigation. No mesh
+validation rules or oracle failures have been suppressed.
+
+Next ownership issue identified in CDT: constraint walking assumes every
+intermediate collinear vertex belongs to the exterior hull. Interior vertices
+do not have hull slots; the walk must follow incident triangle edges instead.
+Zero-area surface charts, precision collapse, and malformed geometry references
+also remain open. Full repaired-corpus verification is still pending.
