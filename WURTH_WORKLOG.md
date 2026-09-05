@@ -684,3 +684,17 @@ not new full-corpus totals. Remaining CrossingFixedEdge diagnostics occur in
 bridge whose torus seam uses the same EDGE_CURVE forward and backward. The
 current implementation resamples it separately in opposite parameter directions;
 the next investigation is exact consistency of those two discretizations.
+
+Confirmed: the forward/reversed samples of the same test-point circular edge
+are not identical. A regression for trimmed and closed edges, both same_sense
+values, fails before the fix. EDGE_CURVE now owns a canonical discretization;
+ORIENTED_EDGE only reverses its point order. This removes orientation from curve
+construction and eliminates direction-dependent floating-point seam slivers
+without snapping or special-case curve types. Workspace tests and the eight
+strict checkpoints pass. TestPoint_Bridge_Pitch2.54mm_Drill1.0mm now meshes all
+five faces with 334 triangles and no errors or degenerates. Its independent
+OCCT comparison still fails: the torus interior uses only two radial sample
+rings even over a half revolution, missing the bridge apex (z=1.84625 versus
+the analytic 2.07). That under-resolution requires a separate meshing change.
+Evidence: `local/testpoint-canonical-{check,occt}`, `local/repair-canonical-check`.
+All 512/744 pass-5 failures are being rechecked with `local/repair-canonical-worker`.

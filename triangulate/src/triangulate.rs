@@ -1318,35 +1318,33 @@ fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge])
 
 fn edge_curve(s: &StepFile, e: EdgeCurve, orientation: bool) -> Result<Vec<DVec3>, Error> {
     let edge_curve = s.entity(e).ok_or(Error::InvalidStepEntity("EdgeCurve"))?;
-    let curve = curve(s, edge_curve, edge_curve.edge_geometry, orientation)?;
-
-    let (start, end) = if orientation {
-        (edge_curve.edge_start, edge_curve.edge_end)
-    } else {
-        (edge_curve.edge_end, edge_curve.edge_start)
-    };
+    let curve = curve(s, edge_curve, edge_curve.edge_geometry)?;
     let is_loop = edge_curve.edge_start == edge_curve.edge_end;
-    let u = vertex_point(s, start)?;
-    let v = vertex_point(s, end)?;
-    curve.build(u, v, is_loop)
+    let u = vertex_point(s, edge_curve.edge_start)?;
+    let v = vertex_point(s, edge_curve.edge_end)?;
+    // EDGE_CURVE owns its discretization. ORIENTED_EDGE changes traversal
+    // only: resampling backward creates numerically different seam geometry.
+    let mut points = curve.build(u, v, is_loop)?;
+    if !orientation { points.reverse(); }
+    Ok(points)
 }
 
 fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
-         curve_id: ap214::Curve, orientation: bool) -> Result<Curve, Error>
+         curve_id: ap214::Curve) -> Result<Curve, Error>
 {
     Ok(match &s[curve_id] {
         Entity::Circle(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position.cast())?;
             Curve::new_circle(location, axis, ref_direction, c.radius.0.0.0,
                               edge_curve.edge_start == edge_curve.edge_end,
-                              edge_curve.same_sense ^ !orientation)?
+                              edge_curve.same_sense)?
         },
         Entity::Ellipse(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position.cast())?;
             Curve::new_ellipse(location, axis, ref_direction,
                                c.semi_axis_1.0.0.0, c.semi_axis_2.0.0.0,
                                edge_curve.edge_start == edge_curve.edge_end,
-                               edge_curve.same_sense ^ !orientation)?
+                               edge_curve.same_sense)?
         },
         Entity::Hyperbola(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position.cast())?;
@@ -1380,7 +1378,7 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
             );
             Curve::BSplineCurveWithKnots {
                 curve: SampledCurve::new(curve),
-                dir: edge_curve.same_sense ^ !orientation,
+                dir: edge_curve.same_sense,
             }
         },
         Entity::ComplexEntity(v) if v.len() == 2 => {
@@ -1418,14 +1416,14 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
             );
             Curve::NURBSCurve {
                 curve: SampledCurve::new(curve),
-                dir: edge_curve.same_sense ^ !orientation,
+                dir: edge_curve.same_sense,
             }
         },
         Entity::SurfaceCurve(v) => {
-            curve(s, edge_curve, v.curve_3d, orientation)?
+            curve(s, edge_curve, v.curve_3d)?
         },
         Entity::SeamCurve(v) => {
-            curve(s, edge_curve, v.curve_3d, orientation)?
+            curve(s, edge_curve, v.curve_3d)?
         },
         // The Line type ignores pnt / dir and just uses u and v
         Entity::Line(_) => Curve::new_line(),
@@ -1570,6 +1568,35 @@ fn resolve_crossing_edges(
 mod tests {
     use super::*;
     use nurbs::AbstractSurface;
+
+    #[test]
+    fn oriented_edges_share_exactly_the_same_curve_discretization() {
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(0.4,1.E-15,0.4));
+            #2=CARTESIAN_POINT('',(2.14,1.E-15,0.4));
+            #3=VERTEX_POINT('',#1);
+            #4=VERTEX_POINT('',#2);
+            #5=CARTESIAN_POINT('',(1.27,9.E-16,0.4));
+            #6=DIRECTION('',(0.,1.,-2.2E-16));
+            #7=DIRECTION('',(1.,0.,0.));
+            #8=AXIS2_PLACEMENT_3D('',#5,#6,#7);
+            #9=CIRCLE('',#8,0.87);
+            #10=EDGE_CURVE('',#3,#4,#9,.T.);
+            #11=EDGE_CURVE('',#3,#3,#9,.T.);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let mut step = StepFile::parse(&flat).unwrap();
+        for sense in [true, false] {
+            for id in [10, 11] {
+                let Entity::EdgeCurve(edge) = &mut step.0[id] else { panic!() };
+                edge.same_sense = sense;
+                let forward = edge_curve(&step, Id::new(id), true).unwrap();
+                let mut backward = edge_curve(&step, Id::new(id), false).unwrap();
+                backward.reverse();
+                assert_eq!(forward, backward);
+            }
+        }
+    }
 
     #[test]
     fn shape_uncertainty_uses_its_own_context_and_native_units() {
