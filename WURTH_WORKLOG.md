@@ -1725,3 +1725,31 @@ extrusion regression, which fails before this change. Evidence:
 `/tmp/knot-candidate-before.log`, `/tmp/knot-descent-workspace-tests.log`,
 `local/repair-knot-descent-{wurth,kicad}`; frozen
 `local/repair-knot-descent-worker`.
+
+### Retain both intersection endpoint weights
+
+Compute both barycentric weights directly from the oriented areas instead of
+recovering the small weight as one minus the large one. Interpolate UV and
+XYZ relative to the nearer endpoint. Use both weights to order split records
+when the large weights round equal. This preserves constant coordinates and
+representable endpoint offsets in either edge direction, without an epsilon.
+The regression fails before the change: a reversed intersection 1e-20 from
+an endpoint is collapsed into the endpoint. It passes after; workspace tests,
+the 121-crossing arrangement, boundary ownership checks and eight checkpoints
+pass. Frozen worker: `local/repair-intersection-relative-worker`; evidence:
+`/tmp/intersection-relative-{before,workspace-tests}.log` and
+`local/repair-intersection-relative-{investigate,check,kicad}`.
+
+The 36-file investigation cohort is 8 ok / 20 invalid_mesh / 8 face errors;
+the 19 KiCad investigations are 16 ok / 3 invalid_mesh. These figures include
+the preceding knot-candidate changes, not just interpolation. A newly exposed
+CMB-XS 744821110 projection error on surface #849 reproduces with the earlier
+frozen knot-descent worker and is not caused by this arithmetic change.
+
+Accurate interpolation still permits a generated intersection to round to an
+existing endpoint's XYZ while retaining a distinct UV. KI-0603 has two such
+intersections (#77/#78 both equal endpoint #3), now exposing three f64
+degenerates rather than one; Bourns L39.4/W20.3 similarly goes from six to
+eight. These are not repaired. Their representable construction identity must
+be reconciled before CDT, without welding intentional seams/poles. Traces:
+`local/{ki,cmanc}-endpoint.log`; the temporary instrumentation is removed.

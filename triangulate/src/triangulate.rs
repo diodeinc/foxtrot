@@ -1516,13 +1516,13 @@ fn cancel_retraced_edges(pts: &[(f64, f64)], edges: &mut Vec<(usize, usize)>) {
         .filter_map(|(edge, odd)| if odd { Some(edge) } else { None }).collect();
 }
 
-/// Compute intersection parameters (t, s) for segments A-B and C-D.
-/// Returns Some((t, s)) if the segments cross at interior points (not
-/// at endpoints), where the intersection is at A + t*(B-A) = C + s*(D-C).
-fn segment_intersection_params(
+/// Endpoint weights for proper interior intersections of A-B and C-D.
+/// Retain both weights: subtracting a rounded weight from one can erase a
+/// representable displacement near the opposite endpoint.
+fn segment_intersection_weights(
     a: (f64, f64), b: (f64, f64),
     c: (f64, f64), d: (f64, f64),
-) -> Option<(f64, f64)> {
+) -> Option<([f64; 2], [f64; 2])> {
     let coord = |(x, y)| robust::Coord { x, y };
     let ca = robust::orient2d(coord(c), coord(d), coord(a));
     let cb = robust::orient2d(coord(c), coord(d), coord(b));
@@ -1533,7 +1533,11 @@ fn segment_intersection_params(
     // Topology uses exact predicate signs, not a length or parameter epsilon.
     // The same signed areas give parameters without a near-parallel division
     // whose numerator and denominator both suffer cancellation.
-    Some((ca.abs() / (ca.abs() + cb.abs()), ac.abs() / (ac.abs() + ad.abs())))
+    let weights = |a: f64, b: f64| {
+        let sum = a.abs() + b.abs();
+        [b.abs() / sum, a.abs() / sum]
+    };
+    Some((weights(ca, cb), weights(ac, ad)))
 }
 
 /// Split all proper constraint intersections in batches. Both children retain
@@ -1573,18 +1577,22 @@ fn resolve_crossing_edges(
                 || edges[i].1 == edges[j].0 || edges[i].1 == edges[j].1 {
                     continue;
                 }
-                if let Some((t, s)) = segment_intersection_params(
+                if let Some((t, s)) = segment_intersection_weights(
                     pts[edges[i].0], pts[edges[i].1], pts[edges[j].0], pts[edges[j].1],
                 ) {
-                    let (a, b) = (pts[edges[i].0], pts[edges[i].1]);
-                    let p = (a.0 * (1.0 - t) + b.0 * t, a.1 * (1.0 - t) + b.1 * t);
+                    // The nearer endpoint anchors both chart and geometry.
+                    // Constant coordinates stay constant under interpolation.
+                    let (a, b, f) = if t[1] <= t[0] { (edges[i].0, edges[i].1, t[1]) }
+                        else { (edges[i].1, edges[i].0, t[0]) };
+                    let (pa, pb) = (pts[a], pts[b]);
+                    let p = (pa.0 + (pb.0 - pa.0) * f, pa.1 + (pb.1 - pa.1) * f);
                     let index = *vertices.entry(key(p)).or_insert_with(|| {
-                        let va = verts[v_start + edges[i].0];
-                        let vb = verts[v_start + edges[i].1];
+                        let va = verts[v_start + a];
+                        let vb = verts[v_start + b];
                         let index = pts.len();
                         pts.push(p);
                         verts.push(mesh::Vertex {
-                            pos: va.pos * (1.0 - t) + vb.pos * t,
+                            pos: va.pos + (vb.pos - va.pos) * f,
                             norm: DVec3::zeros(), color: DVec3::zeros(),
                         });
                         index
@@ -1597,7 +1605,8 @@ fn resolve_crossing_edges(
         if splits.iter().all(Vec::is_empty) { break; }
         let mut divided = Vec::new();
         for (&(a, b, boundary), split) in edges.iter().zip(&mut splits) {
-            split.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            split.sort_by(|a, b| a.0[1].total_cmp(&b.0[1])
+                .then(b.0[0].total_cmp(&a.0[0])).then(a.1.cmp(&b.1)));
             let mut last = vertices[&key(pts[a])];
             for next in split.iter().map(|&(_, i)| i).chain(std::iter::once(vertices[&key(pts[b])])) {
                 if next != last { divided.push((last, next, boundary)); }
@@ -1652,19 +1661,19 @@ mod tests {
         for scale in [1., 1e-20, 1e20] {
             let point = |x, y| (x * scale, y * scale);
             for x in [0.5, 1e-14, 1. - 1e-14] {
-                let (t, s) = segment_intersection_params(point(0., 0.), point(1., 0.),
+                let (t, s) = segment_intersection_weights(point(0., 0.), point(1., 0.),
                     point(x, -1.), point(x, 1.)).unwrap();
-                assert!((t - x).abs() < 1e-15);
-                assert_eq!(s, 0.5);
+                assert!((t[1] - x).abs() < 1e-15);
+                assert_eq!(s, [0.5, 0.5]);
             }
-            assert!(segment_intersection_params(point(0., 0.), point(1., 0.),
+            assert!(segment_intersection_weights(point(0., 0.), point(1., 0.),
                 point(0., 0.), point(0., 1.)).is_none());
-            assert!(segment_intersection_params(point(0., 0.), point(1., 0.),
+            assert!(segment_intersection_weights(point(0., 0.), point(1., 0.),
                 point(0., 1.), point(1., 1.)).is_none());
         }
-        let (t, s) = segment_intersection_params((0., 0.), (1., 1.),
+        let (t, s) = segment_intersection_weights((0., 0.), (1., 1.),
             (0., f64::EPSILON), (1., 1. - f64::EPSILON)).unwrap();
-        assert_eq!((t, s), (0.5, 0.5));
+        assert_eq!((t, s), ([0.5, 0.5], [0.5, 0.5]));
     }
 
     #[test]
@@ -1700,6 +1709,26 @@ mod tests {
             cdt.run().unwrap();
             assert!(cdt.inside((1., 1.)));
             assert!(!cdt.inside((-0.5, 1.)));
+        }
+    }
+
+    #[test]
+    fn intersections_preserve_constant_coordinates_and_small_endpoint_offsets() {
+        for y in [0.3, 0.7, 1e-20, 1. - 1e-12] {
+            for reverse in [false, true] {
+                let mut pts = vec![(0.1, 0.), (0.1, 1.), (0., y), (1., y)];
+                let boundary = if reverse { (1, 0, true) } else { (0, 1, true) };
+                let mut edges = vec![boundary, (2, 3, false)];
+                let mut verts: Vec<_> = pts.iter().map(|&(_, y)| mesh::Vertex {
+                    pos: DVec3::new(0.1, 0.2, y), norm: DVec3::zeros(), color: DVec3::zeros(),
+                }).collect();
+                resolve_crossing_edges(&mut pts, &mut edges, &mut verts, 0);
+                assert_eq!(pts.len(), 5);
+                assert_eq!(pts[4].0, 0.1);
+                assert_eq!((verts[4].pos.x, verts[4].pos.y), (0.1, 0.2));
+                assert!((pts[4].1 - y).abs() <= 2. * f64::EPSILON * y);
+                assert_eq!(pts[4].1, verts[4].pos.z);
+            }
         }
     }
 
