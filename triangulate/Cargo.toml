@@ -12,6 +12,7 @@ step = { path = "../step" }
 log = "0.4.14"
 nalgebra-glm = "0.21"
 rayon = { version = "1.5", optional = true }
+robust = "1"
 thiserror = "2"
 
 [features]

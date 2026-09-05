@@ -981,3 +981,22 @@ STLs are losslessly compressed (3.78 GB original). Older baseline/final/pass-1
 through pass-6 worker logs are losslessly gzip-compressed: append `.gz` to old
 log links or decompress them. Sources, manifests, results, metrics and frozen
 workers remain available; pass-7 and newer logs remain plain text.
+
+### Exact crossing classification
+
+Murata L_Radial_D24.4 plane #154 contains a crossing at segment parameters
+about 0.979 and 2.7e-14. Tangent circular trims generate nearly collinear
+polygon chords; rounded coordinates cross, but the old 1e-10 endpoint epsilon
+and 1e-12 determinant cutoff hide the crossing from preprocessing. CDT's exact
+predicates then correctly reject the unprocessed constraint arrangement.
+
+Replace these cutoffs with adaptive exact orientation signs. Signed triangle
+areas also supply the intersection parameters without subtracting two nearly
+equal products in an ordinary determinant. Scale, near-endpoint, near-parallel,
+shared-endpoint and disjoint-segment tests pass, as do workspace tests and eight
+checkpoints. All eleven pass-9 KiCad crossing cases now have zero face errors.
+All eleven still fail mesh validation: nine have only f32-degenerate facets;
+the two Bourns models also contain six f64-degenerate facets each. This repairs
+crossing classification, not the final meshes. Evidence:
+`local/repair-predicate-{check,crossings}`. The pre-existing splitter iteration
+limit and representable intersection construction remain separate concerns.

@@ -1489,18 +1489,17 @@ fn segment_intersection_params(
     a: (f64, f64), b: (f64, f64),
     c: (f64, f64), d: (f64, f64),
 ) -> Option<(f64, f64)> {
-    let denom = (b.0 - a.0) * (d.1 - c.1) - (b.1 - a.1) * (d.0 - c.0);
-    if denom.abs() < 1e-12 {
-        return None; // parallel or coincident
-    }
-    let t = ((c.0 - a.0) * (d.1 - c.1) - (c.1 - a.1) * (d.0 - c.0)) / denom;
-    let s = ((c.0 - a.0) * (b.1 - a.1) - (c.1 - a.1) * (b.0 - a.0)) / denom;
-    let eps = 1e-10;
-    if t > eps && t < 1.0 - eps && s > eps && s < 1.0 - eps {
-        Some((t, s))
-    } else {
-        None
-    }
+    let coord = |(x, y)| robust::Coord { x, y };
+    let ca = robust::orient2d(coord(c), coord(d), coord(a));
+    let cb = robust::orient2d(coord(c), coord(d), coord(b));
+    let ac = robust::orient2d(coord(a), coord(b), coord(c));
+    let ad = robust::orient2d(coord(a), coord(b), coord(d));
+    let opposite = |a: f64, b: f64| (a < 0. && b > 0.) || (a > 0. && b < 0.);
+    if !opposite(ca, cb) || !opposite(ac, ad) { return None; }
+    // Topology uses exact predicate signs, not a length or parameter epsilon.
+    // The same signed areas give parameters without a near-parallel division
+    // whose numerator and denominator both suffer cancellation.
+    Some((ca.abs() / (ca.abs() + cb.abs()), ac.abs() / (ac.abs() + ad.abs())))
 }
 
 /// Find the lexicographically-smallest pair of constrained edges `(i, j)`
@@ -1610,6 +1609,26 @@ fn resolve_crossing_edges(
 mod tests {
     use super::*;
     use nurbs::AbstractSurface;
+
+    #[test]
+    fn crossing_predicates_preserve_small_scales_and_endpoint_intersections() {
+        for scale in [1., 1e-20, 1e20] {
+            let point = |x, y| (x * scale, y * scale);
+            for x in [0.5, 1e-14, 1. - 1e-14] {
+                let (t, s) = segment_intersection_params(point(0., 0.), point(1., 0.),
+                    point(x, -1.), point(x, 1.)).unwrap();
+                assert!((t - x).abs() < 1e-15);
+                assert_eq!(s, 0.5);
+            }
+            assert!(segment_intersection_params(point(0., 0.), point(1., 0.),
+                point(0., 0.), point(0., 1.)).is_none());
+            assert!(segment_intersection_params(point(0., 0.), point(1., 0.),
+                point(0., 1.), point(1., 1.)).is_none());
+        }
+        let (t, s) = segment_intersection_params((0., 0.), (1., 1.),
+            (0., f64::EPSILON), (1., 1. - f64::EPSILON)).unwrap();
+        assert_eq!((t, s), (0.5, 0.5));
+    }
 
     #[test]
     fn retraced_seams_cancel_without_snapping_distinct_chart_points() {
