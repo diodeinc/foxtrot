@@ -452,12 +452,10 @@ fn detect_length_scale_fallback(s: &StepFile) -> f64 {
 }
 
 pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
-    let styled_items: Vec<_> = s.0.iter()
+    let styled_item_colors: HashMap<usize, DVec3> = s.0.iter()
         .filter_map(|e| MechanicalDesignGeometricPresentationRepresentation_::try_from_entity(e))
         .flat_map(|m| m.items.iter())
         .filter_map(|item| s.entity(item.cast::<StyledItem_>()))
-        .collect();
-    let styled_item_colors: HashMap<usize, DVec3> = styled_items.iter()
         .filter_map(|styled|
             if styled.styles.len() != 1 {
                 None

@@ -428,16 +428,30 @@ enum Ref<'a> {
 pub fn gen(s: &mut Syntax) -> Result<String, std::fmt::Error> {
     assert!(s.0.len() == 1, "Multiple schemas are unsupported");
 
+    let declarations = &mut s.0[0].body.declarations;
+
     // First pass: collect entity names, then convert ambiguous IDs in SELECT
     // data types into Entity or Type refs
     let mut entity_names = HashSet::new();
-    s.collect_entity_names(&mut entity_names);
-    s.disambiguate(&entity_names);
+    for d in declarations.iter() {
+        if let DeclarationOrRuleDecl::Declaration(d) = d {
+            d.collect_entity_names(&mut entity_names);
+        }
+    }
+    for d in declarations.iter_mut() {
+        if let DeclarationOrRuleDecl::Declaration(d) = d {
+            d.disambiguate(&entity_names);
+        }
+    }
 
     // From this point on, `s` is becomes immutable.  We build a map from type
     // names (in camel_case) to references into `s`, for ease of access.
     let mut ref_map = HashMap::new();
-    s.build_ref_map(&mut ref_map);
+    for d in declarations.iter() {
+        if let DeclarationOrRuleDecl::Declaration(d) = d {
+            d.build_ref_map(&mut ref_map);
+        }
+    }
 
     // Finally, we can build out the type map
     let mut type_map = TypeMap(HashMap::new(), &ref_map);
@@ -564,63 +578,6 @@ fn to_camel(s: &str) -> String {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-impl<'a> Syntax<'a> {
-    fn collect_entity_names(&self, entity_names: &mut HashSet<&'a str>) {
-        for v in &self.0 {
-            v.collect_entity_names(entity_names);
-        }
-    }
-    fn build_ref_map(&'a self, ref_map: &mut HashMap<&'a str, Ref<'a>>) {
-        for v in &self.0 {
-            v.build_ref_map(ref_map);
-        }
-    }
-    fn disambiguate(&mut self, entity_names: &HashSet<&str>) {
-        for v in &mut self.0 {
-            v.disambiguate(entity_names);
-        }
-    }
-}
-impl<'a> SchemaDecl<'a> {
-    fn collect_entity_names(&self, entity_names: &mut HashSet<&'a str>) {
-        self.body.collect_entity_names(entity_names);
-    }
-    fn build_ref_map(&'a self, ref_map: &mut HashMap<&'a str, Ref<'a>>) {
-        self.body.build_ref_map(ref_map);
-    }
-    fn disambiguate(&mut self, entity_names: &HashSet<&str>) {
-        self.body.disambiguate(entity_names)
-    }
-}
-impl<'a> SchemaBody<'a> {
-    fn collect_entity_names(&self, entity_names: &mut HashSet<&'a str>) {
-        for d in &self.declarations {
-            match d {
-                DeclarationOrRuleDecl::Declaration(d) =>
-                    d.collect_entity_names(entity_names),
-                DeclarationOrRuleDecl::RuleDecl(_) => (),
-            }
-        }
-    }
-    fn build_ref_map(&'a self, ref_map: &mut HashMap<&'a str, Ref<'a>>) {
-        for d in &self.declarations {
-            match d {
-                DeclarationOrRuleDecl::Declaration(d) =>
-                    d.build_ref_map(ref_map),
-                DeclarationOrRuleDecl::RuleDecl(_) => (),
-            }
-        }
-    }
-    fn disambiguate(&mut self, entity_names: &HashSet<&str>) {
-        for d in &mut self.declarations {
-            match d {
-                DeclarationOrRuleDecl::Declaration(d) =>
-                    d.disambiguate(entity_names),
-                DeclarationOrRuleDecl::RuleDecl(_) => (),
-            }
-        }
-    }
-}
 impl<'a> Declaration<'a> {
     fn collect_entity_names(&self, entity_names: &mut HashSet<&'a str>) {
         if let Declaration::Entity(d) = self {
@@ -990,5 +947,29 @@ impl<'a> NamedTypes<'a> {
             NamedTypes::Type(e) => e.0,
             NamedTypes::_Ambiguous(e) => e.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generates_forward_selects_and_inherited_attributes() {
+        let source = "schema test;
+            type choice = select (child, label); end_type;
+            type label = string; end_type;
+            entity base; name : label; end_entity;
+            entity child subtype of (base); measurement : optional real; end_entity;
+            rule named for (base); where valid : true; end_rule;
+            end_schema;";
+        let (remaining, mut syntax) = crate::parse::parse(source).unwrap();
+        assert!(remaining.is_empty());
+        let generated = gen(&mut syntax).unwrap();
+        assert!(generated.contains("pub enum Choice<'a>"));
+        assert!(generated.contains("map(<Child<'a>>::parse, Choice::Child)"));
+        assert!(generated.contains("tag(\"LABEL(\")"));
+        assert!(generated.contains("pub struct Child_<'a> { // entity\n    pub name: Label<'a>,\n    pub measurement: Option<f64>,"));
+        assert!(!generated.contains("Named"));
     }
 }
