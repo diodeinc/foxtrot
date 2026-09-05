@@ -11,8 +11,9 @@ enum Walk {
     Inside(EdgeIndex),
     Done(EdgeIndex),
     /// A collinear intermediate point was found on the src→dst line.
-    /// The caller should lock src→mid, then continue with mid→dst.
-    Through(PointIndex),
+    /// Carries the direct edge to lock and an incoming edge at `mid` for the
+    /// remaining walk.
+    Through(PointIndex, EdgeIndex, EdgeIndex),
 }
 
 /// This `struct` contains all of the data needed to generate a (constrained)
@@ -661,7 +662,7 @@ impl Triangulation {
         // Delaunay Triangulation).
         let (start, end) = self.endings[p];
         for i in start..end {
-            self.handle_fixed_edge(h_p, p, self.ending_data[i])?;
+            self.handle_fixed_edge(self.hull.edge(h_p), p, self.ending_data[i])?;
         }
 
         Ok(())
@@ -765,141 +766,88 @@ impl Triangulation {
     }
 
     /// Finds which mode to begin walking through the triangulation when
-    /// inserting a fixed edge.  h is a [`HullIndex`] equivalent to the `src`
-    /// point, and `dst` is the destination of the new fixed edge.
-    fn find_hull_walk_mode(&self, h: HullIndex, src: PointIndex, dst: PointIndex)
+    /// inserting a fixed edge. `incoming` is any live edge ending at `src`.
+    fn find_walk_mode(&self, incoming: EdgeIndex, src: PointIndex, dst: PointIndex)
         -> Result<Walk, Error> {
-        /*  We've just built a triangle that contains a fixed edge, and need
-            to walk through the triangulation and implement that edge.
-
-            The only thing we know going in is that point src is on the hull of
-            the triangulation with HullIndex h.
-
-            We start by finding the triangle a->src->b which contains the edge
-            src->dst, e.g.
-
-                     src
-                     / :^
-                    / :  \
-                   /  :   \h
-                  /  :     \
-                 V   :      \
-                b---:------->a
-                    :
-                   dst
-
-            Because the triangulation is convex, we know that this triangle
-            exists; we can't escape the triangulation.
-        */
-        let e_right = self.hull.edge(h);
-        let h_left = self.hull.left_hull(h);
-        let e_left = self.hull.edge(h_left);
-
-        // Note that e_right-e_left may be a wedge that contains multiple
-        // triangles (for example, this would be the case if there was an edge
-        // flip of b->a)
-        let wedge_left = self.half.edge_checked(e_left)?.dst;
-        let wedge_right = self.half.edge_checked(e_right)?.src;
-
-        // If the fixed edge is directly attached to src, then we can declare
-        // that we're done right away (and the caller will lock the edge)
-        if dst == wedge_left {
-            return Ok(Walk::Done(e_left));
-        } else if dst == wedge_right {
-            return Ok(Walk::Done(e_right));
+        let first = self.half.edge_checked(incoming)?;
+        if first.dst != src {
+            return Err(Error::HalfEdgeInvariant);
         }
 
-        // Otherwise, check the winding to see which side we're on.
-        let o_left = self.orient2d(src, wedge_left, dst);
-        let o_right = self.orient2d(src, dst, wedge_right);
-
-        // If a point is collinear with the fixed edge (orient2d == 0),
-        // split the fixed edge at that point instead of erroring.
-        if o_left == 0.0 {
-            return Ok(Walk::Through(wedge_left));
-        } else if o_right == 0.0 {
-            return Ok(Walk::Through(wedge_right));
-        }
-
-        // Walk the inside of the wedge until we find the
-        // subtriangle which captures the p-src line.
-        let mut index_a_src = self.half.edge_checked(e_left)?.prev;
-
+        // The supplied triangle may be in the middle of a boundary fan. Walk
+        // backwards first, stopping at its boundary or after closing a full
+        // interior fan.
+        let mut e_a_src = incoming;
         loop {
-            let edge_a_src = self.half.edge_checked(index_a_src)?;
+            let buddy = self.half.edge_checked(e_a_src)?.buddy;
+            if buddy == EMPTY_EDGE {
+                break;
+            }
+            let previous = self.half.edge_checked(buddy)?.prev;
+            if previous == incoming {
+                break;
+            }
+            e_a_src = previous;
+        }
+
+        let fan_start = e_a_src;
+        loop {
+            let edge_a_src = self.half.edge_checked(e_a_src)?;
+            let e_src_b = edge_a_src.next;
+            let edge_src_b = self.half.edge_checked(e_src_b)?;
             let a = edge_a_src.src;
-            if a == dst {
-                /* Lucky break: the src point is one of the edges directly
-                   within the wedge, e.g.:
-                          src
-                         / ^\
-                        /  | \
-                       /   |  \
-                      /    |   \
-                     V     |    \
-                    ------>a------ (a == dst)
-                */
-                return Ok(Walk::Done(index_a_src));
+            let b = edge_src_b.dst;
+
+            // Identity must win over orientation, particularly for collinear
+            // triangles and zero-length coordinate differences.
+            if dst == a {
+                return Ok(Walk::Done(e_a_src));
+            } else if dst == b {
+                return Ok(Walk::Done(e_src_b));
             }
 
-            // Keep walking through the fan
-            let intersected_index = edge_a_src.prev;
+            if self.orient2d(src, a, dst) == 0.0 &&
+               distance2(self.points[src], self.points[a]) <
+                   distance2(self.points[src], self.points[dst]) &&
+               ((self.points[a].0 - self.points[src].0) *
+                (self.points[dst].0 - self.points[src].0) +
+                (self.points[a].1 - self.points[src].1) *
+                (self.points[dst].1 - self.points[src].1)) > 0.0
+            {
+                return Ok(Walk::Through(a, e_a_src, edge_a_src.prev));
+            }
+            if self.orient2d(src, b, dst) == 0.0 &&
+               distance2(self.points[src], self.points[b]) <
+                   distance2(self.points[src], self.points[dst]) &&
+               ((self.points[b].0 - self.points[src].0) *
+                (self.points[dst].0 - self.points[src].0) +
+                (self.points[b].1 - self.points[src].1) *
+                (self.points[dst].1 - self.points[src].1)) > 0.0
+            {
+                return Ok(Walk::Through(b, e_src_b, e_src_b));
+            }
 
-            let o = self.orient2d(src, dst, a);
-            // If we've found the intersection point, then we return the new
-            // (inner) edge.  The walking loop will transition to Left or Right
-            // if this edge doesn't have a buddy.
-            if o > 0.0 {
-                /*
-                          src
-                         /:^\
-                        / :| \
-                       /  :|  \
-                      /  : |   \
-                     V   : |    \
-                    ----:->a------
-                        :
-                       dst
-                */
-                // We may exit either into another interior triangle or
-                // leave the triangulation and walk the hull, but we don't
-                // need to decide that right now.
-                return Ok(Walk::Inside(intersected_index));
-            } else if o < 0.0 {
-                /*  Sorry, Mario; your src-dst line is in another triangle
+            if self.orient2d(src, b, dst) >= 0.0 &&
+               self.orient2d(src, dst, a) >= 0.0
+            {
+                return Ok(Walk::Inside(edge_a_src.prev));
+            }
 
-                          src
-                         / ^:\
-                        /  |: \
-                       /   | : \
-                      /    | :  \
-                     V     |  :  \
-                    ------>a--:---
-                              :
-                              dst
-
-                    (so keep going through the triangle)
-                */
-                let buddy = edge_a_src.buddy;
-
-                // We can't have walked out of the wedge, because otherwise
-                // o_right would be < 0.0 and we wouldn't be in this branch
-                if buddy == EMPTY_EDGE {
-                    return Err(Error::WedgeEscape);
-                }
-                index_a_src = self.half.edge_checked(buddy)?.prev;
-            } else {
-                // Hit a vertex exactly on the src→dst line; split there
-                return Ok(Walk::Through(a));
+            let buddy = edge_src_b.buddy;
+            if buddy == EMPTY_EDGE {
+                break;
+            }
+            e_a_src = buddy;
+            if e_a_src == fan_start {
+                break;
             }
         }
+        Err(Error::WedgeEscape)
     }
 
     fn walk_fill(&mut self, src: PointIndex, dst: PointIndex, mut e: EdgeIndex) -> Result<(), Error> {
         let mut steps_left = Contour::new_pos(src, ContourData::None);
         let mut steps_right = Contour::new_neg(src, ContourData::None);
-        let mut walk_iters = 0usize;
-        let walk_limit = self.points.len() * 10 + 100;
 
         /*
          * We start inside a triangle, then escape it right away:
@@ -955,13 +903,6 @@ impl Triangulation {
         e = edge_ba.buddy;
 
         loop {
-            walk_iters += 1;
-            if walk_iters > walk_limit {
-                log::warn!("walk_fill: exceeded {} iterations for src={:?}→dst={:?} \
-                           ({} points), likely infinite loop",
-                           walk_limit, src, dst, self.points.len());
-                return Err(Error::WedgeEscape);
-            }
             /*            src
                          :
                    b<--:-------a
@@ -1121,19 +1062,17 @@ impl Triangulation {
                 self.half.link(e_src_c, e_c_src)?;
                 self.half.toggle_lock_sign(e_src_c);
 
-                // Continue with the remaining portion c→dst
-                let h_c = self.hull.index_of(c)?;
-                return self.handle_fixed_edge(h_c, c, dst);
+                // e_src_c is incident at c and remains live after contour
+                // reconstruction, so no hull lookup is needed here.
+                return self.handle_fixed_edge(e_src_c, c, dst);
             }
         }
         Ok(())
     }
 
-    fn handle_fixed_edge(&mut self, mut h: HullIndex, mut src: PointIndex, dst: PointIndex) -> Result<(), Error> {
-        // Use a loop to handle Through (tail-call elimination for the
-        // second recursive call, mid→dst).
-        for _ in 0..1000 {
-            match self.find_hull_walk_mode(h, src, dst)? {
+    fn handle_fixed_edge(&mut self, mut incoming: EdgeIndex, mut src: PointIndex, dst: PointIndex) -> Result<(), Error> {
+        loop {
+            match self.find_walk_mode(incoming, src, dst)? {
                 // Easy mode: the fixed edge is directly connected to the new
                 // point, so we lock it and return immediately.
                 Walk::Done(e) => { self.half.toggle_lock_sign(e); return Ok(()); },
@@ -1144,19 +1083,13 @@ impl Triangulation {
 
                 // A collinear intermediate point was found on src→dst.
                 // Lock src→mid, then continue the loop with mid→dst.
-                Walk::Through(mid) => {
-                    if mid == src || mid == dst {
-                        return Err(Error::PointOnFixedEdge(src.0 as usize));
-                    }
-                    self.handle_fixed_edge(h, src, mid)?;
-                    h = self.hull.index_of(mid)?;
+                Walk::Through(mid, direct, next_incoming) => {
+                    self.half.toggle_lock_sign(direct);
+                    incoming = next_incoming;
                     src = mid;
-                    // Loop continues with mid→dst
                 },
             }
         }
-        // Safety: if we hit the loop limit, bail out
-        Err(Error::PointOnFixedEdge(src.0 as usize))
     }
 
     pub(crate) fn legalize(&mut self, e_ab: EdgeIndex) -> Result<(), Error> {
@@ -1643,6 +1576,74 @@ mod tests {
         let t = Triangulation::build_with_edges(&points, &edges)
             .expect("Could not build triangulation");
         t.check();
+    }
+
+    fn fixed_segment(t: &Triangulation, a: Point, b: Point) -> bool {
+        t.half.iter_edges().any(|(src, dst, fixed)| {
+            fixed && ((t.points[src] == a && t.points[dst] == b) ||
+                      (t.points[src] == b && t.points[dst] == a))
+        })
+    }
+
+    #[test]
+    fn diagonal_boundary_walks_through_interior_vertices() {
+        let points = [
+            (0.0, 0.0), (4.0, 4.0), (0.0, 4.0),
+            (1.0, 1.0), (2.0, 2.0), (3.0, 3.0),
+            (1.0, 3.0), (2.0, 3.0),
+        ];
+        let edges = [(0, 1), (1, 2), (2, 0)];
+        let t = Triangulation::build_with_edges(&points, &edges).unwrap();
+        t.check();
+
+        // Preserve the exact constrained boundary, including every Steiner
+        // vertex, rather than merely producing the expected triangle count.
+        for pair in points[3..6].iter().copied()
+            .chain(std::iter::once(points[1]))
+            .scan(points[0], |previous, point| {
+                let pair = (*previous, point);
+                *previous = point;
+                Some(pair)
+            })
+        {
+            assert!(fixed_segment(&t, pair.0, pair.1), "missing fixed segment {:?}", pair);
+        }
+        assert!(t.inside((1.0, 2.0)));
+        assert!(!t.inside((3.0, 2.0)));
+    }
+
+    #[test]
+    fn backward_collinear_vertex_does_not_split_constraint() {
+        let points = [
+            (0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0),
+            (-1.0, 0.0), (2.0, 1.0), (2.0, 3.0),
+        ];
+        let edges = [(0, 1), (1, 2), (2, 3), (3, 0)];
+        let t = Triangulation::build_with_edges(&points, &edges).unwrap();
+        t.check();
+        assert!(fixed_segment(&t, points[0], points[1]));
+        assert!(!fixed_segment(&t, points[0], points[4]));
+        assert!(t.inside((2.0, 2.0)));
+        assert!(!t.inside((-0.5, 0.5)));
+    }
+
+    #[test]
+    fn split_duplicate_boundaries_keep_existing_edge_sign_semantics() {
+        let points = [
+            (0.0, 0.0), (4.0, 4.0), (0.0, 4.0),
+            (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (1.0, 3.0),
+        ];
+        let edges = [
+            (0, 1), (1, 2), (2, 0),
+            (0, 1), (1, 2), (2, 0),
+        ];
+        let t = Triangulation::build_with_edges(&points, &edges).unwrap();
+        t.check();
+        assert!(t.inside((1.0, 2.0)));
+        for pair in [(points[0], points[3]), (points[3], points[4]),
+                     (points[4], points[5]), (points[5], points[1])] {
+            assert!(fixed_segment(&t, pair.0, pair.1));
+        }
     }
 
     #[test]
