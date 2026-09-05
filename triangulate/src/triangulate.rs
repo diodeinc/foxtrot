@@ -832,10 +832,6 @@ fn advanced_face(
     stats.num_faces += 1;
     info!("triangulating face {} (geometry {})", f.0, face_geometry.0);
 
-    // Grab the surface, returning early if it's unimplemented
-    let mut surf = crate::timing::time("face:get_surface",
-        || get_surface(s, face_geometry))?;
-
     // This is the starting point at which we insert new vertices
     let offset = mesh.verts.len();
 
@@ -843,11 +839,13 @@ fn advanced_face(
     // start collecting them as constrained edges for triangulation
     let mut edges = Vec::new();
     let mut unwrap_ranges = Vec::new();
+    let mut boundary_points = Vec::new();
     let v_start = mesh.verts.len();
     let mut num_pts = 0;
     for b in bounds {
         let (bound_contours, edge_loop_len) =
             crate::timing::time("face:face_bound", || face_bound(s, *b))?;
+        boundary_points.extend_from_slice(&bound_contours);
 
         match bound_contours.len() {
             // We should always have non-zero items in the contour
@@ -899,6 +897,10 @@ fn advanced_face(
             }
         }
     }
+
+    // Swept surfaces use the actual trims to choose a finite NURBS domain.
+    let mut surf = crate::timing::time("face:get_surface",
+        || get_surface(s, face_geometry, &boundary_points))?;
 
     // We inject Stiner points based on the surface type to improve curvature,
     // e.g. for spherical sections.  However, we don't want triagulation to
@@ -1015,7 +1017,106 @@ fn advanced_face(
     Ok(())
 }
 
-fn get_surface(s: &StepFile, surf: ap214::Surface) -> Result<Surface, Error> {
+#[derive(Debug)]
+struct HomogeneousCurve {
+    open: bool,
+    knots: KnotVector,
+    control_points: Vec<DVec4>,
+}
+
+fn homogeneous_curve(s: &StepFile, curve: ap214::Curve) -> Result<HomogeneousCurve, Error> {
+    match &s[curve] {
+        Entity::BSplineCurveWithKnots(b) => {
+            let points = control_points_1d(s, &b.control_points_list)?
+                .into_iter().map(|p| DVec4::new(p.x, p.y, p.z, 1.0)).collect();
+            Ok(HomogeneousCurve {
+                open: b.closed_curve.0 != Some(true),
+                knots: curve_knot_vector(b)?,
+                control_points: points,
+            })
+        },
+        Entity::ComplexEntity(parts) => {
+            let b = parts.iter().find_map(|e| match e {
+                Entity::BSplineCurveWithKnots(b) => Some(b), _ => None,
+            }).ok_or(Error::UnknownCurveType)?;
+            let r = parts.iter().find_map(|e| match e {
+                Entity::RationalBSplineCurve(r) => Some(r), _ => None,
+            }).ok_or(Error::UnknownCurveType)?;
+            let points = control_points_1d(s, &b.control_points_list)?.into_iter()
+                .zip(r.weights_data.iter())
+                .map(|(p, &w)| DVec4::new(p.x * w, p.y * w, p.z * w, w))
+                .collect();
+            Ok(HomogeneousCurve {
+                open: b.closed_curve.0 != Some(true),
+                knots: curve_knot_vector(b)?,
+                control_points: points,
+            })
+        },
+        Entity::Circle(c) => conic_curve(s, c.position.cast(), c.radius.0.0.0, c.radius.0.0.0),
+        Entity::Ellipse(c) => conic_curve(s, c.position.cast(), c.semi_axis_1.0.0.0, c.semi_axis_2.0.0.0),
+        _ => Err(Error::UnknownCurveType),
+    }
+}
+
+fn curve_knot_vector(b: &BSplineCurveWithKnots_) -> Result<KnotVector, Error> {
+    let knots: Vec<f64> = b.knots.iter().map(|k| k.0).collect();
+    let multiplicities: Vec<usize> = b.knot_multiplicities.iter()
+        .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative curve multiplicity")))
+        .collect::<Result<_, _>>()?;
+    Ok(KnotVector::from_multiplicities(
+        b.degree.try_into().map_err(|_| Error::NumericConversion("negative curve degree"))?,
+        &knots, &multiplicities))
+}
+
+fn conic_curve(s: &StepFile, position: Axis2Placement3d, a: f64, b: f64)
+    -> Result<HomogeneousCurve, Error>
+{
+    let (center, axis, x) = axis2_placement_3d(s, position)?;
+    let z = axis.normalize();
+    let x = (x - z * x.dot(&z)).normalize();
+    let y = z.cross(&x);
+    let q = std::f64::consts::FRAC_1_SQRT_2;
+    let unit = [(1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (-1.0, 1.0),
+                (-1.0, 0.0), (-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (1.0, 0.0)];
+    let control_points = unit.iter().enumerate().map(|(i, &(u, v))| {
+        let w = if i % 2 == 0 { 1.0 } else { q };
+        let p = center + x * (a * u) + y * (b * v);
+        DVec4::new(p.x * w, p.y * w, p.z * w, w)
+    }).collect();
+    Ok(HomogeneousCurve {
+        open: false,
+        knots: KnotVector::from_multiplicities(2, &[0.0, 0.25, 0.5, 0.75, 1.0], &[3, 2, 2, 2, 3]),
+        control_points,
+    })
+}
+
+fn extrusion_surface(curve: HomogeneousCurve, vector: DVec3, boundary: &[DVec3])
+    -> Result<Surface, Error>
+{
+    let denominator = vector.norm_squared();
+    if denominator == 0.0 { return Err(Error::InvalidGeometry("zero extrusion vector")); }
+    let mut range = (f64::INFINITY, f64::NEG_INFINITY);
+    for h in &curve.control_points {
+        let p = h.xyz() / h.w;
+        for b in boundary {
+            let v = (b - p).dot(&vector) / denominator;
+            range.0 = range.0.min(v);
+            range.1 = range.1.max(v);
+        }
+    }
+    if !range.0.is_finite() || range.0 == range.1 {
+        return Err(Error::InvalidGeometry("extrusion has empty parameter range"));
+    }
+    let controls = curve.control_points.into_iter().map(|h| vec![
+        h + DVec4::new(vector.x * h.w * range.0, vector.y * h.w * range.0, vector.z * h.w * range.0, 0.0),
+        h + DVec4::new(vector.x * h.w * range.1, vector.y * h.w * range.1, vector.z * h.w * range.1, 0.0),
+    ]).collect();
+    let surface = NURBSSurface::new(curve.open, true, curve.knots,
+        KnotVector::from_multiplicities(1, &[range.0, range.1], &[2, 2]), controls);
+    Ok(Surface::NURBS(SampledSurface::new(surface)))
+}
+
+fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3]) -> Result<Surface, Error> {
     match &s[surf] {
         Entity::CylindricalSurface(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position)?;
@@ -1043,6 +1144,12 @@ fn get_surface(s: &StepFile, surf: ap214::Surface) -> Result<Surface, Error> {
             // orthonormal basis later on
             let (location, _axis, _ref_direction) = axis2_placement_3d(s, c.position)?;
             Surface::new_sphere(location, c.radius.0.0.0)
+        },
+        Entity::SurfaceOfLinearExtrusion(e) => {
+            let v = s.entity(e.extrusion_axis)
+                .ok_or(Error::InvalidStepEntity("Vector"))?;
+            let vector = direction(s, v.orientation)?.normalize() * v.magnitude.0;
+            extrusion_surface(homogeneous_curve(s, e.swept_curve)?, vector, boundary)
         },
         Entity::BSplineSurfaceWithKnots(b) =>
         {
