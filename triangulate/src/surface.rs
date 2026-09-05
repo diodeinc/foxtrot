@@ -858,10 +858,9 @@ impl Surface {
     }
 
     fn add_torus_steiner_points(&self, pts: &mut Vec<(f64, f64)>,
-                                verts: &mut Vec<Vertex>)
+                                verts: &mut Vec<Vertex>, radial_scale: f64)
     {
         const ANGULAR_SAMPLES: usize = 32;
-        const RADIAL_RINGS: usize = 2;
 
         let mut radii = Vec::with_capacity(pts.len());
         let mut angles = Vec::with_capacity(pts.len());
@@ -895,8 +894,13 @@ impl Surface {
             return;
         }
 
-        for radial_index in 1..=RADIAL_RINGS {
-            let radial_fraction = radial_index as f64 / (RADIAL_RINGS + 1) as f64;
+        // Radius in the polar chart encodes the other intrinsic angle.
+        // Resolve both angles at the same rate, independent of length units
+        // and which torus parameter is represented radially.
+        let radial_angle = (radial_max - radial_min) / radial_scale;
+        let radial_segments = (radial_angle * ANGULAR_SAMPLES as f64 / (2.0 * PI)).ceil() as usize;
+        for radial_index in 1..radial_segments {
+            let radial_fraction = radial_index as f64 / radial_segments as f64;
             let radius = radial_min * (1.0 - radial_fraction) +
                          radial_max * radial_fraction;
             for angular_index in 0..ANGULAR_SAMPLES {
@@ -951,8 +955,9 @@ impl Surface {
     pub fn add_steiner_points(&self, pts: &mut Vec<(f64, f64)>,
                                      verts: &mut Vec<Vertex>)
     {
-        if matches!(self, Surface::Torus { .. }) {
-            self.add_torus_steiner_points(pts, verts);
+        if let Surface::Torus { polar_major, major_radius, minor_radius, .. } = self {
+            let radial_scale = if *polar_major { minor_radius.abs() } else { major_radius.abs() };
+            self.add_torus_steiner_points(pts, verts, radial_scale);
             return;
         }
 
@@ -1426,6 +1431,32 @@ mod tests {
     }
 
     #[test]
+    fn torus_sampling_resolves_both_intrinsic_angles() {
+        for scale in [1e-9, 1., 1e9] {
+            for polar_major in [true, false] {
+                let mut surface = Surface::new_torus_with_ref_direction(
+                    DVec3::zeros(), DVec3::z(), DVec3::x(), 4. * scale, scale).unwrap();
+                let Surface::Torus { polar_major: polar, radial_start, .. } = &mut surface else { unreachable!() };
+                *polar = polar_major;
+                *radial_start = 0.;
+                let (base, radial_scale) = if polar_major { (4. * scale, scale) } else { (scale, 4. * scale) };
+                let mut points = Vec::new();
+                for radius in [base, base + PI * radial_scale] {
+                    for i in 0..32 {
+                        let angle = 2. * PI * i as f64 / 32.;
+                        points.push((radius * angle.cos(), radius * angle.sin()));
+                    }
+                }
+                surface.add_steiner_points(&mut points, &mut Vec::new());
+                let mut angles: Vec<_> = points.iter().map(|&(x, y)| (x.hypot(y) - base) / radial_scale).collect();
+                angles.sort_by(f64::total_cmp);
+                let gap = angles.windows(2).map(|v| v[1] - v[0]).fold(0.0_f64, f64::max);
+                assert!(gap <= 2. * PI / 32. + 1e-12, "unresolved radial angle {}", gap);
+            }
+        }
+    }
+
+    #[test]
     fn planar_bilinear_splines_use_world_coordinate_predicates() {
         let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
             true, true,
@@ -1520,7 +1551,8 @@ mod tests {
         let radial_max = points.iter().map(|(u, v)| u.hypot(*v))
             .fold(f64::NEG_INFINITY, f64::max);
         surface.add_steiner_points(&mut points, &mut vertices);
-        assert_eq!(points.len() - boundary_len, 32 * 2);
+        assert!(points.len() > boundary_len);
+        assert_eq!(points.len(), vertices.len());
         assert!(points[boundary_len..].iter().all(|(u, v)| {
             let radius = u.hypot(*v);
             radius > radial_min && radius < radial_max

@@ -726,3 +726,17 @@ nonzero face_surface extent, and §5.5.1 IP1 forbids overlapping distinct edge
 domains. Do not manufacture triangles for provably collapsed planar line loops.
 Authoritative text read in full:
 https://www.steptools.com/stds/smrl/data/resource_docs/geometric_and_topological_representation/sys/5_schema.htm
+
+With the interval defect fixed, torus radial sampling now resolves the second
+intrinsic angle at the same 32-segments-per-revolution rate as the polar angle,
+instead of always using two rings. The dimensionless rule works for either
+chart orientation and across length units. Its angular-gap regression fails
+before the change; workspace and eight strict checkpoints pass after it.
+The test-point bridge now has 1,296 triangles, no degenerates, area 28.098084
+versus OCCT 28.117268 (0.068% difference), volume 5.375025 versus 5.420478
+(0.839%), and apex z=2.062299 versus analytic 2.07. This is an actual geometric
+improvement, not just a successful process return. Evidence:
+`local/testpoint-torus-density-arc-occt`, `local/repair-torus-density-arc-check`.
+For the next full sweep, removed only superseded generated pass-4 `.stl.gz`
+meshes (2,555 files, 4,451,650,165 bytes); reports, source hashes, logs, metrics,
+manifests and frozen workers are preserved, as are baseline/pass-5 meshes.
