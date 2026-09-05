@@ -30,19 +30,23 @@ jobs:
         run: cargo test --workspace --all-features --lib --bins --tests
       - name: Test documentation
         run: cargo test --workspace --all-features --doc
+      # Keep corpus sweeps, OCCT, and repeated benchmarks opt-in and local.
       - name: Test corpus harness
+        timeout-minutes: 1
         run: python3 -m unittest discover -s scripts -p 'test_corpus*.py'
       - name: Build corpus worker and exercise checked-in models
+        timeout-minutes: 2
         run: |
           cargo build -p triangulate --example corpus_worker
-          python3 scripts/corpus.py examples --worker target/debug/examples/corpus_worker --include abstract_pca.step --include cube_hole.step --include cuboid.step --meshes all --output local/corpus-ci
+          python3 scripts/corpus.py examples --worker target/debug/examples/corpus_worker --include abstract_pca.step --include cube_hole.step --include cuboid.step --timeout 10 --meshes all --output local/corpus-ci
       - name: Upload corpus diagnostics
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: corpus-report
           path: local/corpus-ci
           if-no-files-found: ignore
+          retention-days: 7
 
   wasm:
     name: WebAssembly check
