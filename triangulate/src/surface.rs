@@ -3,7 +3,7 @@ use std::f64::{EPSILON, consts::PI};
 use nalgebra_glm as glm;
 use glm::{DVec2, DVec3, DVec4, DMat4};
 
-use nurbs::{AbstractSurface, NDBSplineSurface, SampledSurface};
+use nurbs::{AbstractSurface, SampledSurface};
 use crate::{Error, mesh::Vertex};
 
 // Represents a surface in 3D space, with a function to project a 3D point
@@ -28,7 +28,6 @@ pub enum Surface {
         mat_i: DMat4,
         angle: f64,
     },
-    BSpline(SampledSurface<3>),
     NURBS(SampledSurface<4>),
     Sphere {
         location: DVec3,
@@ -156,9 +155,7 @@ impl Surface {
         Self::make_affine_transform(z, x, y, origin_world)
     }
 
-    fn surf_lower<const N: usize>(p: DVec3, surf: &SampledSurface<N>) -> Result<DVec2, Error>
-        where NDBSplineSurface<N>: AbstractSurface
-    {
+    fn surf_lower(p: DVec3, surf: &SampledSurface<4>) -> Result<DVec2, Error> {
         surf.uv_from_point(p).ok_or(Error::CouldNotLower)
     }
 
@@ -244,7 +241,6 @@ impl Surface {
                     radius * polar_angle.sin(),
                 ))
             },
-            Surface::BSpline(surf) => Self::surf_lower(p, surf),
             Surface::NURBS(surf) => Self::surf_lower(p, surf),
             Surface::Sphere { mat_i, radius, .. } => {
                 // mat_i is constructed in prepare to be a reasonable basis
@@ -433,7 +429,6 @@ impl Surface {
             Surface::Cylinder { .. } => "lower:Cylinder",
             Surface::Plane { .. } => "lower:Plane",
             Surface::Cone { .. } => "lower:Cone",
-            Surface::BSpline(_) => "lower:BSpline",
             Surface::NURBS(_) => "lower:NURBS",
             Surface::Sphere { .. } => "lower:Sphere",
             Surface::Torus { .. } => "lower:Torus",
@@ -467,7 +462,6 @@ impl Surface {
         // space, so the triangulation is better.
         let aspect_ratio = match self {
             Surface::NURBS(surf) => Some(surf.surf.aspect_ratio()),
-            Surface::BSpline(surf) => Some(surf.surf.aspect_ratio()),
             _ => None,
         };
         if let Some(aspect_ratio) = aspect_ratio {
@@ -481,19 +475,6 @@ impl Surface {
     fn periodic_uv_periods(&self) -> (Option<f64>, Option<f64>) {
         match self {
             Surface::NURBS(surf) => {
-                let u_period = if surf.surf.u_open {
-                    None
-                } else {
-                    Some(surf.surf.max_u() - surf.surf.min_u())
-                };
-                let v_period = if surf.surf.v_open {
-                    None
-                } else {
-                    Some((surf.surf.max_v() - surf.surf.min_v()) * surf.surf.aspect_ratio())
-                };
-                (u_period, v_period)
-            },
-            Surface::BSpline(surf) => {
                 let u_period = if surf.surf.u_open {
                     None
                 } else {
@@ -713,7 +694,6 @@ impl Surface {
                     .xyz();
                 Some(pos)
             },
-            Surface::BSpline(s) => Some(s.surf.point(uv)),
             Surface::NURBS(s) => Some(s.surf.point(uv)),
             Surface::Torus { mat, minor_radius, major_radius,
                              polar_major, radial_start, .. } => {
@@ -825,13 +805,12 @@ impl Surface {
         }
     }
 
-    fn add_spline_steiner_points<const N: usize>(
+    fn add_spline_steiner_points(
         &self,
         pts: &mut Vec<(f64, f64)>,
         verts: &mut Vec<Vertex>,
-        surf: &SampledSurface<N>,
-    ) where NDBSplineSurface<N>: AbstractSurface
-    {
+        surf: &SampledSurface<4>,
+    ) {
         const SAMPLES: usize = 16;
 
         let (xmin, xmax, ymin, ymax) = Self::bbox(pts);
@@ -875,10 +854,6 @@ impl Surface {
         }
 
         match self {
-            Surface::BSpline(surf) => {
-                self.add_spline_steiner_points(pts, verts, surf);
-                return;
-            },
             Surface::NURBS(surf) => {
                 self.add_spline_steiner_points(pts, verts, surf);
                 return;
@@ -912,9 +887,7 @@ impl Surface {
         }
     }
 
-    fn surf_normal<const N: usize>(uv: DVec2, surf: &SampledSurface<N>) -> DVec3
-        where NDBSplineSurface<N>: AbstractSurface
-    {
+    fn surf_normal(uv: DVec2, surf: &SampledSurface<4>) -> DVec3 {
         let derivs = surf.surf.derivs::<1>(uv);
         let n = derivs[1][0].cross(&derivs[0][1]);
         if n.norm_squared() > 1e-20 {
@@ -976,7 +949,6 @@ impl Surface {
                 let norm = DVec3::new(proj.x, proj.y, 0.0).normalize();
                 (mat * norm.to_homogeneous()).xyz()
             },
-            Surface::BSpline(surf) => Self::surf_normal(uv, surf),
             Surface::NURBS(surf) => Self::surf_normal(uv, surf),
             Surface::Torus { mat, mat_i, major_radius, .. } => {
                 let p = (*mat_i * DVec4::new(p.x, p.y, p.z, 1.0)).xyz();
@@ -994,7 +966,7 @@ impl Surface {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nurbs::{BSplineSurface, KnotVector};
+    use nurbs::{KnotVector, NURBSSurface};
 
     fn latitude_loop(latitude: f64, segments: usize, reverse: bool,
                      vertices: &mut Vec<Vertex>, edges: &mut Vec<(usize, usize)>) {
@@ -1130,12 +1102,12 @@ mod tests {
 
     #[test]
     fn periodic_unwrapping_preserves_nonuniform_boundary_parameters() {
-        let surface = Surface::BSpline(SampledSurface::new(BSplineSurface::new(
+        let surface = Surface::NURBS(SampledSurface::new(NURBSSurface::new(
             false, true,
             KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),
             KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
             [(1., 0.), (0., 1.), (-1., 0.), (0., -1.), (1., 0.)].iter()
-                .map(|&(x, y)| vec![DVec3::new(x, y, 0.), DVec3::new(x, y, 1.)])
+                .map(|&(x, y)| vec![DVec4::new(x, y, 0., 1.), DVec4::new(x, y, 1., 1.)])
                 .collect(),
         )));
         let original = vec![(0., 1.), (0.1, 1.), (0.6, 1.), (1., 1.),
@@ -1188,10 +1160,10 @@ mod tests {
         let knots = || KnotVector::from_multiplicities(2, &[0.0, 1.0], &[3, 3]);
         let control_points = (0..3).map(|u| {
             (0..3).map(|v| {
-                DVec3::new(u as f64, v as f64, (u * v) as f64 * 0.25)
+                DVec4::new(u as f64, v as f64, (u * v) as f64 * 0.25, 1.0)
             }).collect()
         }).collect();
-        let surface = Surface::BSpline(SampledSurface::new(BSplineSurface::new(
+        let surface = Surface::NURBS(SampledSurface::new(NURBSSurface::new(
             true, true, knots(), knots(), control_points,
         )));
         let mut points = vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
@@ -1210,12 +1182,12 @@ mod tests {
         let control_points = (0..3).map(|u| {
             let x = u as f64;
             vec![
-                DVec3::new(x, 0.0, 0.0),
-                DVec3::new(x, 0.0, 1.0),
-                DVec3::new(1.0, 0.0, 1.0),
+                DVec4::new(x, 0.0, 0.0, 1.0),
+                DVec4::new(x, 0.0, 1.0, 1.0),
+                DVec4::new(1.0, 0.0, 1.0, 1.0),
             ]
         }).collect();
-        let sampled = SampledSurface::new(BSplineSurface::new(
+        let sampled = SampledSurface::new(NURBSSurface::new(
             true, true, knots(), knots(), control_points,
         ));
 

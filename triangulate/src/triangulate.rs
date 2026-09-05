@@ -18,7 +18,7 @@ use crate::{
     stats::Stats,
     surface::Surface
 };
-use nurbs::{BSplineSurface, SampledCurve, SampledSurface, NURBSSurface, KnotVector};
+use nurbs::{SampledCurve, SampledSurface, NURBSSurface, KnotVector};
 
 /// Set the `SAVE_DEBUG_SVGS` environment variable to a directory path to save
 /// SVG debug output for faces that error or panic during triangulation.
@@ -1193,16 +1193,21 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3]) -> Result
                 b.v_degree.try_into().map_err(|_| Error::NumericConversion("negative v degree"))?,
                 &v_knots, &v_multiplicities);
 
-            let control_points_list = control_points_2d(s, &b.control_points_list)?;
+            let control_points_list = control_points_2d(s, &b.control_points_list)?
+                .into_iter()
+                .map(|row| row.into_iter()
+                    .map(|p| DVec4::new(p.x, p.y, p.z, 1.0))
+                    .collect())
+                .collect();
 
-            let surf = BSplineSurface::new(
+            let surf = NURBSSurface::new(
                 b.u_closed.0 != Some(true),
                 b.v_closed.0 != Some(true),
                 u_knot_vec,
                 v_knot_vec,
                 control_points_list,
             );
-            Ok(Surface::BSpline(SampledSurface::new(surf)))
+            Ok(Surface::NURBS(SampledSurface::new(surf)))
         },
         Entity::ComplexEntity(v) if v.len() == 2 => {
             let bspline = if let Entity::BSplineSurfaceWithKnots(b) = &v[0] {
