@@ -1124,16 +1124,17 @@ fn revolution_surface(curve: HomogeneousCurve, origin: DVec3, axis: DVec3)
     }
     let axis = axis.normalize();
     let q = std::f64::consts::FRAC_1_SQRT_2;
-    let controls = curve.control_points.into_iter().map(|h| {
-        let p = h.xyz() / h.w;
-        let axial = origin + axis * (p - origin).dot(&axis);
-        let radial = p - axial;
-        (0..9).map(|j| {
-            let theta = j as f64 * std::f64::consts::FRAC_PI_4;
-            let wj = if j % 2 == 0 { 1.0 } else { q };
-            // The second parameter is the standard four-span rational
-            // quadratic circle, not an angular parameter.  Dividing the odd
-            // radial controls by wj puts them at tangent intersections.
+    // ISO 10303-42 defines revolution as the first parameter and the basis
+    // curve as the second. Swapping them reverses the surface normal.
+    let controls = (0..9).map(|j| {
+        let theta = j as f64 * std::f64::consts::FRAC_PI_4;
+        let wj = if j % 2 == 0 { 1.0 } else { q };
+        curve.control_points.iter().map(|h| {
+            let p = h.xyz() / h.w;
+            let axial = origin + axis * (p - origin).dot(&axis);
+            let radial = p - axial;
+            // The first parameter is the standard four-span rational
+            // quadratic circle, not an angular parameter.
             let rotated = radial * theta.cos() + axis.cross(&radial) * theta.sin();
             let point = axial + rotated / wj;
             let weight = h.w * wj;
@@ -1142,7 +1143,7 @@ fn revolution_surface(curve: HomogeneousCurve, origin: DVec3, axis: DVec3)
     }).collect();
     let circle_knots = KnotVector::from_multiplicities(
         2, &[0.0, 0.25, 0.5, 0.75, 1.0], &[3, 2, 2, 2, 3]);
-    let surface = NURBSSurface::new(curve.open, false, curve.knots, circle_knots, controls);
+    let surface = NURBSSurface::new(false, curve.open, circle_knots, curve.knots, controls);
     Ok(Surface::NURBS(SampledSurface::new(surface)))
 }
 
@@ -1617,7 +1618,7 @@ mod tests {
         let origin = DVec3::new(-0.5, 0.25, 1.0);
         let axis = DVec3::new(1.0, 2.0, -1.0).normalize();
         let surface = nurbs(revolution_surface(test_curve(false), origin, axis).unwrap());
-        let uv = glm::DVec2::new(0.4, 0.125);
+        let uv = glm::DVec2::new(0.125, 0.4);
         let p = DVec3::new(2.0, -1.0, 0.5) * 0.6 + DVec3::new(3.0, 1.0, 2.0) * 0.4;
         let axial = origin + axis * (p - origin).dot(&axis);
         let radial = p - axial;
@@ -1627,8 +1628,12 @@ mod tests {
         let d = surface.surf.derivs::<1>(uv);
         let normal = d[1][0].cross(&d[0][1]);
         assert!(normal.norm() > 1e-6);
-        assert!(normal.dot(&d[1][0]).abs() < 1e-10);
-        assert!(normal.dot(&d[0][1]).abs() < 1e-10);
+        let tangent = DVec3::new(1.0, 2.0, 1.5);
+        let parallel = axis * tangent.dot(&axis);
+        let rotated = parallel + ((tangent - parallel) + axis.cross(&tangent))
+            * std::f64::consts::FRAC_1_SQRT_2;
+        let expected_normal = axis.cross(&(expected - origin)).cross(&rotated);
+        assert!(normal.normalize().dot(&expected_normal.normalize()) > 1.0 - 1e-12);
     }
 
     #[test]
