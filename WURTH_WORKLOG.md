@@ -1,6 +1,49 @@
-# Würth STEP corpus worklog
+# Würth and KiCad STEP repair worklog
 
-## Scope and acceptance
+## Current checkpoint — 2026-09-05
+
+This section is the current status; the dated investigation below is history.
+The task has expanded from assessment to fundamental repairs of both corpora,
+with one local commit per logic change. No push or merge is authorized.
+
+| Verification level | Würth | KiCad |
+| --- | --- | --- |
+| Last completed full sweep (pass 21) | 6,991 / 7,328 pass | 7,228 / 7,251 pass |
+| Improvement over pass 20 | 4 more pass | 11 more pass |
+| Inverse-cell cohort coverage | 452 files | 156 files |
+
+- **Committed repair:** knot-cell-bounded inverse projection; 136 workspace
+  tests pass, no cohort status regressions or increased f64 degenerate counts.
+  Frozen worker: `local/repair-inverse-cells-worker`. Full pass 21 completes
+  Würth first, then KiCad, confirms all 15 improvements and has no status
+  regressions. There are 360 failures remaining, including invalid inputs.
+- **Experiment shelved:** chart-boundary refinement plus local surface samples
+  clears all f64/f32 degenerates on WR-DSUB61803729321 and passes 137 workspace
+  tests, but broader cohorts expose regressions. Its changes are removed from
+  the source tree and saved in `local/chart-centroid-prototype.patch`; frozen
+  workers and diagnostics remain. The OCCT comparison is not a pass: OCCT's
+  exported reference itself contains two degenerate triangles, and the
+  surface-area difference remains about 1.87%.
+- **Canonical completed reports:**
+  `.amp/in/artifacts/repair-pass21/{wurth,kicad}.{json,csv}` and
+  `.amp/in/artifacts/repair-pass21/regressions.json`. Exact source path/hash
+  coverage and frozen worker hashes are verified. A harness pass establishes
+  neither manifold topology nor geometric equivalence to the STEP model.
+- **Remaining work:** chart topology and interior sampling, f32 quantization
+  versus avoidable slivers, seven Würth face-error cases, and per-file RCA
+  that is still qualified where the geometric cause is not established.
+- **Disk policy:** keep inputs, manifests, reports, logs, reproductions and
+  frozen workers; remove superseded reproducible meshes and losslessly
+  compress retained ones. Latest inventories: `local/bookkeeping-mesh-cleanup.json`
+  and `local/chart-mesh-compression.json`. They record another 4,042,129,173
+  bytes recovered. Full passes 20/21 remain untouched; completed experimental
+  meshes are retained as verified gzip streams. Earlier inventories are
+  `local/superseded-mesh-cleanup.json` and `local/disk-cleanup-followup.json`.
+- **Next checkpoint:** review every chart-cohort status regression before
+  attempting another geometry change. Never promote a better failure
+  count or an invalid OCCT reference into a geometric-correctness claim.
+
+## Original baseline scope and acceptance (historical)
 
 Run every `.step`/`.stp` file in the public Würth Elektronik KiCad library with
 the repository's `scripts/corpus.py` harness. Record the corpus revision and
@@ -2105,3 +2148,77 @@ branch, neighboring-vertex hint, or distance-tolerance escape. The analytic
 folded-strip regression covers polynomial and rational surfaces. Evidence:
 `local/repair-inverse-cells-{wurth,kicad}` and
 `/tmp/inverse-cells-workspace-tests.log`. A new full sweep is still required.
+
+### Chart-boundary refinement experiment (not accepted)
+
+The straight spans on WR-DSUB61803729321 face 53394/surface 31 are cubic
+B-splines (#9624/#9628), not STEP LINE entities. Their collinear 3D samples
+are simplified, but their polar-chart images are curved. Long chart chords
+cross the separate inner loop; manufactured crossing vertices are collinear
+in space and corrupt trim parity. Refining existing 3D chords until chart
+midpoint sag is at most 1/32 of chord length removes this face's degenerates.
+However, the whole model regresses from one to 46 f64 degenerates.
+
+Per-triangle instrumentation attributes all 46 new f64 degenerates to four
+other NURBS surfaces (22, 24, 27, 29), not the torus surfaces speculated about
+in the advisory review. This is direct evidence for the feared failure:
+subdivision adds collinear XYZ points whose bent chart image lets CDT form
+zero-area lifted ears where the uniform interior grid is too coarse. Example:
+face 53888, indices [40,39,62], has vertex 62 at the exact spatial midpoint
+but off the chart chord. Surface 31 now has no f64 or f32 degenerates.
+Evidence: `local/chart-refinement-dsub-audit.{json,log}` and frozen
+`local/chart-refinement-audit-worker`; uninstrumented prototype saved as
+`local/chart-refinement-prototype.patch`.
+
+A second experiment adds an actual surface sample at each subdivision ear's
+chart centroid (inside its circumdisc), without moving boundary geometry or
+discarding triangles. It clears all f64/f32 degenerates on the complete DSUB
+model and passes 137 workspace tests, including a triangular-prism trim/area
+regression. An additional 50-test library check passes after removing the
+temporary diagnostic instrumentation and duplicate polar-period guard.
+
+The complete 452-file Würth cohort rejects this experiment: 94 ok / 348 invalid
+/ 7 face errors / 3 parser rejections. Four files improve, but 25 previously
+passing files regress (23 f32-only, two with f64 degenerates). The 156-file
+KiCad cohort has no status changes: 133 ok / 23 invalid. Source path/hash sets
+and worker digest are checked. Per-file transitions and counts are exported
+to `.amp/in/artifacts/chart-centroid-evaluation.json`; underlying causes of
+the new degeneracies remain open. All experimental source changes are
+removed, with a replayable patch at `local/chart-centroid-prototype.patch`.
+Instrumented evidence is retained in `local/chart-centroid-audit.patch` and
+the frozen `local/chart-centroid-audit-worker`.
+
+The optional harness OCCT comparison for DSUB reports `oracle_invalid_mesh`:
+our experimental STL has zero degenerates; the OCCT reference has two. Their
+bounds match, but surface areas are 15174.720246 versus 14896.001290 mm²
+(about 1.87% difference), so no equivalence is claimed. The prior baseline's
+area is 14679.618859 mm². Evidence: `local/chart-dsub-reference`.
+
+### Complete pass 21 and bookkeeping checkpoint
+
+The committed inverse-cell worker completes all 7,328 Würth inputs, then all
+7,251 KiCad inputs. Würth: 6,991 ok / 327 invalid_mesh / 7 tessellation_error /
+3 parser rejections. KiCad: 7,228 ok / 23 invalid_mesh. This confirms all four
+Würth and eleven KiCad cohort improvements, with zero status regressions.
+Exact manifest/hash coverage and worker digest are verified. Canonical
+per-file exports are `.amp/in/artifacts/repair-pass21/`. Neither rejected
+chart experiment is part of this run.
+
+Bookkeeping removes superseded pass-18/19 meshes covered by pass 20 and
+losslessly compresses inverse-cell cohort meshes, verifying decompressed
+SHA-256 values before removing raw copies. The 1,104 recorded operations
+recover 2,385,852,945 bytes: `local/bookkeeping-mesh-cleanup.json`. Inputs,
+reports, logs, metrics, manifests, reference data, workers and current full
+sweep meshes remain. Temporary probe STLs are removed; `uv cache prune`
+removes another 2.1 MiB of unused cache. The release worker is rebuilt after
+shelving the experiment and is byte-identical to the frozen pass-21 worker.
+
+After the chart cohorts finish, their 378 retained mesh exports are also
+losslessly compressed and SHA-256 verified, recovering 1,656,276,228 bytes.
+Inventory: `local/chart-mesh-compression.json`. Together, this bookkeeping
+pass recovers 4,042,129,173 bytes; approximately 13 GiB is free. All inventory
+destinations and deleted raw paths are checked after completion.
+
+The user permits high-quality crates when they reduce complexity. Existing
+core dependencies already include Spade 2.15.1 for CDT, `robust` predicates,
+nalgebra and `thiserror`; no new dependency is added just for bookkeeping.
