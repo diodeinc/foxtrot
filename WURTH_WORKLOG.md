@@ -1599,3 +1599,37 @@ Overlapping collinear trims become a tiny crossing. The inserted intersection
 and an original vertex have identical XYZ but different UV, creating the f64
 degenerate. Trace: `local/htah-face84.log`. Correct per-axis partition-of-unity
 evaluation next; do not weld arbitrary XYZ aliases or discard the facet.
+
+### Complete pass 14 and quantify the remaining f32 defects
+
+All 7,328 Würth files, then all 7,251 KiCad files complete with frozen
+`repair-trust-fit-worker`, source 54f5270, SHA-256
+`4dc2ea4e9b4159e73af6674215170f05046f4b71839fdd251743d21995842185`.
+Exact manifest/hash coverage and disjoint shard unions are verified.
+
+| Corpus | Pass | Invalid mesh | Face errors | Source worker errors |
+| --- | ---: | ---: | ---: | ---: |
+| Würth | 6,965 | 353 | 7 | 3 |
+| KiCad | 7,096 | 155 | 0 | 0 |
+
+Both dome variants pass, SIQW changes from a projection error to invalid_mesh,
+and every other status is unchanged. Per-file RCA/reproduction exports for
+all 518 failures are in `.amp/in/artifacts/repair-pass14/`. This sweep precedes
+the tensor-product refactor and arithmetic work.
+
+A separate frozen diagnostic probes all 478 pass-13 invalid_mesh files with
+zero f64 degenerates (338 Würth, 140 KiCad). All hashes match. It finds 5,664
+local pre-instance degenerate facets: 4,629 have equal f32 vertices; 1,035 have
+distinct but f32-collinear vertices. 4,739 are boundary-only and 925 include
+interior samples. Seventy-four Würth files have no local degenerates, so their
+remaining placement/export behavior needs investigation. Confirm the current
+transformed verdict before attributing each to an instance transform.
+
+The research report calls near-coincident samples redundant, but proximity
+and UV separation alone do not establish this. Its proposed f32-based sample
+suppression is not adopted. Trace endpoint/knot ownership and actual geometry
+before changing sampling; never erase true topology or delete bad facets to
+satisfy the gate. Machine-readable per-facet source IDs, coordinates and hashes:
+`.amp/in/artifacts/repair-pass14/f32-diagnostics.json`. Original probe logs,
+scripts and analysis: `local/f32-rca/`. No diagnostic instrumentation remains
+in production code.
