@@ -923,23 +923,24 @@ fn advanced_face(
     if had_boundary && edges.is_empty() {
         return Err(Error::InvalidGeometry("face boundary cancels completely"));
     }
+    let mut constraints: Vec<_> = edges.iter().map(|&(a, b)| (a, b, true)).collect();
     crate::timing::time("face:resolve_crossing_edges",
-        || resolve_crossing_edges(&mut pts, &mut edges, &mut mesh.verts, v_start));
+        || resolve_crossing_edges(&mut pts, &mut constraints, &mut mesh.verts, v_start));
     let bonus_points = pts.len();
     crate::timing::time("face:add_steiner_points",
         || surf.add_steiner_points(&mut pts, &mut mesh.verts));
     let face_id = face_geometry.0;
     let n_steiner = pts.len() - bonus_points;
     info!("face {} cdt input: {} pts ({} boundary, {} steiner), {} edges",
-          face_id, pts.len(), bonus_points, n_steiner, edges.len());
+          face_id, pts.len(), bonus_points, n_steiner, constraints.len());
     if std::env::var("DUMP_FACE").ok().as_deref() == Some(&face_id.to_string()) {
         eprintln!("DUMP_FACE {}: pts={:?}", face_id, pts);
-        eprintln!("DUMP_FACE {}: edges={:?}", face_id, edges);
+        eprintln!("DUMP_FACE {}: constraints={:?}", face_id, constraints);
     }
     // Preserve per-face panic diagnostics without mutating the input on error.
     let result = crate::timing::time("face:cdt", ||
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut t = cdt::Triangulation::new_with_edges(&pts, &edges)?;
+        let mut t = cdt::Triangulation::new_with_constraints(&pts, constraints.iter().copied())?;
         if let Err(e) = t.run() {
             if let Some(dir) = save_debug_svg_dir() {
                 let filename = format!("{}/err{}.svg", dir, face_id);
@@ -1535,106 +1536,75 @@ fn segment_intersection_params(
     Some((ca.abs() / (ca.abs() + cb.abs()), ac.abs() / (ac.abs() + ad.abs())))
 }
 
-/// Find the lexicographically-smallest pair of constrained edges `(i, j)`
-/// (i < j) that cross at interior points, along with the intersection
-/// parameter `t` along edge `i`.
-///
-/// Uses a sweep over x-sorted edge bounding boxes so that faces with many
-/// non-overlapping contours (e.g. PCB outlines with thousands of via holes)
-/// avoid the full O(E²) pair scan.
-fn find_first_crossing(
-    pts: &[(f64, f64)],
-    edges: &[(usize, usize)],
-) -> Option<(usize, usize, f64)> {
-    // (xmin, xmax, ymin, ymax, edge index), sorted by xmin
-    let mut boxes: Vec<(f64, f64, f64, f64, usize)> = edges.iter()
-        .enumerate()
-        .map(|(i, &(a, b))| {
-            let (ax, ay) = pts[a];
-            let (bx, by) = pts[b];
-            (ax.min(bx), ax.max(bx), ay.min(by), ay.max(by), i)
-        })
-        .collect();
-    boxes.sort_by(|p, q| p.0.partial_cmp(&q.0)
-        .unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut best: Option<(usize, usize, f64)> = None;
-    for bi in 0..boxes.len() {
-        let (_, xmax_i, ymin_i, ymax_i, ei) = boxes[bi];
-        for bj in (bi + 1)..boxes.len() {
-            let (xmin_j, _, ymin_j, ymax_j, ej) = boxes[bj];
-            if xmin_j > xmax_i {
-                break; // sorted by xmin: no later box can overlap either
-            }
-            if ymin_j > ymax_i || ymax_j < ymin_i {
-                continue;
-            }
-            // Orient the pair as (i < j) to match the original scan order
-            let (i, j) = (ei.min(ej), ei.max(ej));
-            if let Some((bi2, bj2, _)) = best {
-                if (i, j) >= (bi2, bj2) {
-                    continue;
-                }
-            }
-            // Skip edges that share an endpoint
-            if edges[i].0 == edges[j].0 || edges[i].0 == edges[j].1
-            || edges[i].1 == edges[j].0 || edges[i].1 == edges[j].1 {
-                continue;
-            }
-            if let Some((t, _s)) = segment_intersection_params(
-                pts[edges[i].0], pts[edges[i].1],
-                pts[edges[j].0], pts[edges[j].1],
-            ) {
-                best = Some((i, j, t));
-            }
-        }
-    }
-    best
-}
-
-/// Pre-process edges to resolve any crossings before feeding them to the CDT.
-/// When two constrained edges cross, split both at the intersection point by
-/// inserting a new shared vertex.
+/// Split all proper constraint intersections in batches. Both children retain
+/// their parent's boundary parity; boundary geometry owns the lifted position
+/// when an internal refinement edge crosses a trim.
 fn resolve_crossing_edges(
     pts: &mut Vec<(f64, f64)>,
-    edges: &mut Vec<(usize, usize)>,
+    edges: &mut Vec<(usize, usize, bool)>,
     verts: &mut Vec<mesh::Vertex>,
     v_start: usize,
 ) {
-    // Limit iterations to prevent pathological runaway
-    for _ in 0..100 {
-        let (i, j, t) = match find_first_crossing(pts, edges) {
-            Some(v) => v,
-            None => break, // no more crossings
-        };
-
-        // Compute 2D intersection point
-        let (ax, ay) = pts[edges[i].0];
-        let (bx, by) = pts[edges[i].1];
-        let new_2d = (ax + t * (bx - ax), ay + t * (by - ay));
-
-        // Compute 3D vertex by interpolation along edge i
-        let va = verts[v_start + edges[i].0];
-        let vb = verts[v_start + edges[i].1];
-        let new_3d = mesh::Vertex {
-            pos: va.pos * (1.0 - t) + vb.pos * t,
-            norm: DVec3::zeros(),
-            color: DVec3::zeros(),
-        };
-
-        let new_idx = pts.len();
-        pts.push(new_2d);
-        verts.push(new_3d);
-
-        // Split edge i: (a, b) → (a, new), (new, b)
-        let (a, b) = edges[i];
-        edges[i] = (a, new_idx);
-        edges.push((new_idx, b));
-
-        // Split edge j: (c, d) → (c, new), (new, d)
-        let (c, d) = edges[j];
-        edges[j] = (c, new_idx);
-        edges.push((new_idx, d));
+    let key = |(x, y): (f64, f64)| {
+        let bits = |v: f64| if v == 0.0 { 0 } else { v.to_bits() };
+        (bits(x), bits(y))
+    };
+    let mut vertices = HashMap::new();
+    for (i, &p) in pts.iter().enumerate() { vertices.entry(key(p)).or_insert(i); }
+    loop {
+        let mut splits = vec![Vec::new(); edges.len()];
+        // Sweep x-sorted bounding boxes to avoid comparing disjoint edges.
+        let mut boxes: Vec<_> = edges.iter().enumerate().map(|(i, &(a, b, _))| {
+            let (ax, ay) = pts[a];
+            let (bx, by) = pts[b];
+            (ax.min(bx), ax.max(bx), ay.min(by), ay.max(by), i)
+        }).collect();
+        boxes.sort_by(|p, q| p.0.total_cmp(&q.0));
+        for bi in 0..boxes.len() {
+            let (_, xmax_i, ymin_i, ymax_i, ei) = boxes[bi];
+            for bj in (bi + 1)..boxes.len() {
+                let (xmin_j, _, ymin_j, ymax_j, ej) = boxes[bj];
+                if xmin_j > xmax_i { break; }
+                if ymin_j > ymax_i || ymax_j < ymin_i { continue; }
+                // Prefer a boundary's interpolation over an internal grid edge.
+                let (i, j) = if (edges[ei].2, std::cmp::Reverse(ei))
+                    >= (edges[ej].2, std::cmp::Reverse(ej)) { (ei, ej) } else { (ej, ei) };
+                if edges[i].0 == edges[j].0 || edges[i].0 == edges[j].1
+                || edges[i].1 == edges[j].0 || edges[i].1 == edges[j].1 {
+                    continue;
+                }
+                if let Some((t, s)) = segment_intersection_params(
+                    pts[edges[i].0], pts[edges[i].1], pts[edges[j].0], pts[edges[j].1],
+                ) {
+                    let (a, b) = (pts[edges[i].0], pts[edges[i].1]);
+                    let p = (a.0 * (1.0 - t) + b.0 * t, a.1 * (1.0 - t) + b.1 * t);
+                    let index = *vertices.entry(key(p)).or_insert_with(|| {
+                        let va = verts[v_start + edges[i].0];
+                        let vb = verts[v_start + edges[i].1];
+                        let index = pts.len();
+                        pts.push(p);
+                        verts.push(mesh::Vertex {
+                            pos: va.pos * (1.0 - t) + vb.pos * t,
+                            norm: DVec3::zeros(), color: DVec3::zeros(),
+                        });
+                        index
+                    });
+                    splits[i].push((t, index));
+                    splits[j].push((s, index));
+                }
+            }
+        }
+        if splits.iter().all(Vec::is_empty) { break; }
+        let mut divided = Vec::new();
+        for (&(a, b, boundary), split) in edges.iter().zip(&mut splits) {
+            split.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            let mut last = vertices[&key(pts[a])];
+            for next in split.iter().map(|&(_, i)| i).chain(std::iter::once(vertices[&key(pts[b])])) {
+                if next != last { divided.push((last, next, boundary)); }
+                last = next;
+            }
+        }
+        *edges = divided;
     }
 }
 
@@ -1695,6 +1665,42 @@ mod tests {
         let (t, s) = segment_intersection_params((0., 0.), (1., 1.),
             (0., f64::EPSILON), (1., 1. - f64::EPSILON)).unwrap();
         assert_eq!((t, s), (0.5, 0.5));
+    }
+
+    #[test]
+    fn crossing_batches_preserve_all_grid_intersections_and_boundary_geometry() {
+        let mut pts = Vec::new();
+        let mut edges = Vec::new();
+        for i in 1..12 {
+            let n = pts.len();
+            pts.extend([(i as f64, 0.), (i as f64, 12.), (0., i as f64), (12., i as f64)]);
+            edges.extend([(n, n + 1, false), (n + 2, n + 3, false)]);
+        }
+        let mut verts: Vec<_> = pts.iter().map(|&(x, y)| mesh::Vertex {
+            pos: DVec3::new(x, y, 0.), norm: DVec3::zeros(), color: DVec3::zeros(),
+        }).collect();
+        resolve_crossing_edges(&mut pts, &mut edges, &mut verts, 0);
+        assert_eq!(pts.len(), 44 + 121);
+        assert_eq!(edges.len(), 22 * 12);
+        let mut cdt = cdt::Triangulation::new_with_constraints(&pts, edges).unwrap();
+        cdt.run().unwrap();
+
+        for internal_first in [false, true] {
+            let mut pts = vec![(0., 0.), (2., 0.), (2., 2.), (0., 2.), (-1., 1.), (3., 1.)];
+            let mut edges = vec![(0, 1, true), (1, 2, true), (2, 3, true), (3, 0, true), (4, 5, false)];
+            if internal_first { edges.reverse(); }
+            let mut verts: Vec<_> = pts.iter().enumerate().map(|(i, &(x, y))| mesh::Vertex {
+                pos: DVec3::new(x, y, if i < 4 { 5. } else { 0. }),
+                norm: DVec3::zeros(), color: DVec3::zeros(),
+            }).collect();
+            resolve_crossing_edges(&mut pts, &mut edges, &mut verts, 0);
+            assert_eq!(pts.len(), 8);
+            assert!(verts[6..].iter().all(|v| v.pos.z == 5.));
+            let mut cdt = cdt::Triangulation::new_with_constraints(&pts, edges).unwrap();
+            cdt.run().unwrap();
+            assert!(cdt.inside((1., 1.)));
+            assert!(!cdt.inside((-0.5, 1.)));
+        }
     }
 
     #[test]

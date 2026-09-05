@@ -1464,3 +1464,30 @@ Tests cover a hole, an internal edge inside the hole, overlapping boundary and
 internal constraints, subdivision by an existing collinear point, both insertion
 orders, and an internal-only triangulation. `cargo test -p cdt`: eight unit tests
 and two doc tests pass (`/tmp/internal-constraints-tests.log`).
+
+### Resolve all constraint crossings, not the first hundred
+
+Replace repeated first-crossing searches and the arbitrary 100-intersection
+cutoff with a bounding-box sweep, per-edge sorted split records, and shared
+intersection vertices. Repeat only to resolve crossings introduced by rounded
+construction. Preserve boundary tags on every child; a boundary owns the 3D
+interpolation when crossed by an internal constraint. Exact coordinate reuse
+avoids manufacturing duplicate intersection vertices. No edge is skipped on
+failure, and no triangle is discarded.
+
+All four CrossingFixedEdge files now pass the complete exported-mesh gate:
+SMA 60312872112545, TNC 67011042241505, WE-TI-1014 and WE-TIHV-1014. The former
+resolver always inserted exactly 100 crossing vertices on the failing faces;
+the batch resolver inserts 310, 156, 186 and 186 respectively. The face logs
+record the corresponding increased constraint counts. These are real uncapped
+arrangements, not error suppression.
+
+Workspace tests pass, including 121 grid crossings and boundary/interior
+intersections in both insertion orders. Eight checkpoints pass. The Würth
+36-file cohort is now 6 ok / 23 invalid_mesh / 7 tessellation_error, versus
+2 / 23 / 11 before this change. The 19 KiCad investigation files retain their
+invalid_mesh status. Evidence: `local/repair-cross-batch-{investigate,check,kicad}`,
+`/tmp/cross-batch-tests.log`; frozen worker `local/repair-cross-batch-worker`.
+The remaining genuine face-processing investigation is TBL 691404910001B;
+the other six face-error inputs violate the degenerate-torus formal rule.
+Output degeneracy and the independent WR-MJ surface-area defect remain open.
