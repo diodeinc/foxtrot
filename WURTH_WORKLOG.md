@@ -1,0 +1,293 @@
+# Würth STEP corpus worklog
+
+## Scope and acceptance
+
+Run every `.step`/`.stp` file in the public Würth Elektronik KiCad library with
+the repository's `scripts/corpus.py` harness. Record the corpus revision and
+hash manifest, retain failure diagnostics, and provide a root-cause assessment
+for every failing input. This is an assessment, not a promise to repair every
+unsupported geometry. No processing code is changed for the baseline.
+
+A pass requires the existing harness's complete tessellation and finite,
+nonempty, nondegenerate mesh checks. The optional OCCT comparison is not enabled
+for the initial sweep; a harness pass is not proof of geometric equivalence.
+
+## 2026-09-05 — Setup
+
+- Read the harness, worker, and documented acceptance criteria.
+- Initial checkout has no modifications and no downloaded Würth corpus.
+- Orb resources: 16 CPUs, 31 GiB RAM, approximately 60 GiB free disk.
+- Plan: build release worker and test harness; acquire the upstream library
+  under ignored `local/`, retaining its license; run every discovered model;
+  group diagnostics by mechanism and inspect the input and source for each
+  failure. Recheck ambiguous or timeout cases with focused diagnostics.
+
+## Baseline execution
+
+- `cargo build --release -p triangulate --example corpus_worker` succeeds
+  (52.67 s; existing parser lifetime warnings).
+- `python3 -m unittest discover -s scripts -p 'test_corpus*.py'`: 19 tests pass.
+- `python3 scripts/corpus.py examples --output local/wurth-smoke`: 3/3 pass.
+- Cloned https://github.com/WurthElektronik/KiCad-Library into `local/wurth`.
+  Corpus revision: `40adcee44afdab5f4ed8038699f78bd784e0f594`.
+  Upstream license and disclaimer PDFs remain in that checkout.
+- Discovered **7,328 files**, all under `3dmodels/`, totaling 9,257,894,601 bytes.
+- Full sweep started with no sampling or exclusions:
+
+  ```sh
+  RUST_LOG=triangulate=debug,cdt=warn,step=warn python3 scripts/corpus.py \
+    local/wurth/3dmodels --jobs 8 --threads 1 --timeout 60 \
+    --output local/wurth-baseline > local/wurth-baseline.log 2>&1
+  ```
+
+- Debug logging for triangulation retains individual face failure reasons.
+  Per-file logs, backtraces, failure meshes, metrics, and reproduction commands
+  live in `local/wurth-baseline/cases/`; the manifest freezes every input hash.
+
+## Investigation and corrected sweep
+
+- Found a false-pass bug: `open_shell` and `closed_shell` log early
+  `advanced_face` errors but do not increment `Stats::num_errors`. For example,
+  `A_Wurth_WA-BCPH_79578211.step` loses a `DEGENERATE_TOROIDAL_SURFACE` face yet
+  the original worker reports `ok`. Added the missing increments and a test
+  covering unsupported surfaces in both shell types. No geometry algorithms
+  are changed.
+- `cargo test -p triangulate --lib`: 10 tests pass, including the new test.
+- Initial sweep bottleneck is Python STL validation: one harness process uses
+  approximately one CPU despite `--jobs 8` (threaded Python geometry loop).
+  Started a corrected **full** sweep as eight separate harness processes with
+  disjoint round-robin slices (`files[i::8]`) of the original manifest. Each
+  process uses `--jobs 1 --threads 1 --timeout 60`; all 7,328 inputs are included
+  exactly once. No timing comparison is made across these configurations.
+- Corrected worker built separately with
+  `CARGO_TARGET_DIR=local/wurth-corrected-target cargo build --release -p triangulate --example corpus_worker`
+  so the running original sweep's binary is unchanged. Final shard artifacts
+  and manifest selections are in `local/wurth-final/`.
+- Confirmed initial failure families: collapsed/retraced UV contours, CDT
+  constraint-walk failures, unsupported degenerate toroidal surfaces, and
+  degenerate triangles. A focused f64/f32 probe found both already-degenerate
+  triangles and tiny f64 triangles that collapse during binary STL rounding.
+  Exact upstream causes remain qualified where only a diagnostic site is known.
+
+## Follow-up evidence
+
+- `cargo test -p triangulate`: 10 unit tests and the checked-in-model integration
+  test pass. The latter processes all three example STEP files.
+- Confirmed a separate input-format failure:
+  `Inductor_THT_Wurth.3dshapes/L_Wurth_WE-CMANC-M_7848031002.step` starts with
+  `**PARASOLID`, not `ISO-10303-21`. Its `.step` extension is misleading.
+  `StepFile::into_blocks` panics at `step/src/step_file.rs:97` when scanning
+  delimiter-free trailing Parasolid data. A separate harness run with a
+  120-second timeout reproduces the same immediate crash; this is not a timeout
+  or resource failure. Evidence: `local/wurth-parasolid-recheck/`.
+- Isolated CDT replay locates the SMSI failure at the 1000-iteration collinear
+  constraint guard, the representative wedge failure at a missing buddy edge,
+  and the representative spherical `InvalidEdge` at a missing seed remapping.
+  All-collinear seed selection retains default index 0 and overwrites a valid
+  original index; the error is not an invalid STEP reference.
+- Completed-case meshes are losslessly compressed as `mesh.stl.gz` to avoid
+  exhausting the orb's disk. Logs, metrics, and result JSON are unchanged.
+  Use `gzip -dc path/to/mesh.stl.gz > /tmp/model.stl` to inspect one. Reproduction
+  commands still emit uncompressed STL. No input model is modified.
+
+## Final outcome
+
+**Foxtrot cannot currently process the entire Würth corpus successfully.**
+The corrected sweep completed all **7,328** manifest entries, once each:
+
+| Harness status | Files |
+| --- | ---: |
+| `ok` | 3,830 |
+| `tessellation_error` | 2,831 |
+| `invalid_mesh` | 665 |
+| `crash` | 2 |
+| Timeout / harness error / nonfinite or empty mesh | 0 |
+
+All eight harness shards exit 1 because of model failures, not setup errors.
+The merged report verifies identical worker hashes across shards, no duplicate
+paths, and exact equality of the path/hash set with the original manifest.
+The original, superseded sweep was stopped after 3,543 completed cases; it is
+**not** a complete baseline. Its SIGINT was ignored, so SIGTERM stopped it after
+the corrected full sweep finished. Comparing those 3,543 results against the
+corrected worker finds **159 false passes corrected**, five `invalid_mesh`
+statuses upgraded to `tessellation_error`, and **zero triangle-count changes**.
+
+### Review artifacts
+
+- [Per-file RCA CSV](.amp/in/artifacts/wurth/failures.csv): all **3,498 failed files**, with categories, failing face/surface IDs, precision counts, diagnostic links, and input hashes.
+- [Detailed per-file RCA JSON](.amp/in/artifacts/wurth/failures.json): exact diagnostics and log line numbers, STEP surface types, cause explanations, metrics, and reproduction commands.
+- [CDT investigation](.amp/in/artifacts/wurth/cdt-rca.md): representative UV dumps, source-level mechanisms, instrumented replay findings, and uncertainties.
+- [Mesh investigation](.amp/in/artifacts/wurth/mesh-rca.md): initial precision investigation and concrete triangle coordinates. The full-corpus precision counts below supersede its explicitly marked snapshot.
+- [Full harness report](local/wurth-final/report.md), [results](local/wurth-final/results.json), and [replay manifest](local/wurth-final/manifest.json).
+- [Passing-model warnings](.amp/in/artifacts/wurth/passing-warnings.json): nine passing files warn about legacy `DESIGN_CONTEXT`/`MECHANICAL_CONTEXT` metadata. A tenth, `T_Wurth_WE-PLN-ER19.step`, drops three wire curves: `COMPOSITE_CURVE` references #112/#114/#116 use `.U.`, but `Logical` parsing accepts `.UNKNOWN.` instead; representation #68 (a geometric set of those curves plus placement) is also unsupported. Its solid mesh passes, but its wire content is not supported. No passing file logs a dropped face.
+
+Generated reports, logs, corpus, and meshes remain in ignored orb directories;
+this worklog and the accounting regression test are source changes. No models
+are vendored, no geometry repair is claimed, and nothing is pushed.
+
+### RCA coverage and mechanisms
+
+Categories overlap: one file can have several distinct failures. Every counted
+face error and caught panic reconciles with its log entry: **23,975 face errors
+and 24 caught panics**. No failed file is left without an identified diagnostic
+family. A family assignment does **not** establish the deepest geometric cause
+for every member; limitations are recorded per file rather than guessed.
+
+| Mechanism | Affected files | Finding |
+| --- | ---: | --- |
+| `CrossingFixedEdge` | 1,447 | Constraint insertion collides with a locked edge. A thin spline example has near-collinear UV noise; not proof of bad vendor topology. |
+| `PointOnFixedEdge` | 1,262 | Collinear constraint splitting stalls. SMSI replay confirms the 1,000-step guard on a retraced, zero-area periodic UV contour, even without Steiner points. |
+| `HalfEdgeInvariant` | 648 | Checked CDT topology invariant fails. Exact invariant and upstream trigger remain unresolved per file. |
+| Unsupported surfaces | 588 | `get_surface` lacks `DEGENERATE_TOROIDAL_SURFACE`, `SURFACE_OF_LINEAR_EXTRUSION`, and `SURFACE_OF_REVOLUTION` implementations. |
+| `WedgeEscape` | 207 | Constraint search leaves its expected triangle wedge. Representative planar replay confirms an absent buddy edge. |
+| `InvalidEdge` | 65 | Representative spherical UV collapse triggers the constructor's missing-remapping guard through failed collinear seed selection. Other occurrences retain branch uncertainty. |
+| `TooFewPoints` | 48 | Contour cannot supply three points to seed CDT; the investigated planar face has only two UV points. |
+| Surface inversion failure | 20 | Spline point-to-UV Newton solve returns no solution: singular Jacobian outside its fallback or exhausted 256 iterations. Exact solver branch remains qualified. |
+| Caught CDT panic | 18 | All 24 backtraces reach `half.rs:199`: flood erase indexes an invalid `next`/`prev` sentinel (4,294,967,295) before checking it. Upstream topology damage remains unresolved. |
+| Missing surface reference | 1 | `L_Wurth_WE-RFI-0402.step`, face #707, explicitly references nonexistent surface #0. |
+| Mislabeled Parasolid | 2 | `L_Wurth_WE-CMANC-M_7848031002.step` and `L_Wurth_WE-CMBNC-TypeM_7448031002.step` have identical hashes and Parasolid contents; STEP block splitting panics. |
+| f32 STL precision collapse | 1,124 | Independently reprocessed triangles are nonzero in f64 but exactly zero-area after STL rounding. |
+| Already degenerate in f64 | 286 | Independently reprocessed STL-degenerate triangles are already exactly zero-area before serialization. |
+
+All **1,159** files with degenerate triangles (665 `invalid_mesh` plus 494 that
+also have tessellation errors) were reprocessed by a focused f64/f32 probe.
+Its triangle counts and STL-degenerate counts match the harness for every file.
+Of **31,119** degenerate STL triangles, **7,578** are already degenerate in f64
+and **23,541** collapse at f32 export. Mesh construction appends CDT triangles
+without checking their 3D area, and STL export casts coordinates without an
+area check. This establishes where exact degeneracy appears, not the precise
+upstream face-generation defect for every triangle.
+
+### Verification and replay
+
+```sh
+cargo test -p triangulate
+# 10 unit tests + 1 integration test pass
+python3 -m unittest discover -s scripts -p 'test_corpus*.py'
+# 19 tests pass
+git diff --check
+# no whitespace errors
+
+# Serial replay of all exact inputs with the corrected worker:
+RUST_LOG=triangulate=debug,cdt=warn,step=warn python3 scripts/corpus.py \
+  local/wurth/3dmodels --manifest local/wurth-final/manifest.json \
+  --worker local/wurth-corrected-target/release/examples/corpus_worker \
+  --jobs 1 --threads 1 --timeout 60 --output local/wurth-replay
+```
+
+The output directory must be new. For faster functional replay, run each of
+`local/wurth-final/selection-0.json` through `selection-7.json` in its own
+harness process. This is a functional assessment, not a benchmark or OCCT
+equivalence test. A harness pass does not prove a watertight or faithful model.
+
+## 2026-09-05 — Continue with the full KiCad corpus
+
+- User requests all Würth files followed by all KiCad STEP files, without
+  stopping at a partial run. Rechecked the Würth filesystem against the final
+  manifest/results: **7,328 discovered = 7,328 completed**, exact path match.
+- Cloned the official repository
+  `https://gitlab.com/kicad/libraries/kicad-packages3D.git` into
+  `local/kicad-packages3D`, revision
+  `e62ed1fc7862da83f789bd562671b5e4b82afcdf`.
+  `LICENSE.md` remains with the corpus (CC-BY-SA 4.0 with KiCad exception).
+- Discovered **7,251 STEP files**, totaling **3,367,745,818 bytes**. No sampling,
+  exclusions, filename deduplication, or extension-case filtering is used.
+- Started all files through `scripts/corpus.py`, as eight disjoint manifest
+  shards under `local/kicad-final/`, each with `--jobs 1 --threads 1 --timeout 60`.
+  Logging and the corrected worker are identical to the Würth run; worker
+  SHA-256 is `7e92685ff97e668a8d0c994c01c750027ca77645ee110d2786dd101bbb4de25c`.
+- Completion requires a result for every discovered path/hash and per-file
+  diagnostic assessment for every failure. Timing gates and the optional OCCT
+  oracle are not enabled; acceptance remains the documented mesh checks.
+
+## KiCad completion — every file processed and every failure rechecked
+
+All **7,251 / 7,251** KiCad files completed. Each of the eight harness processes
+exits 1 for model failures; there are no setup errors, crashes, timeouts, caught
+panics, empty meshes, or nonfinite meshes.
+
+| Corpus | Discovered and completed | Pass | Tessellation error | Invalid mesh | Crash |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Würth | 7,328 | 3,830 | 2,831 | 665 | 2 |
+| KiCad packages3D | 7,251 | 6,169 | 1,060 | 22 | 0 |
+| **Total** | **14,579** | **9,999** | **3,891** | **687** | **2** |
+
+Both corpora have full path/hash manifests and a result for every discovered
+STEP file. No sample, exclusions, or basename deduplication is used. Completion
+means the assessment is complete, **not that every model converts correctly**.
+
+### KiCad RCA artifacts
+
+- [Per-file RCA CSV](.amp/in/artifacts/kicad/failures.csv): all **1,082 failed files**.
+- [Detailed RCA JSON](.amp/in/artifacts/kicad/failures.json): face/surface IDs, exact diagnostic sites and explanations, source entity types, precision evidence, original and diagnostic logs, hashes, and reproduction commands.
+- [Full harness report](local/kicad-final/report.md), [results](local/kicad-final/results.json), and [replay manifest](local/kicad-final/manifest.json).
+- [Passing-model warning audit](.amp/in/artifacts/kicad/passing-warnings.json): 822 passing models have warnings. Of these, 821 have metadata parse warnings only; `Display.3dshapes/NHD-0420H1Z.step` also omits geometric curve sets. The mesh pass criterion does not establish complete wire-content support. No passing model logs a dropped face.
+
+Every failure was reprocessed with an isolated, diagnostic-only CDT build.
+For all **1,082** models, triangle/vertex/face/shell counts, errors, panics, and
+warning/error log counts match the ordinary worker. The copy only adds
+return-site diagnostics; it does not repair or replace geometry algorithms.
+Diagnostic worker hashes and rerun provenance are retained under
+`local/kicad-probes/`. Seventeen models received an additional rerun to locate
+23 previously untagged optional-return failures.
+
+All **9,977 face failures** reconcile with their diagnostic logs:
+**5,093 CDT errors**, **4,789 unsupported-surface failures**, and **95
+unsupported-curve failures**. Every CDT error now has its exact return site
+recorded, rather than only an enum name.
+
+| KiCad failure mechanism | Affected files (overlapping) | Confirmed finding |
+| --- | ---: | --- |
+| Unsupported surface | 563 | Missing `SURFACE_OF_LINEAR_EXTRUSION` and `SURFACE_OF_REVOLUTION` implementations: 2,845 and 1,944 omitted faces respectively. |
+| Half-edge invariant | 320 | Missing/erased hull entries, stale hull edges, incomplete contour reconstruction, or inconsistent edge endpoints; the exact condition is recorded per face. |
+| Crossing fixed edge | 320 | Constraint insertion encounters an already locked edge; each of the three traversal return sites is identified. |
+| Collinear fixed-edge failure | 123 | Non-progressing split or 1,000-iteration guard; precise guard recorded per face. |
+| Wedge escape | 30 | All 45 face failures reach the missing-buddy guard at `cdt/src/triangulate.rs:919`. |
+| Unsupported curve | 16 | `curve()` lacks `HYPERBOLA` and `PARABOLA`: 87 and 8 failed boundaries respectively. |
+| Too few points | 2 | All eight failing faces have exactly two projected points. |
+| Invalid edge | 1 | Both failing faces reach the missing point-remapping guard at `cdt/src/triangulate.rs:312`. |
+| STL precision collapse | 216 | Nonzero f64 facets become exactly degenerate after f32 serialization. |
+| Already degenerate in f64 | 17 | Zero-area facets already exist in the in-memory mesh. |
+
+The dominant invariant sites are `hull.rs:205` (point is not mapped to a hull
+entry), `hull.rs:208` (hull links are erased), and `triangulate.rs:561` (insertion
+selects an erased edge). All 242 occurrences of the latter explicitly confirm
+empty `next` and `prev`, not duplicate endpoints or an existing buddy. These
+checks identify the immediate failure, but not the exact earlier mutation or
+geometric trigger for every model; those deeper causes remain qualified.
+
+All **222** models containing degenerate STL triangles were independently
+checked in f64 and after f32 rounding (22 `invalid_mesh`, 200 also containing
+tessellation failures). Probe triangle counts and degenerate counts match the
+harness in every case. Of **4,086** degenerate STL triangles, **154** were
+already degenerate in f64 and **3,932** collapsed at export.
+
+The expanded instrumentation also resolves the immediate invariant in the
+earlier Würth representative `J_Wurth_WR-BTB_658105303064.step`, surface #55272:
+it selects an erased hull edge at `cdt/src/triangulate.rs:561`. The new evidence
+is `local/wurth-probes/half-complete.log`; the upstream mutation remains unknown.
+
+### Final coverage verification and replay
+
+```sh
+# Replay every exact KiCad input through the ordinary corrected worker:
+RUST_LOG=triangulate=debug,cdt=warn,step=warn python3 scripts/corpus.py \
+  local/kicad-packages3D --manifest local/kicad-final/manifest.json \
+  --worker local/wurth-corrected-target/release/examples/corpus_worker \
+  --jobs 1 --threads 1 --timeout 60 --output local/kicad-replay
+```
+
+As for Würth, the eight `selection-N.json` manifests can instead run in separate
+harness processes for faster functional replay. Output paths must be new.
+Final checks compare filesystem discovery, manifest path/hashes, and result
+path/hashes for both corpora, verify the 3,498 + 1,082 per-file RCA entries,
+and validate every diagnostic link. Temporary scripts and copied diagnostic
+source are removed after use; original inputs, run reports, meshes, and evidence
+remain. No further production source changes are needed for the KiCad audit.
+
+Final verification succeeds: **7,328/7,328 Würth** and **7,251/7,251 KiCad**,
+all input hashes rechecked, **4,580** RCA rows with valid diagnostic links, and
+all **5,093** KiCad CDT failures tied to exact return sites. The machine-readable
+[coverage record](.amp/in/artifacts/corpus-coverage.json) retains these checks.
+`git diff --check` reports no whitespace errors. Temporary probe source and
+orchestration scripts are removed; no shared state is changed or code pushed.
