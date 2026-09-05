@@ -155,7 +155,7 @@ impl Triangulation {
             .collect();
 
         // Find the three closest points
-        let arr = min3(&scratch, &points);
+        let arr = min3(&scratch, &points)?;
 
         // Pick out the triangle points, ensuring that they're clockwise
         let pa = arr[0];
@@ -1379,7 +1379,7 @@ impl Triangulation {
 // then in order (so that out[0] is closest)
 //
 // This is faster than sorting an entire array each time.
-fn min3(buf: &[(usize, f64)], points: &[(f64, f64)]) -> [usize; 3] {
+fn min3(buf: &[(usize, f64)], points: &[(f64, f64)]) -> Result<[usize; 3], Error> {
     let mut array = [(0, std::f64::INFINITY); 3];
     for &(p, score) in buf.iter() {
         if score < array[0].1 {
@@ -1391,9 +1391,7 @@ fn min3(buf: &[(usize, f64)], points: &[(f64, f64)]) -> [usize; 3] {
             // If there is one point picked already, then don't
             // pick it again, since that will be doomed to be colinear.
             let p0 = points[array[0].0];
-            if (p0.0 - points[p].0).abs() >= std::f64::EPSILON ||
-               (p0.1 - points[p].1).abs() >= std::f64::EPSILON
-            {
+            if p0 != points[p] {
                 array[1] = (p, score);
             }
         }
@@ -1402,23 +1400,39 @@ fn min3(buf: &[(usize, f64)], points: &[(f64, f64)]) -> [usize; 3] {
         if score < array[2].1 {
             let p0 = points[array[0].0];
             let p1 = points[array[1].0];
-            if orient2d(p0, p1, points[p]).abs() > std::f64::EPSILON {
+            if orient2d(p0, p1, points[p]) != 0.0 {
                 array[2] = (p, score);
             }
         }
     }
 
+    if array.iter().any(|a| !a.1.is_finite()) {
+        return Err(Error::CannotInitialize);
+    }
     let mut out = [0usize; 3];
     for (i, a) in array.iter().enumerate() {
         out[i] = a.0;
     }
-    // TODO: return a reasonable error if all inputs are colinear or duplicates
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seed_requires_three_geometrically_distinct_noncollinear_points() {
+        for pts in [
+            [(1.0, 1.0), (1.0, 1.0), (1.0, 1.0)],
+            [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)],
+        ] {
+            assert!(matches!(Triangulation::new(&pts), Err(Error::CannotInitialize)));
+        }
+        // Exact predicates, not an absolute epsilon, define collinearity.
+        let pts = [(0.0, 0.0), (1e-10, 0.0), (0.0, 1e-10)];
+        let t = Triangulation::build(&pts).unwrap();
+        assert_eq!(t.triangles().count(), 1);
+    }
 
     #[test]
     fn simple_triangle() {
