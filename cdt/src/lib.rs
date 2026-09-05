@@ -39,11 +39,6 @@ points in a single pass, you should enable the `long-indexes` feature.
 */
 
 #![warn(missing_docs)]
-pub(crate) mod contour;
-pub(crate) mod predicates;
-pub(crate) mod half;
-pub(crate) mod hull;
-pub(crate) mod indexes;
 pub(crate) mod triangulate;
 pub use triangulate::Triangulation;
 

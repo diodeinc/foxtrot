@@ -12,8 +12,8 @@ keywords = ["graphics", "triangulation", "delaunay"]
 categories = ["graphics", "mathematics", "algorithms"]
 
 [dependencies]
-geometry-predicates = "0.3.0"
 log = "0.4"
+spade = "=2.15.1"
 thiserror = "2"
 
 [features]
