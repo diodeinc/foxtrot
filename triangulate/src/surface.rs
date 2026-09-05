@@ -27,7 +27,7 @@ impl SplineChart {
             Self::Polar { periodic, periodic_min, period, radial_origin, radial_scale, .. } => {
                 let other = 1 - periodic;
                 let radius = (raw[other] - radial_origin) / radial_scale;
-                let angle = 2.0 * PI * (raw[periodic] - periodic_min) / period;
+                let angle = 2.0 * PI * (raw[periodic] - periodic_min).rem_euclid(period) / period;
                 let mut mapped = DVec2::zeros();
                 mapped[periodic] = radius * angle.cos();
                 mapped[other] = -radial_scale.signum() * radius * angle.sin();
@@ -1267,6 +1267,15 @@ mod tests {
                 let mapped = chart.lower(raw);
                 let back = chart.raw(mapped).unwrap();
                 assert!((back - raw).norm() < 1e-12);
+
+                let mut seam = raw;
+                seam[periodic] = 2.0;
+                let first = chart.lower(seam);
+                for turn in [-2.0, -1.0, 1.0, 2.0] {
+                    seam[periodic] = 2.0 + turn * 5.0;
+                    assert_eq!(chart.lower(seam), first,
+                        "periodic seam copies must have identical chart coordinates");
+                }
 
                 let h = 1e-6;
                 let mut du = raw;

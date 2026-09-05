@@ -431,3 +431,77 @@ are being recorded separately, without relying on a possibly degenerate oracle
 STL. A third complete Würth-then-KiCad run is underway with frozen
 `local/repair-pass3-worker`; its added `degenerate_f64` metric distinguishes
 in-memory defects from binary-STL quantization.
+
+### Complete third checkpoint and chart ownership repairs
+
+Pass 3 completed every manifest entry, Würth before KiCad, with identical frozen
+worker hashes across shards and no timeout or harness error:
+
+| Corpus | Completed | ok | tessellation_error | invalid_mesh | worker error |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Würth | 7,328 | 4,631 | 1,968 | 726 | 3 |
+| KiCad | 7,251 | 6,465 | 487 | 299 | 0 |
+
+The third returned worker error is the missing-reference WE-RFI-0402 input.
+In-memory zero-area facets total 9,553 in 362 Würth files and two in one KiCad
+file. This checkpoint is not all-green and predates the chart repairs below.
+Reports are `local/{wurth,kicad}-repair-pass3`. To make space for continued
+verification, 2,334 generated scratch meshes from the obsolete, interrupted
+pass 1 are removed (4,728,717,556 bytes). Its logs, metrics, manifests and frozen
+worker remain. Complete baseline and pass 2/3 results are not deleted.
+
+Independent OCCT BRep checks use surface/volume integration, not an oracle STL.
+All seven reference BReps are valid. Results are retained in
+`.amp/in/artifacts/repair-occt-properties.json`. They reveal defects invisible
+to the coarse mesh-validity harness: SMSI surface area was 2.216% too large,
+and D-SUB signed volume was 7.31% too large despite near-matching total area.
+
+Confirmed chart defect: `straighten_periodic_runs` linearly redistributed
+nonuniform intrinsic parameters without moving the corresponding 3D boundary
+vertices. Removing it deletes 80 production lines and restores the invariant
+that unwrapping changes parameters only by whole periods. On SMSI geometry
+#195, measured area falls from 6.21101 to 4.97683 versus OCCT 4.98665; geometry
+#222 falls from 1.59864 to 1.25651 versus OCCT 1.26267. This is a geometry fix,
+not a validation adjustment.
+
+A separate representation-only refactor lifts polynomial spline controls to
+homogeneous coordinates and removes the duplicate spline Surface variant.
+The next change gives singly-periodic splines one continuous polar chart:
+cylinder-like surfaces map to annuli, and one collapsed radial end maps to
+the origin. Both collapsed ends and doubly-periodic surfaces still use their
+existing Cartesian handling. A shared chart owns lowering, raising, normal and
+Steiner conversions. Boundary collapse uses endpoint basis functions, including
+nonclamped knots, and compares represented Cartesian controls without a
+geometric epsilon. Roundtrip domain checks account for floating arithmetic.
+Tests cover both periodic axes, both pole ends, full conical disks and cylindrical
+bands, positive orientation, area, and absence of f64-degenerate triangles.
+
+All seven targeted files pass the strict harness in `local/repair-cdt-polar`.
+This is NOT geometry equivalence: SMSI area is now 50.12845 versus OCCT 50.34325,
+but WR-MJ 615032243321 area increases to 49,071.5 versus OCCT 31,526.7. That
+discrepancy remains under active investigation rather than being hidden by the
+successful worker status.
+
+Another proven numerical defect: plane #422 in antenna 7488918022 produces a
+UV coordinate -3.941e-46 through affine inversion, outside Spade's safe exponent
+range, although all input coordinates are finite. Planes now copy the two world
+coordinates orthogonal to the largest normal component, with orientation
+preserved and distortion bounded by sqrt(3). This avoids creating rounding-only
+coordinates and preserves coordinate predicates. The eight-model checkpoint
+`local/repair-plane-check` passes every file. Workspace tests pass (25 triangulate
+tests plus integration); broad verification of these latest repairs is pending.
+
+The knot-span sampling experiment is not accepted: even after correcting seam
+coordinates, WR-MJ area is 40,681.58 versus OCCT 31,526.66. Its temporary sampler
+and face-area instrumentation are removed. Frozen experimental workers and
+measurements remain under `local/`. The experiment independently exposes an
+exact seam defect: evaluating sin(2π) gives a different chart coordinate from
+sin(0), creating 30,792 f64-degenerate facets. Reducing the intrinsic parameter
+modulo its period before trigonometric evaluation eliminates all of those
+facets (456,154 triangles, zero worker errors/panics/f64 degenerates), without
+snapping coordinates or deleting triangles. This seam normalization is retained
+as a separate fix; 25 triangulate unit tests pass, including exact seam equality
+for both periodic axes, both radial directions and positive/negative periods.
+
+Full pass 4 uses the frozen plane-fix worker, not experimental source. It runs
+every Würth input first, then every KiCad input, with hash-checked coverage.
