@@ -78,7 +78,8 @@ pub enum Surface {
     },
     Plane {
         normal: DVec3,
-        mat_i: DMat4,
+        coordinates: [usize; 2],
+        orientation: f64,
     },
     Cone {
         mat: DMat4,
@@ -199,12 +200,19 @@ impl Surface {
         })
     }
 
-    pub fn new_plane(axis: DVec3, ref_direction: DVec3, location: DVec3) -> Result<Self, Error> {
+    pub fn new_plane(axis: DVec3, _ref_direction: DVec3, _location: DVec3) -> Result<Self, Error> {
+        let dropped = axis.iamax();
+        let scale = axis[dropped].abs();
+        if scale == 0.0 || !axis.iter().all(|x| x.is_finite()) {
+            return Err(Error::SingularTransform("plane normal"));
+        }
+        // Project onto the best-conditioned coordinate plane. Copying two
+        // coordinates preserves their exact predicates, unlike a rounded
+        // inverse affine transform. Metric distortion is at most sqrt(3).
         Ok(Surface::Plane {
-            mat_i: Self::make_rigid_transform(axis, ref_direction, location)
-                .try_inverse()
-                .ok_or(Error::SingularTransform("plane transform"))?,
-            normal: axis,
+            normal: (axis / scale).normalize(),
+            coordinates: [(dropped + 1) % 3, (dropped + 2) % 3],
+            orientation: axis[dropped].signum(),
         })
     }
 
@@ -269,8 +277,8 @@ impl Surface {
     fn lower(&self, p: DVec3) -> Result<DVec2, Error> {
         let p_ = DVec4::new(p.x, p.y, p.z, 1.0);
         match self {
-            Surface::Plane { mat_i, .. } => {
-                Ok(glm::vec4_to_vec2(&(mat_i * p_)))
+            Surface::Plane { coordinates, orientation, .. } => {
+                Ok(DVec2::new(p[coordinates[0]], p[coordinates[1]] * orientation))
             },
             Surface::Cone { mat_i, .. } => {
                 let xy = glm::vec4_to_vec2(&(mat_i * p_));
@@ -1052,6 +1060,33 @@ impl Surface {
 mod tests {
     use super::*;
     use nurbs::{KnotVector, NURBSSurface};
+
+    #[test]
+    fn planar_projection_copies_coordinates_and_preserves_orientation() {
+        for dropped in 0..3 {
+            for sign in [-1.0, 1.0] {
+                let mut axis = DVec3::new(0.2, 0.3, 0.4);
+                axis[dropped] = sign;
+                let surface = Surface::new_plane(axis, DVec3::zeros(), DVec3::zeros()).unwrap();
+                let a = DVec3::new(3.13, -0.45, 1.75);
+                let mut b = a;
+                let mut c = a;
+                let x = (dropped + 1) % 3;
+                let y = (dropped + 2) % 3;
+                b[x] += 1.0;
+                b[dropped] -= axis[x] / axis[dropped];
+                c[y] += 1.0;
+                c[dropped] -= axis[y] / axis[dropped];
+                let pa = surface.lower(a).unwrap();
+                assert_eq!(pa, DVec2::new(a[x], a[y] * sign));
+                let pb = surface.lower(b).unwrap() - pa;
+                let pc = surface.lower(c).unwrap() - pa;
+                assert!((pb.x * pc.y - pb.y * pc.x) * (b - a).cross(&(c - a)).dot(&axis) > 0.);
+            }
+        }
+        let tiny = Surface::new_plane(DVec3::new(0., 1e-100, 0.), DVec3::zeros(), DVec3::zeros()).unwrap();
+        assert_eq!(tiny.normal(DVec3::zeros(), DVec2::zeros()), DVec3::new(0., 1., 0.));
+    }
 
     fn latitude_loop(latitude: f64, segments: usize, reverse: bool,
                      vertices: &mut Vec<Vertex>, edges: &mut Vec<(usize, usize)>) {
