@@ -740,3 +740,13 @@ improvement, not just a successful process return. Evidence:
 For the next full sweep, removed only superseded generated pass-4 `.stl.gz`
 meshes (2,555 files, 4,451,650,165 bytes); reports, source hashes, logs, metrics,
 manifests and frozen workers are preserved, as are baseline/pass-5 meshes.
+
+Short spline trims now sample the intersection of each knot span with the trim,
+rather than filtering a grid over the untrimmed span. A curved interval shorter
+than one grid cell previously became a straight chord with no interior samples.
+The new regression fails before this change (2 points instead of 9); workspace
+tests and all eight checkpoints pass afterward. All eight TooFewPoints faces
+in the KiCad L39.4/L41.9 Bourns models now triangulate; those files retain separate
+crossing-constraint defects. Evidence: `local/kicad-trim-check` and
+`local/repair-trim-check`. The full pass-6 sweep uses an earlier frozen worker
+and deliberately does not contain this change.

@@ -122,14 +122,17 @@ impl<const N: usize> SampledCurve<N>
         // TODO this could be faster if we skip to the right start/end sections
 
         for i in 0..self.curve.knots.len() - 1 {
-            // Skip multiple knots
-            if self.curve.knots[i] == self.curve.knots[i + 1] {
+            // Sample the trimmed span itself. Filtering a whole-span grid
+            // can leave a short, curved trim with only its two endpoints.
+            let a = self.curve.knots[i].max(u_min);
+            let b = self.curve.knots[i + 1].min(u_max);
+            if a >= b {
                 continue;
             }
             // Iterate over a grid within this region
             for u in 0..num_points_per_knot {
                 let frac = (u as f64) / (num_points_per_knot as f64);
-                let u = self.curve.knots[i] * (1.0 - frac) + self.curve.knots[i + 1] * frac;
+                let u = a * (1.0 - frac) + b * frac;
                 if u > u_min && u < u_max {
                     result.push(self.curve.point(u));
                 }
@@ -148,6 +151,17 @@ impl<const N: usize> SampledCurve<N>
 mod tests {
     use super::*;
     use crate::KnotVector;
+
+    #[test]
+    fn short_trims_sample_their_own_knot_interval() {
+        let curve = SampledCurve::new(NDBSplineCurve::new(true,
+            KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
+            vec![DVec3::new(0., 0., 0.), DVec3::new(0.5, 0., 0.), DVec3::new(1., 1., 0.)]));
+        let points = curve.as_polyline(0.01, 0.02, 8);
+        assert_eq!(points.len(), 9);
+        assert!((points[4] - DVec3::new(0.015, 0.015 * 0.015, 0.)).norm() < 1e-15);
+        assert_eq!(curve.as_polyline(0.02, 0.01, 8), points.into_iter().rev().collect::<Vec<_>>());
+    }
 
     #[test]
     fn projection_uses_positive_distance_curvature_near_a_short_endpoint() {
