@@ -30,6 +30,15 @@ impl log::Log for Logger {
     }
 }
 
+fn collinear(points: [nalgebra_glm::DVec3; 3]) -> bool {
+    // A rounded cross product can vanish for a noncollinear thin triangle.
+    // Use the same adaptive orientation predicates as the triangulator.
+    (0..3).all(|i| {
+        let [a, b, c] = points.map(|p| robust::Coord { x: p[i], y: p[(i + 1) % 3] });
+        robust::orient2d(a, b, c) == 0.
+    })
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     if args.len() != 4 {
@@ -58,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let a = mesh.verts[triangle.verts.x as usize].pos;
         let b = mesh.verts[triangle.verts.y as usize].pos;
         let c = mesh.verts[triangle.verts.z as usize].pos;
-        (b - a).cross(&(c - a)).iter().all(|&value| value == 0.0)
+        collinear([a, b, c])
     }).count();
     let start = Instant::now();
     mesh.save_stl(&args[3])?;
@@ -72,4 +81,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         degenerate_f64,
     ))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra_glm::DVec3;
+
+    #[test]
+    fn collinearity_does_not_round_away_thin_triangles() {
+        let a = DVec3::zeros();
+        let b = DVec3::new(1., 1. + f64::EPSILON, 0.);
+        let c = DVec3::new(1. - f64::EPSILON, 1., 0.);
+        assert_eq!((b - a).cross(&(c - a)), DVec3::zeros());
+        assert!(!collinear([a, b, c]));
+        assert!(collinear([a, b, b]));
+        assert!(collinear([a, b, 2. * b]));
+    }
 }

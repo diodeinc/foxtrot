@@ -1867,3 +1867,17 @@ geometry repair.
 
 Compressed historical pass-15 per-case logs and verified every gzip stream.
 Their paths now end in `.log.gz`; reports and frozen workers remain intact.
+
+### Validate f64 collinearity with adaptive predicates
+
+A rounded cross product is not a reliable collinearity predicate: the triangle
+with vertices (0,0), (1,1+epsilon), (1-epsilon,1) has a nonzero determinant
+epsilon², but the old diagnostic rounds it to zero. Use the triangulator's
+adaptive orientation predicates on the three coordinate projections instead.
+The focused worker test distinguishes this case from duplicate vertices and
+true collinear triples. `cargo test --release -p triangulate --example
+corpus_worker` passes. Rechecking all 13 previously flagged models preserves
+their counts (eight Würth and 16 KiCad facets after the sampling change), so
+none of the remaining flags can be dismissed as this diagnostic cancellation.
+No mesh generation or gate changes. Evidence: `/tmp/collinear-tests.log`,
+`local/repair-collinear-{wurth,kicad}`, frozen `local/repair-collinear-worker`.
