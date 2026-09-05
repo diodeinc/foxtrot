@@ -656,3 +656,31 @@ label, decimetres, angle units and a cycle. Workspace tests and all eight strict
 checkpoints pass (`local/repair-units-check`). Legacy fallback detection for files
 without parsed unit contexts is unchanged; this is not a claim of per-instance
 unit scaling for mixed-unit assemblies.
+
+Polar pole classification now consumes the owning representation's declared
+length uncertainty in native coordinates. Shape data carries it through shell,
+face and surface construction; absent precision remains zero, and shared shapes
+use the strictest context. A positive-weight rational boundary is bounded by its
+Cartesian control hull, with hypot-based distances that do not underflow on tiny
+features. There is no global epsilon or changed geometric control point. Tests
+cover distinct mm/metre contexts, zero precision, exact nonclamped boundaries,
+scales from 1e-200 to 1e200, near-axis revolution poles and holes above precision.
+Workspace tests and eight strict checkpoints pass.
+
+BatteryClip_Keystone_54_D16-19mm now processes all 143 faces, 4,572 triangles,
+without errors/panics/f64 or f32 degenerates (`local/battery-uncertainty-check`).
+Its area is 1,322.201946 and volume 217.099895; OCCT's exported mesh reports
+1,323.608742 and 217.882307 (0.106%/0.359% differences), but OCCT itself emits
+four degenerate f32 triangles, so the oracle harness correctly reports
+`oracle_invalid_mesh`, not a passing equivalence check.
+
+Rechecked every pass-5 failure, Würth first then KiCad, with eight disjoint shards
+and exact path/hash coverage (`local/{wurth,kicad}-uncertainty-check`). Of 512
+Würth inputs: 187 now pass, 195 have face errors, 127 invalid meshes and three
+unchanged source-format/reference failures. Of 744 KiCad inputs: 17 now pass,
+405 have face errors and 322 invalid meshes. These are selected-failure results,
+not new full-corpus totals. Remaining CrossingFixedEdge diagnostics occur in
+91 Würth/405 KiCad files. The smallest KiCad example is a five-face test-point
+bridge whose torus seam uses the same EDGE_CURVE forward and backward. The
+current implementation resamples it separately in opposite parameter directions;
+the next investigation is exact consistency of those two discretizations.

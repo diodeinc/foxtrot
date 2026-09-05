@@ -82,13 +82,14 @@ impl<const D: usize> NDBSplineSurface<D> {
         self.v_knots.max_t()
     }
 
-    /// Tests whether the represented Cartesian controls of a rational
-    /// boundary iso-curve coincide. The last component is the weight.
+    /// Tests whether a rational boundary lies within `uncertainty` of its
+    /// first Cartesian control. Positive weights give a convex-hull bound
+    /// on the entire iso-curve. Zero uncertainty requires exact coincidence.
     ///
     /// `parameter` is 0 for a fixed u and 1 for a fixed v.  Evaluating the
     /// fixed direction's basis (rather than selecting an end control row)
     /// also handles non-clamped knot vectors.
-    pub fn rational_boundary_is_point(&self, parameter: usize, value: f64) -> bool {
+    pub fn rational_boundary_is_point(&self, parameter: usize, value: f64, uncertainty: f64) -> bool {
         let controls: Vec<TVec<f64, D>> = match parameter {
             0 => {
                 let span = self.u_knots.find_span(value);
@@ -113,13 +114,11 @@ impl<const D: usize> NDBSplineSurface<D> {
             _ => return false,
         };
         let Some(reference) = controls.first() else { return false; };
-        if D < 2 || reference[D - 1] == 0.0 { return false; }
+        if D < 2 || reference[D - 1] <= 0.0 { return false; }
         controls.iter().all(|point| {
-            point[D - 1] != 0.0 && (0..D - 1).all(|i| {
-                // Compare represented Cartesian controls, without a geometric
-                // tolerance. Homogeneous controls can have different weights.
-                point[i] / point[D - 1] == reference[i] / reference[D - 1]
-            })
+            point[D - 1] > 0.0 && (0..D - 1).fold(0.0_f64, |distance, i| {
+                distance.hypot(point[i] / point[D - 1] - reference[i] / reference[D - 1])
+            }) <= uncertainty
         })
     }
 
@@ -287,11 +286,25 @@ mod tests {
         let clamped = || KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
         let nonclamped = || KnotVector::from_multiplicities(2, &[-1., 0., 1., 2., 3., 4.], &[1; 6]);
         let surface = NDBSplineSurface::new(true, true, clamped(), nonclamped(), controls.clone());
-        assert!(surface.rational_boundary_is_point(1, surface.min_v()));
-        assert!(!surface.rational_boundary_is_point(1, surface.max_v()));
+        assert!(surface.rational_boundary_is_point(1, surface.min_v(), 0.));
+        assert!(!surface.rational_boundary_is_point(1, surface.max_v(), 0.));
         let transposed = (0..3).map(|v| controls.iter().map(|row| row[v]).collect()).collect();
         let surface = NDBSplineSurface::new(true, true, nonclamped(), clamped(), transposed);
-        assert!(surface.rational_boundary_is_point(0, surface.min_u()));
-        assert!(!surface.rational_boundary_is_point(0, surface.max_u()));
+        assert!(surface.rational_boundary_is_point(0, surface.min_u(), 0.));
+        assert!(!surface.rational_boundary_is_point(0, surface.max_u(), 0.));
+    }
+
+    #[test]
+    fn collapsed_boundary_respects_declared_uncertainty_at_every_scale() {
+        for scale in [1e-200, 1e-7, 1., 1e200] {
+            let knots = || KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
+            let surface = NDBSplineSurface::new(true, true, knots(), knots(), vec![
+                vec![DVec4::new(0., 0., 0., 1.), DVec4::new(0., 0., scale, 1.)],
+                vec![DVec4::new(2. * scale, 0., 0., 2.), DVec4::new(2. * scale, 0., 2. * scale, 2.)],
+            ]);
+            assert!(!surface.rational_boundary_is_point(1, 0., 0.));
+            assert!(!surface.rational_boundary_is_point(1, 0., scale * 0.5));
+            assert!(surface.rational_boundary_is_point(1, 0., scale));
+        }
     }
 }

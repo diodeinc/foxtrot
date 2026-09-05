@@ -46,16 +46,22 @@ fn transformed_representation_relationship<'a>(
     }
 }
 
+#[derive(Default)]
+struct ShapeGeometry {
+    instances: Vec<DMat4>,
+    uncertainty: f64,
+}
+
 fn collect_shape_instances<'a>(
     s: &'a StepFile,
     rep_instances: &HashMap<Representation<'a>, Vec<DMat4>>,
     shape_rep_relationship: &HashMap<Representation<'a>, Vec<Representation<'a>>>,
-) -> HashMap<RepresentationItem<'a>, Vec<DMat4>> {
+) -> HashMap<RepresentationItem<'a>, ShapeGeometry> {
     let mut todo: Vec<_> = rep_instances
         .iter()
         .flat_map(|(rep, mats)| mats.iter().copied().map(move |mat| (*rep, mat)))
         .collect();
-    let mut to_mesh: HashMap<RepresentationItem<'a>, Vec<DMat4>> = HashMap::new();
+    let mut to_mesh: HashMap<RepresentationItem<'a>, ShapeGeometry> = HashMap::new();
 
     while let Some((id, mat)) = todo.pop() {
         if let Some(children) = shape_rep_relationship.get(&id) {
@@ -65,22 +71,28 @@ fn collect_shape_instances<'a>(
         }
         // Bind this transform to the RepresentationItem, which is
         // either a ManifoldSolidBrep or a ShellBasedSurfaceModel
-        let items = match &s[id] {
-            Entity::AdvancedBrepShapeRepresentation(b) => &b.items,
-            Entity::ShapeRepresentation(b) => &b.items,
-            Entity::ManifoldSurfaceShapeRepresentation(b) => &b.items,
+        let (items, context) = match &s[id] {
+            Entity::AdvancedBrepShapeRepresentation(b) => (&b.items, b.context_of_items),
+            Entity::ShapeRepresentation(b) => (&b.items, b.context_of_items),
+            Entity::ManifoldSurfaceShapeRepresentation(b) => (&b.items, b.context_of_items),
             e => {
                 warn!("Skipping {:?} (not a supported representation)", e);
                 continue;
             },
         };
+        let uncertainty = representation_uncertainty(s, context);
 
         for m in items.iter() {
             match &s[*m] {
                 Entity::ManifoldSolidBrep(_)
                 | Entity::BrepWithVoids(_)
                 | Entity::ShellBasedSurfaceModel(_) => {
-                    to_mesh.entry(*m).or_default().push(mat);
+                    let shape = to_mesh.entry(*m).or_insert_with(|| ShapeGeometry {
+                        instances: Vec::new(), uncertainty,
+                    });
+                    // A shared shape must satisfy its strictest context.
+                    shape.uncertainty = shape.uncertainty.min(uncertainty);
+                    shape.instances.push(mat);
                 }
                 Entity::Axis2Placement3d(_) | Entity::MappedItem(_) => (),
                 e => warn!("Skipping {:?}", e),
@@ -101,7 +113,7 @@ fn collect_shape_instances<'a>(
             )
             .map(|(i, _e)| Id::new(i))
             .for_each(|i| {
-                to_mesh.entry(i).or_default().push(DMat4::identity());
+                to_mesh.entry(i).or_default().instances.push(DMat4::identity());
             });
     }
 
@@ -341,6 +353,27 @@ fn detect_length_scale_to_mm(s: &StepFile) -> f64 {
         .unwrap_or(1.0)
 }
 
+/// Length uncertainty belongs to the representation context, not the file.
+/// Convert it to native coordinates before any assembly/output transforms.
+fn representation_uncertainty(s: &StepFile, context: RepresentationContext) -> f64 {
+    let parts = entity_components(&s[context]);
+    let native_scale = parts.iter().filter_map(GlobalUnitAssignedContext_::try_from_entity)
+        .flat_map(|units| &units.units)
+        .find_map(|unit| resolve_length_unit_to_mm(s, unit.0));
+    let Some(native_scale) = native_scale else { return 0.0; };
+    parts.iter().filter_map(GlobalUncertaintyAssignedContext_::try_from_entity)
+        .flat_map(|context| &context.uncertainty)
+        .filter_map(|id| s.entity(*id))
+        .filter_map(|measure| {
+            let MeasureValue::LengthMeasure(length) = &measure.value_component else { return None; };
+            let scale = resolve_length_unit_to_mm(s, measure.unit_component.0)?;
+            let value = length.0 * (scale / native_scale);
+            (value.is_finite() && value >= 0.0).then_some(value)
+        })
+        .reduce(f64::min)
+        .unwrap_or(0.0)
+}
+
 /// Fallback unit detection when the structured GUAC-based approach returns
 /// the default (1.0).  Scans all entities for length-related SiUnits and
 /// ConversionBasedUnits that may exist outside of a GUAC context (or whose
@@ -482,7 +515,8 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
             empty,
 
             // Fold operation
-            |(mut mesh, mut stats), (id, mats)| {
+            |(mut mesh, mut stats), (id, shape)| {
+                let mats = &shape.instances;
                 info!("processing shape entity {} ({} transforms)", id.0,
                       mats.len());
                 let v_start = mesh.verts.len();
@@ -493,16 +527,16 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                 crate::timing::time("shape:mesh_faces", || match &s[*id] {
                     Entity::ManifoldSolidBrep(b) =>
                         closed_shell(s, b.outer, &mut mesh, &mut stats,
-                            &styled_item_colors, default_color),
+                            &styled_item_colors, default_color, shape.uncertainty),
                     Entity::ShellBasedSurfaceModel(b) =>
                         for v in &b.sbsm_boundary {
                             shell(s, *v, &mut mesh, &mut stats,
-                                &styled_item_colors, default_color);
+                                &styled_item_colors, default_color, shape.uncertainty);
                         },
                     Entity::BrepWithVoids(b) =>
                         // TODO: handle voids
                         closed_shell(s, b.outer, &mut mesh, &mut stats,
-                            &styled_item_colors, default_color),
+                            &styled_item_colors, default_color, shape.uncertainty),
                     _ => {
                         warn!("Skipping {:?} (not a known solid)", s[*id]);
                     },
@@ -683,6 +717,7 @@ fn shell(
     stats: &mut Stats,
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
+    uncertainty: f64,
 ) {
     match &s[c] {
         Entity::ClosedShell(_) => closed_shell(
@@ -692,6 +727,7 @@ fn shell(
             stats,
             styled_item_colors,
             default_color,
+            uncertainty,
         ),
         Entity::OpenShell(_) => open_shell(
             s,
@@ -700,6 +736,7 @@ fn shell(
             stats,
             styled_item_colors,
             default_color,
+            uncertainty,
         ),
         h => warn!("Skipping {:?} (unknown Shell type)", h),
     }
@@ -712,6 +749,7 @@ fn open_shell(
     stats: &mut Stats,
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
+    uncertainty: f64,
 ) {
     let Some(cs) = s.entity(c) else {
         error!("Failed to get OpenShell {:?}", c);
@@ -726,6 +764,7 @@ fn open_shell(
             stats,
             styled_item_colors,
             default_color,
+            uncertainty,
         ) {
             // Per-face failures are common on large boards and summarised
             // once at the end of triangulate(); keep the per-face detail off
@@ -744,6 +783,7 @@ fn closed_shell(
     stats: &mut Stats,
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
+    uncertainty: f64,
 ) {
     let Some(cs) = s.entity(c) else {
         error!("Failed to get ClosedShell {:?}", c);
@@ -758,6 +798,7 @@ fn closed_shell(
             stats,
             styled_item_colors,
             default_color,
+            uncertainty,
         ) {
             // Per-face failures are common on large boards and summarised
             // once at the end of triangulate(); keep the per-face detail off
@@ -776,6 +817,7 @@ fn advanced_face(
     stats: &mut Stats,
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
+    uncertainty: f64,
 ) -> Result<(), Error> {
     // Closed shells may legally reference either ADVANCED_FACE or the more
     // general FACE_SURFACE; OCCT/KiCad translate both through FaceSurface.
@@ -856,7 +898,7 @@ fn advanced_face(
 
     // Swept surfaces use the actual trims to choose a finite NURBS domain.
     let mut surf = crate::timing::time("face:get_surface",
-        || get_surface(s, face_geometry, &boundary_points))?;
+        || get_surface(s, face_geometry, &boundary_points, uncertainty))?;
 
     // Add curvature samples before constraint insertion. The CDT subdivides
     // constraints at existing vertices, including samples exactly on an edge.
@@ -1018,7 +1060,7 @@ fn conic_curve(s: &StepFile, position: Axis2Placement3d, a: f64, b: f64)
     })
 }
 
-fn extrusion_surface(curve: HomogeneousCurve, vector: DVec3, boundary: &[DVec3])
+fn extrusion_surface(curve: HomogeneousCurve, vector: DVec3, boundary: &[DVec3], uncertainty: f64)
     -> Result<Surface, Error>
 {
     let denominator = vector.norm_squared();
@@ -1041,10 +1083,10 @@ fn extrusion_surface(curve: HomogeneousCurve, vector: DVec3, boundary: &[DVec3])
     ]).collect();
     let surface = NURBSSurface::new(curve.open, true, curve.knots,
         KnotVector::from_multiplicities(1, &[range.0, range.1], &[2, 2]), controls);
-    Ok(Surface::new_nurbs(SampledSurface::new(surface)))
+    Ok(Surface::new_nurbs(SampledSurface::new(surface), uncertainty))
 }
 
-fn revolution_surface(curve: HomogeneousCurve, origin: DVec3, axis: DVec3)
+fn revolution_surface(curve: HomogeneousCurve, origin: DVec3, axis: DVec3, uncertainty: f64)
     -> Result<Surface, Error>
 {
     if axis.norm_squared() == 0.0 {
@@ -1070,10 +1112,10 @@ fn revolution_surface(curve: HomogeneousCurve, origin: DVec3, axis: DVec3)
     let circle_knots = KnotVector::from_multiplicities(
         2, &[0.0, 0.25, 0.5, 0.75, 1.0], &[3, 2, 2, 2, 3]);
     let surface = NURBSSurface::new(false, curve.open, circle_knots, curve.knots, controls);
-    Ok(Surface::new_nurbs(SampledSurface::new(surface)))
+    Ok(Surface::new_nurbs(SampledSurface::new(surface), uncertainty))
 }
 
-fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3]) -> Result<Surface, Error> {
+fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3], uncertainty: f64) -> Result<Surface, Error> {
     match &s[surf] {
         Entity::CylindricalSurface(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position)?;
@@ -1120,7 +1162,7 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3]) -> Result
             let v = s.entity(e.extrusion_axis)
                 .ok_or(Error::InvalidStepEntity("Vector"))?;
             let vector = direction(s, v.orientation)?.normalize() * v.magnitude.0;
-            extrusion_surface(homogeneous_curve(s, e.swept_curve)?, vector, boundary)
+            extrusion_surface(homogeneous_curve(s, e.swept_curve)?, vector, boundary, uncertainty)
         },
         Entity::SurfaceOfRevolution(r) => {
             let placement = s.entity(r.axis_position)
@@ -1128,7 +1170,7 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3]) -> Result
             let origin = cartesian_point(s, placement.location)?;
             let axis = direction(s, placement.axis
                 .ok_or(Error::MissingStepField("Axis1Placement.axis"))?)?;
-            revolution_surface(homogeneous_curve(s, r.swept_curve)?, origin, axis)
+            revolution_surface(homogeneous_curve(s, r.swept_curve)?, origin, axis, uncertainty)
         },
         Entity::BSplineSurfaceWithKnots(b) =>
         {
@@ -1163,7 +1205,7 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3]) -> Result
                 v_knot_vec,
                 control_points_list,
             );
-            Ok(Surface::new_nurbs(SampledSurface::new(surf)))
+            Ok(Surface::new_nurbs(SampledSurface::new(surf), uncertainty))
         },
         Entity::ComplexEntity(v) if v.len() == 2 => {
             let bspline = if let Entity::BSplineSurfaceWithKnots(b) = &v[0] {
@@ -1214,7 +1256,7 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3]) -> Result
                 v_knot_vec,
                 control_points_list,
             );
-            Ok(Surface::new_nurbs(SampledSurface::new(surf)))
+            Ok(Surface::new_nurbs(SampledSurface::new(surf), uncertainty))
 
         },
         e => {
@@ -1530,6 +1572,35 @@ mod tests {
     use nurbs::AbstractSurface;
 
     #[test]
+    fn shape_uncertainty_uses_its_own_context_and_native_units() {
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));
+            #2=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT($,.METRE.));
+            #3=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(2.E-7),#1,'distance','');
+            #4=(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNIT_ASSIGNED_CONTEXT((#1))
+                GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#3))REPRESENTATION_CONTEXT('',''));
+            #5=(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNIT_ASSIGNED_CONTEXT((#2))
+                GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#3))REPRESENTATION_CONTEXT('',''));
+            #6=REPRESENTATION_CONTEXT('','');
+            #7=SHAPE_REPRESENTATION('',(#10),#4);
+            #8=SHAPE_REPRESENTATION('',(#11),#5);
+            #9=CLOSED_SHELL('',());
+            #10=MANIFOLD_SOLID_BREP('',#9);
+            #11=MANIFOLD_SOLID_BREP('',#9);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        assert_eq!(representation_uncertainty(&step, Id::new(4)), 2e-7);
+        assert!((representation_uncertainty(&step, Id::new(5)) - 2e-10).abs() < 1e-25);
+        assert_eq!(representation_uncertainty(&step, Id::new(6)), 0.);
+        let roots = [(Id::new(7), vec![DMat4::identity()]),
+                     (Id::new(8), vec![DMat4::identity()])].iter().cloned().collect();
+        let shapes = collect_shape_instances(&step, &roots, &HashMap::new());
+        assert_eq!(shapes[&Id::new(10)].uncertainty, 2e-7);
+        assert!((shapes[&Id::new(11)].uncertainty - 2e-10).abs() < 1e-25);
+    }
+
+    #[test]
     fn length_units_follow_declared_factors_and_reject_cycles() {
         let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
             #1=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT($,.METRE.));
@@ -1580,7 +1651,7 @@ mod tests {
                 ENDSEC;END-ISO-10303-21;", if outer { "T" } else { "F" });
             let flat = StepFile::strip_flatten(text.as_bytes()).unwrap();
             let step = StepFile::parse(&flat).unwrap();
-            let mut surface = get_surface(&step, Id::new(5), &[]).unwrap();
+            let mut surface = get_surface(&step, Id::new(5), &[], 0.).unwrap();
             let mut verts: Vec<_> = [0.5_f64, 0.7, 0.9].iter().map(|&u| {
                 let radius = 1.0 + 2.0 * v.cos();
                 mesh::Vertex {
@@ -1614,10 +1685,25 @@ mod tests {
     }
 
     #[test]
+    fn revolution_poles_use_uncertainty_without_erasing_larger_holes() {
+        for (radius, uncertainty, origin) in [(1e-16, 0., -1.), (1e-16, 2e-7, 0.), (1e-6, 2e-7, -1.)] {
+            let curve = HomogeneousCurve {
+                open: true,
+                knots: KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+                control_points: vec![DVec4::new(0., radius, 0., 1.), DVec4::new(1., 1., 0., 1.)],
+            };
+            let surface = revolution_surface(curve, DVec3::zeros(), DVec3::x(), uncertainty).unwrap();
+            let Surface::NURBS { chart: crate::surface::SplineChart::Polar { radial_origin, .. }, .. }
+                = surface else { panic!("expected polar spline chart") };
+            assert_eq!(radial_origin, origin);
+        }
+    }
+
+    #[test]
     fn exact_extrusion_points_and_normal() {
         let vector = DVec3::new(0.5, -1.0, 2.0);
         let boundary = [DVec3::new(-10.0, -10.0, -10.0), DVec3::new(10.0, 10.0, 10.0)];
-        let surface = nurbs(extrusion_surface(test_curve(true), vector, &boundary).unwrap());
+        let surface = nurbs(extrusion_surface(test_curve(true), vector, &boundary, 0.).unwrap());
         let uv = glm::DVec2::new(0.4, 0.3);
         let basis = (DVec3::new(2.0, -1.0, 0.5) * 0.6
             + DVec3::new(3.0, 1.0, 2.0) * 0.8) / 1.4;
@@ -1631,7 +1717,7 @@ mod tests {
     fn exact_revolution_points_and_normal_about_skew_axis() {
         let origin = DVec3::new(-0.5, 0.25, 1.0);
         let axis = DVec3::new(1.0, 2.0, -1.0).normalize();
-        let surface = nurbs(revolution_surface(test_curve(false), origin, axis).unwrap());
+        let surface = nurbs(revolution_surface(test_curve(false), origin, axis, 0.).unwrap());
         let uv = glm::DVec2::new(0.125, 0.4);
         let p = DVec3::new(2.0, -1.0, 0.5) * 0.6 + DVec3::new(3.0, 1.0, 2.0) * 0.4;
         let axial = origin + axis * (p - origin).dot(&axis);

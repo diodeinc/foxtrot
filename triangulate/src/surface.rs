@@ -106,7 +106,7 @@ pub enum Surface {
 }
 
 impl Surface {
-    pub fn new_nurbs(surf: SampledSurface<4>) -> Self {
+    pub fn new_nurbs(surf: SampledSurface<4>, uncertainty: f64) -> Self {
         if let Some(normal) = surf.surf.bilinear_plane_normal() {
             return Self::new_plane(normal, DVec3::zeros(), DVec3::zeros())
                 .expect("regular planar patch has a nonzero finite normal");
@@ -121,8 +121,8 @@ impl Surface {
             } else {
                 (surf.surf.min_v(), surf.surf.max_v())
             };
-            let min_point = surf.surf.rational_boundary_is_point(radial, radial_min);
-            let max_point = surf.surf.rational_boundary_is_point(radial, radial_max);
+            let min_point = surf.surf.rational_boundary_is_point(radial, radial_min, uncertainty);
+            let max_point = surf.surf.rational_boundary_is_point(radial, radial_max, uncertainty);
             if min_point && max_point {
                 SplineChart::Cartesian { v_scale: surf.surf.aspect_ratio() }
             } else {
@@ -1237,7 +1237,7 @@ mod tests {
             [(1., 0.), (0., 1.), (-1., 0.), (0., -1.), (1., 0.)].iter()
                 .map(|&(x, y)| vec![DVec4::new(x, y, 0., 1.), DVec4::new(x, y, 1., 1.)])
                 .collect(),
-        )));
+        )), 0.);
         let raw = vec![(0., 1.), (0.1, 1.), (0.6, 1.), (1., 1.),
                        (1., 0.), (0.6, 0.), (0.1, 0.), (0., 0.)];
         let (surf, chart) = match &surface {
@@ -1319,7 +1319,7 @@ mod tests {
                 };
                 let mut surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
                     periodic != 0, periodic != 1, u_knots, v_knots, controls,
-                )));
+                )), 0.);
                 assert!(matches!(surface, Surface::NURBS { chart: SplineChart::Polar { .. }, .. }));
                 let mut vertices = Vec::new();
                 let mut edges = Vec::new();
@@ -1398,7 +1398,7 @@ mod tests {
         }).collect();
         let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
             true, true, knots(), knots(), control_points,
-        )));
+        )), 0.);
         let mut points = vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
         let mut vertices = Vec::new();
 
@@ -1417,7 +1417,7 @@ mod tests {
             KnotVector::from_multiplicities(1, &[-6.17, 1.], &[2, 2]),
             vec![vec![DVec4::new(18., 4.665, -3.75, 1.), DVec4::new(18., 4.665, 3.42, 1.)],
                  vec![DVec4::new(18., -3.835, -3.75, 1.), DVec4::new(18., -3.835, 3.42, 1.)]],
-        )));
+        )), 0.);
         assert!(matches!(surface, Surface::Plane { .. }));
         let mut vertices: Vec<_> = [(3.665, -3.75), (4.665, -3.75), (4.665, 3.42), (3.665, 3.42)]
             .iter().map(|&(y, z)| Vertex { pos: DVec3::new(18., y, z), norm: DVec3::zeros(), color: DVec3::zeros() }).collect();
