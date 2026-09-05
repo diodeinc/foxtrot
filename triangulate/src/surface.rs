@@ -386,7 +386,7 @@ impl Surface {
             Surface::Sphere { mat, mat_i, location, .. } => {
                 let points: Vec<_> = verts.iter().map(|v| {
                     let offset = v.pos - *location;
-                    if offset.norm_squared() <= EPSILON {
+                    if offset.norm_squared() == 0.0 {
                         Err(Error::InvalidGeometry("sphere boundary at center"))
                     } else {
                         Ok(offset.normalize())
@@ -1138,6 +1138,23 @@ mod tests {
         let mut triangulation = cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
         triangulation.run().unwrap();
         assert!(triangulation.triangles().next().is_some());
+    }
+
+    #[test]
+    fn spherical_chart_does_not_depend_on_length_units() {
+        for radius in [1e-9, 1.0, 1e9] {
+            let mut vertices = Vec::new();
+            let mut edges = Vec::new();
+            latitude_loop(0.0, 32, false, &mut vertices, &mut edges);
+            for vertex in &mut vertices { vertex.pos *= radius; }
+            let mut surface = Surface::new_sphere(DVec3::zeros(), radius).unwrap();
+            let uv = surface.lower_verts(&mut vertices, &edges, true).unwrap();
+            for (vertex, &(u, v)) in vertices.iter().zip(&uv) {
+                let raised = surface.raise(DVec2::new(u, v)).unwrap();
+                assert!((raised - vertex.pos).norm() / radius < 1e-12);
+                assert!(vertex.norm.dot(&(vertex.pos / radius)) > 1.0 - 1e-12);
+            }
+        }
     }
 
     #[test]
