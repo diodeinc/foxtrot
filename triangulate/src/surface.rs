@@ -86,7 +86,7 @@ pub enum Surface {
         mat_i: DMat4,
         angle: f64,
     },
-    NURBS { surf: SampledSurface<4>, chart: SplineChart },
+    NURBS { surf: SampledSurface<4>, chart: SplineChart, pole: Option<(DVec3, f64)> },
     Sphere {
         location: DVec3,
         mat: DMat4,     // uv to world
@@ -146,7 +146,17 @@ impl Surface {
         } else {
             SplineChart::Cartesian { v_scale: surf.surf.aspect_ratio() }
         };
-        Surface::NURBS { surf, chart }
+        let pole = match chart {
+            SplineChart::Polar { periodic, periodic_min, radial_origin, radial_min, radial_max, .. }
+                if radial_origin == radial_min || radial_origin == radial_max => {
+                    let mut raw = DVec2::zeros();
+                    raw[periodic] = periodic_min;
+                    raw[1 - periodic] = radial_origin;
+                    Some((surf.surf.point(raw), uncertainty))
+                },
+            _ => None,
+        };
+        Surface::NURBS { surf, chart, pole }
     }
 
     fn fallback_perpendicular(axis: DVec3) -> DVec3 {
@@ -360,7 +370,18 @@ impl Surface {
                     radius * sin,
                 ))
             },
-            Surface::NURBS { surf, chart } => Ok(chart.lower(Self::surf_lower(p, surf)?)),
+            Surface::NURBS { surf, chart, pole } => {
+                // A collapsed iso-boundary has no unique angular inverse.
+                // Use the same declared equivalence that selected this chart,
+                // rather than asking Newton to resolve its arbitrary angle.
+                if let Some((point, uncertainty)) = pole {
+                    let d = p - point;
+                    if d.x.hypot(d.y).hypot(d.z) <= *uncertainty {
+                        return Ok(DVec2::zeros());
+                    }
+                }
+                Ok(chart.lower(Self::surf_lower(p, surf)?))
+            },
             Surface::Sphere { mat_i, radius, .. } => {
                 // mat_i is constructed in prepare to be a reasonable basis
                 let p = (mat_i * p_).xyz() / *radius;
@@ -806,7 +827,7 @@ impl Surface {
                     .xyz();
                 Some(pos)
             },
-            Surface::NURBS { surf, chart } =>
+            Surface::NURBS { surf, chart, .. } =>
                 Self::spline_raw(surf, chart, uv).map(|raw| surf.surf.point(raw)),
             Surface::Torus { mat, minor_radius, major_radius,
                              polar_major, radial_start, .. } => {
@@ -962,7 +983,7 @@ impl Surface {
         }
 
         match self {
-            Surface::NURBS { surf, chart } => {
+            Surface::NURBS { surf, chart, .. } => {
                 self.add_spline_steiner_points(pts, verts, surf, chart);
                 return;
             },
@@ -1057,7 +1078,7 @@ impl Surface {
                 let norm = DVec3::new(proj.x, proj.y, 0.0).normalize();
                 (mat * norm.to_homogeneous()).xyz()
             },
-            Surface::NURBS { surf, chart } => Self::spline_raw(surf, chart, uv)
+            Surface::NURBS { surf, chart, .. } => Self::spline_raw(surf, chart, uv)
                 .map(|raw| Self::surf_normal(raw, surf)).unwrap_or_else(DVec3::zeros),
             Surface::Torus { mat, mat_i, major_radius, .. } => {
                 let p = (*mat_i * DVec4::new(p.x, p.y, p.z, 1.0)).xyz();
@@ -1076,6 +1097,21 @@ impl Surface {
 mod tests {
     use super::*;
     use nurbs::{KnotVector, NURBSSurface};
+
+    #[test]
+    fn a_declared_pole_maps_to_one_chart_point_without_inverting_its_angle() {
+        let knots = || KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]);
+        let controls = vec![
+            vec![DVec4::new(1e-16, 0., 1., 1.), DVec4::new(1., 0., 1., 1.), DVec4::new(1., 0., 0., 1.)],
+            vec![DVec4::new(-1e-16, 1e-16, 1., 1.), DVec4::new(0., 1., 1., 1.), DVec4::new(0., 1., 0., 1.)],
+            vec![DVec4::new(1e-16, 0., 1., 1.), DVec4::new(1., 0., 1., 1.), DVec4::new(1., 0., 0., 1.)],
+        ];
+        let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
+            false, true, knots(), knots(), controls)), 1e-9);
+        assert_eq!(surface.lower(DVec3::new(1e-11, 0., 1. + 1e-11)).unwrap(), DVec2::zeros());
+        let away = surface.raise(DVec2::new(0.1, 0.1)).unwrap();
+        assert!(surface.lower(away).unwrap().norm() > 0.1);
+    }
 
     #[test]
     fn circular_arc_keeps_the_selected_endpoint_representative() {
@@ -1262,7 +1298,7 @@ mod tests {
         let raw = vec![(0., 1.), (0.1, 1.), (0.6, 1.), (1., 1.),
                        (1., 0.), (0.6, 0.), (0.1, 0.), (0., 0.)];
         let (surf, chart) = match &surface {
-            Surface::NURBS { surf, chart } => (surf, chart),
+            Surface::NURBS { surf, chart, .. } => (surf, chart),
             _ => unreachable!(),
         };
         let mut points: Vec<_> = raw.iter().map(|&(u, v)| {

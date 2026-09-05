@@ -919,3 +919,15 @@ On the 114 pass-7 Würth regressions, exact reduction brings 27 to ok, leaving
 ok, one invalid mesh and four tessellation errors. Error-stage shifts are not
 equivalent to fixes. Full-corpus verification remains necessary after this
 change. Evidence: `local/{wurth,kicad}-straight-regressions`.
+
+The remaining pole failure was a contract mismatch: chart construction already
+identifies a collapsed iso-boundary under declared representation uncertainty,
+but lowering still asks Newton to recover a unique angular coordinate there.
+Such a coordinate does not exist at a pole. Preserve the identified pole and
+its declared uncertainty as chart-associated data; matching points map directly
+to the polar chart origin. All other points still use the unchanged inverse.
+This is neither a solver fallback nor a relaxed global convergence threshold.
+The near-pole regression fails before the change, and tests retain a non-pole
+point away from the uncertainty region. Workspace tests, eight checkpoints and
+all 12 selected dome/infrared cases pass, including every pass-8 LED pole
+regression. Evidence: `local/repair-pole-{check,dome}`.
