@@ -698,3 +698,31 @@ rings even over a half revolution, missing the bridge apex (z=1.84625 versus
 the analytic 2.07). That under-resolution requires a separate meshing change.
 Evidence: `local/testpoint-canonical-{check,occt}`, `local/repair-canonical-check`.
 All 512/744 pass-5 failures are being rechecked with `local/repair-canonical-worker`.
+
+Canonical-edge selected sweep completes: Würth remains 187 ok / 195 face errors /
+127 invalid meshes / 3 source failures; KiCad improves to 384 ok / 244 face errors /
+116 invalid meshes. Hash-complete reports: `local/{wurth,kicad}-canonical-check`.
+
+Increasing torus radial density alone exposes another chart defect: bridge area
+gets worse, 35.13314 to 44.23667 rather than OCCT 28.11727. Chart dumps show boundary
+radii up to 8.379645 instead of 4.389823: a half revolution is spuriously expanded
+to a full revolution. `rem_euclid` rounds a tiny negative angle to exactly 2π;
+the interval finder then normalizes that selected endpoint a second time to 0,
+while point lowering keeps 2π. The fix copies the selected endpoint representative
+from the sorted data instead of normalizing it again. A regression fails before
+and passes after; workspace and eight checkpoints pass. Without any density
+change, bridge area becomes 27.10426 and the coarse OCCT gate passes. Apex/volume
+still expose the independent two-ring resolution defect. Evidence:
+`local/testpoint-arc-occt`, `local/repair-arc-check`, frozen `local/repair-arc-worker`.
+
+Source-level examination of all 50 TooFewPoints files (101 faces) is retained in
+`local/two-point-face-rca.json`: 45 files / 88 faces have two opposing LINE edges
+with only two shared vertices; two KiCad files / eight faces have short curved
+spline trims; three Würth files / five toroidal faces use VERTEX_LOOP bounds.
+The latter two groups need meshing investigation, not blanket rejection. OCCT
+accepts representative whole shapes from all three groups, but that does not
+prove raw STEP conformance: ISO 10303-42:2021 §5.5.20 IP2 explicitly requires
+nonzero face_surface extent, and §5.5.1 IP1 forbids overlapping distinct edge
+domains. Do not manufacture triangles for provably collapsed planar line loops.
+Authoritative text read in full:
+https://www.steptools.com/stds/smrl/data/resource_docs/geometric_and_topological_representation/sys/5_schema.htm

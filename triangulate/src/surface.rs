@@ -633,7 +633,10 @@ impl Surface {
             let gap = next - angles[i];
             if gap > largest_gap {
                 largest_gap = gap;
-                start = next.rem_euclid(period);
+                // Keep the same floating representative used for the data.
+                // rem_euclid can round a tiny negative angle to `period`;
+                // normalizing it again would move this endpoint to zero.
+                start = angles[(i + 1) % angles.len()];
             }
         }
         (start, (period - largest_gap).max(0.0))
@@ -1068,6 +1071,19 @@ impl Surface {
 mod tests {
     use super::*;
     use nurbs::{KnotVector, NURBSSurface};
+
+    #[test]
+    fn circular_arc_keeps_the_selected_endpoint_representative() {
+        for input in [[-1e-16, 0., PI / 2., PI], [0.13, 0.7, 0.4, 0.2]] {
+            let mut angles = input;
+            let (start, span) = Surface::smallest_circular_arc(&mut angles);
+            for angle in input {
+                let offset = Surface::unwrap_from_start(angle, start) - start;
+                assert!(offset >= -1e-14 && offset <= span + 1e-14,
+                    "{} lies outside [{}, {}]", angle, start, start + span);
+            }
+        }
+    }
 
     #[test]
     fn planar_projection_copies_coordinates_and_preserves_orientation() {
