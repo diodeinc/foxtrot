@@ -276,113 +276,69 @@ fn collect_rep_instances<'a>(s: &'a StepFile) -> HashMap<Representation<'a>, Vec
 fn si_unit_to_mm(si: &SiUnit_) -> Option<f64> {
     if !matches!(si.name, SiUnitName::Metre) { return None; }
     Some(match &si.prefix {
+        Some(SiPrefix::Exa) => 1e21,
+        Some(SiPrefix::Peta) => 1e18,
+        Some(SiPrefix::Tera) => 1e15,
+        Some(SiPrefix::Giga) => 1e12,
+        Some(SiPrefix::Mega) => 1e9,
+        Some(SiPrefix::Hecto) => 1e5,
+        Some(SiPrefix::Deca) => 1e4,
+        Some(SiPrefix::Deci) => 100.0,
         Some(SiPrefix::Milli) => 1.0,
         Some(SiPrefix::Centi) => 10.0,
         Some(SiPrefix::Micro) => 0.001,
         Some(SiPrefix::Nano) => 0.000_001,
+        Some(SiPrefix::Pico) => 1e-9,
+        Some(SiPrefix::Femto) => 1e-12,
+        Some(SiPrefix::Atto) => 1e-15,
         Some(SiPrefix::Kilo) => 1_000_000.0,
         None => 1000.0, // bare metres → mm
-        _ => 1.0,
+        _ => return None,
     })
 }
 
-/// Resolve a unit entity index to a mm scale factor.
-/// Handles both direct SiUnit entities and ComplexEntity wrappers
-/// (e.g. `(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.))`).
-fn resolve_length_unit_to_mm(s: &StepFile, idx: usize) -> Option<f64> {
-    match &s.0[idx] {
-        Entity::SiUnit(si) => si_unit_to_mm(si),
-        Entity::ComplexEntity(subs) => {
-            for sub in subs {
-                if let Some(si) = SiUnit_::try_from_entity(sub) {
-                    if let Some(scale) = si_unit_to_mm(si) {
-                        return Some(scale);
-                    }
-                }
-            }
-            None
-        }
-        _ => None,
+fn entity_components<'a>(entity: &'a Entity<'a>) -> &'a [Entity<'a>] {
+    match entity {
+        Entity::ComplexEntity(parts) => parts,
+        _ => std::slice::from_ref(entity),
     }
+}
+
+/// Resolve a unit entity index to a mm scale factor.
+/// Follow declared conversion factors, not unit names. Conversion chains
+/// must end in an SI length unit and cannot contain a cycle.
+fn resolve_length_unit_to_mm(s: &StepFile, mut idx: usize) -> Option<f64> {
+    let mut visited = HashSet::new();
+    let mut scale = 1.0;
+    while visited.insert(idx) {
+        let parts = entity_components(s.0.get(idx)?);
+        if let Some(si) = parts.iter().find_map(SiUnit_::try_from_entity) {
+            let result = scale * si_unit_to_mm(si)?;
+            return (result.is_finite() && result > 0.0).then_some(result);
+        }
+        let conversion = parts.iter().find_map(ConversionBasedUnit_::try_from_entity)?;
+        let (value, unit) = match s.0.get(conversion.conversion_factor.0)? {
+            Entity::MeasureWithUnit(m) => (&m.value_component, m.unit_component),
+            Entity::LengthMeasureWithUnit(m) => (&m.value_component, m.unit_component),
+            _ => return None,
+        };
+        let MeasureValue::LengthMeasure(length) = value else { return None; };
+        if !length.0.is_finite() || length.0 <= 0.0 { return None; }
+        scale *= length.0;
+        idx = unit.0;
+    }
+    None
 }
 
 /// Detect the length unit in a STEP file and return a scale factor to
 /// convert coordinates to millimeters.  Returns 1.0 if the file already
 /// uses mm or if the unit cannot be determined.
 fn detect_length_scale_to_mm(s: &StepFile) -> f64 {
-    // Helper: given a unit entity, return the mm scale if it's a length unit
-    let unit_scale = |unit_entity: &Entity| -> Option<f64> {
-        match unit_entity {
-            Entity::SiUnit(si) => si_unit_to_mm(si),
-            Entity::ConversionBasedUnit(cbu) => {
-                let name = cbu.name.0.to_uppercase();
-                if name.contains("INCH") {
-                    return Some(25.4);
-                } else if name.contains("FOOT") || name.contains("FT") {
-                    return Some(304.8);
-                }
-                // Try to read the conversion factor and resolve its base unit
-                let try_mwu = |value: &MeasureValue, unit_component: &Unit| -> Option<f64> {
-                    if let MeasureValue::LengthMeasure(lm) = value {
-                        let base_scale = resolve_length_unit_to_mm(s, unit_component.0)
-                            .unwrap_or(1000.0); // fallback: assume metres
-                        return Some(lm.0 * base_scale);
-                    }
-                    None
-                };
-                if let Entity::MeasureWithUnit(mwu) = &s.0[cbu.conversion_factor.0] {
-                    if let Some(v) = try_mwu(&mwu.value_component, &mwu.unit_component) {
-                        return Some(v);
-                    }
-                }
-                if let Entity::LengthMeasureWithUnit(lmwu) = &s.0[cbu.conversion_factor.0] {
-                    if let Some(v) = try_mwu(&lmwu.value_component, &lmwu.unit_component) {
-                        return Some(v);
-                    }
-                }
-                None
-            },
-            _ => None,
-        }
-    };
-
-    for entity in s.0.iter() {
-        // GlobalUnitAssignedContext may be standalone or inside a ComplexEntity
-        let guacs: Vec<&GlobalUnitAssignedContext_> = match entity {
-            Entity::GlobalUnitAssignedContext(g) => vec![g],
-            Entity::ComplexEntity(subs) => subs.iter()
-                .filter_map(|e| GlobalUnitAssignedContext_::try_from_entity(e))
-                .collect(),
-            _ => continue,
-        };
-        for guac in guacs {
-            for unit_id in &guac.units {
-                // The unit may be a direct entity or inside a ComplexEntity
-                let check_entity = |e: &Entity| -> Option<f64> { unit_scale(e) };
-                match &s.0[unit_id.0] {
-                    Entity::ComplexEntity(subs) => {
-                        for sub in subs {
-                            if let Some(scale) = check_entity(sub) {
-                                if (scale - 1.0).abs() > 1e-10 {
-                                    info!("STEP length unit scale: {}", scale);
-                                }
-                                return scale;
-                            }
-                        }
-                    },
-                    e => {
-                        if let Some(scale) = check_entity(e) {
-                            if (scale - 1.0).abs() > 1e-10 {
-                                info!("STEP length unit scale: {}", scale);
-                            }
-                            return scale;
-                        }
-                    },
-                }
-            }
-        }
-    }
-    1.0 // default: assume mm
+    s.0.iter().flat_map(entity_components)
+        .filter_map(GlobalUnitAssignedContext_::try_from_entity)
+        .flat_map(|context| &context.units)
+        .find_map(|unit| resolve_length_unit_to_mm(s, unit.0))
+        .unwrap_or(1.0)
 }
 
 /// Fallback unit detection when the structured GUAC-based approach returns
@@ -1572,6 +1528,28 @@ fn resolve_crossing_edges(
 mod tests {
     use super::*;
     use nurbs::AbstractSurface;
+
+    #[test]
+    fn length_units_follow_declared_factors_and_reject_cycles() {
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT($,.METRE.));
+            #2=(CONVERSION_BASED_UNIT('arbitrary label',#3)LENGTH_UNIT()NAMED_UNIT(*));
+            #3=LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.0254),#1);
+            #4=(CONVERSION_BASED_UNIT('INCH is only a label',#5)LENGTH_UNIT()NAMED_UNIT(*));
+            #5=MEASURE_WITH_UNIT(LENGTH_MEASURE(12.),#2);
+            #6=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.DECI.,.METRE.));
+            #7=(PLANE_ANGLE_UNIT()NAMED_UNIT(*)SI_UNIT($,.RADIAN.));
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let mut step = StepFile::parse(&flat).unwrap();
+        assert_eq!(resolve_length_unit_to_mm(&step, 2), Some(25.4));
+        assert!((resolve_length_unit_to_mm(&step, 4).unwrap() - 304.8).abs() < 1e-12);
+        assert_eq!(resolve_length_unit_to_mm(&step, 6), Some(100.));
+        assert_eq!(resolve_length_unit_to_mm(&step, 7), None);
+        let Entity::LengthMeasureWithUnit(factor) = &mut step.0[3] else { panic!() };
+        factor.unit_component = Id::new(4);
+        assert_eq!(resolve_length_unit_to_mm(&step, 2), None);
+    }
 
     #[test]
     fn empty_face_tessellations_are_counted_as_errors() {

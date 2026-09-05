@@ -643,3 +643,16 @@ Thus no knot-side special case is currently justified by these files.
 `cargo test -p nurbs -p triangulate` and all eight strict checkpoint files pass.
 Evidence: `local/repair-newton-check`, `local/kicad-newton-check`, and
 `local/bms-newton-metrics.json`; frozen worker `local/repair-newton-worker`.
+
+Before using representation uncertainty for polar topology, consolidate the
+length-unit resolver so uncertainty can be converted to each representation's
+native coordinates. The old resolver only handled SI units, while output-scale
+detection separately guessed conversion units from labels and defaulted missing
+base units to metres. The shared resolver now follows declared conversion-factor
+chains, rejects cycles/non-length bases, and covers all STEP SI prefixes.
+Structured scale detection delegates to it, removing more code than is added.
+Regression coverage includes arbitrarily named inch/foot chains, a misleading
+label, decimetres, angle units and a cycle. Workspace tests and all eight strict
+checkpoints pass (`local/repair-units-check`). Legacy fallback detection for files
+without parsed unit contexts is unchanged; this is not a claim of per-instance
+unit scaling for mixed-unit assemblies.
