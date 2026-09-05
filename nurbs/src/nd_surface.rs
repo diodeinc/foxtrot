@@ -90,7 +90,18 @@ impl<const D: usize> NDBSplineSurface<D> {
     /// fixed direction's basis (rather than selecting an end control row)
     /// also handles non-clamped knot vectors.
     pub fn rational_boundary_is_point(&self, parameter: usize, value: f64, uncertainty: f64) -> bool {
-        let controls: Vec<TVec<f64, D>> = match parameter {
+        let controls = self.boundary_controls(parameter, value);
+        let Some(reference) = controls.first() else { return false; };
+        if D < 2 || reference[D - 1] <= 0.0 { return false; }
+        controls.iter().all(|point| {
+            point[D - 1] > 0.0 && (0..D - 1).fold(0.0_f64, |distance, i| {
+                distance.hypot(point[i] / point[D - 1] - reference[i] / reference[D - 1])
+            }) <= uncertainty
+        })
+    }
+
+    fn boundary_controls(&self, parameter: usize, value: f64) -> Vec<TVec<f64, D>> {
+        match parameter {
             0 => {
                 let span = self.u_knots.find_span(value);
                 let basis = self.u_knots.basis_funs_for_span(span, value);
@@ -111,15 +122,8 @@ impl<const D: usize> NDBSplineSurface<D> {
                     })
                 }).collect()
             },
-            _ => return false,
-        };
-        let Some(reference) = controls.first() else { return false; };
-        if D < 2 || reference[D - 1] <= 0.0 { return false; }
-        controls.iter().all(|point| {
-            point[D - 1] > 0.0 && (0..D - 1).fold(0.0_f64, |distance, i| {
-                distance.hypot(point[i] / point[D - 1] - reference[i] / reference[D - 1])
-            }) <= uncertainty
-        })
+            _ => Vec::new(),
+        }
     }
 
     /// Converts a point at position uv onto the 3D mesh, using basis functions
