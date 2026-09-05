@@ -1654,3 +1654,54 @@ fail only after f32 export. Evidence: `/tmp/extrusion-partition-before.log`,
 `/tmp/tensor-partition-workspace-tests.log`,
 `local/repair-tensor-partition-{wurth,kicad}` and frozen
 `local/repair-tensor-partition-worker`.
+
+### Complete pass 15; keep its KiCad regression open
+
+All 7,328 Würth files followed by all 7,251 KiCad files complete with the
+frozen tensor-partition worker (source 320b7dd); manifest sets, shards and
+worker hash are verified by the sweep and RCA exporter. Würth: 6,968 ok /
+350 invalid_mesh / 7 tessellation_error / 3 source crashes. KiCad: 7,095 ok /
+156 invalid_mesh. The three focused Würth recoveries are the only Würth status
+changes. KiCad Fastron 77A L26.0mm/D10.0mm/P30.48mm regresses from ok to
+invalid_mesh and must be repaired. Reports for all 516 current failures:
+`.amp/in/artifacts/repair-pass15/`.
+
+Losslessly compress historical pass-12 through pass-14 run logs after their
+reports are published; all compressed files pass `gzip -t`. Their paths now
+end in `.log.gz`. Current pass-15 logs, original STEP files, frozen workers,
+metrics and investigation evidence remain intact. Free space returns from
+6.8 GiB to approximately 15 GiB.
+
+### Rational boundary investigation and rejected shortcut
+
+CIRCM12 643250100405 face #3824 / surface #4036 has three exactly collinear
+XYZ vertices but a spurious u=8e-26 on one. Its nonbinary homogeneous weight
+introduces a tiny z warp into an extrusion. An oracle's arithmetic replica
+agrees with the Rust first step within 2%; retaining Cartesian controls would
+remove that preweighting error, but quotient arithmetic still perturbs mixed
+derivatives. Storage reform alone is not a complete projection fix.
+
+An uncommitted experiment compares a quadratic trial with actual residuals
+at nearby cell bounds, within the trust region, without a distance epsilon.
+It removes all f64 defects from the five 6432501004/6xx variants and makes
+13 KiCad axial-inductor cases pass, including the pass-15 regression. However,
+it initially introduces 13 Würth projection errors: selecting an unchanged
+bound discards a valid descent trial. The oracle's suggested early success on
+that unchanged point is rejected because a shortened-step tie cannot prove
+stationarity. Require predicted descent for a bound candidate instead; its
+workspace/cohort validation is in progress, not a claimed completed repair.
+Initial experiment: `local/repair-knot-candidate-{wurth,kicad}`.
+
+### TBL 691404910001B high-precision follow-up
+
+The exact source curves #827/#828 are not identical. Bounded closest-point
+trimming gives a zero interval on #827 and a 1.24147e-11 interval on #828,
+whose underlying curve moves only 8.13107e-14 mm. The two topological vertices
+are 1.98852e-8 mm apart. High-precision surface projections of the endpoint-
+replaced Foxtrot polyline enclose signed normalized-UV area -2.06496e-23;
+the implementation currently cancels the projected boundary. This tiny area
+primarily comes from connecting off-curve topology vertices, not from a proved
+nondegenerate source trim. Neither validity nor invalidity of the source face
+is established. Do not infer an exact duplicate trim, or relax the projection
+termination rule based only on this experiment. Evidence:
+`local/tbl-rca/high_precision_geometry.{py,txt}`.
