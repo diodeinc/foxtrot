@@ -942,6 +942,7 @@ fn advanced_face(
             stats.num_panics += 1;
         },
         Ok(Ok(t)) => {
+            let triangle_start = mesh.triangles.len();
             for (a, b, c) in t.triangles() {
                 let a = (a + offset) as u32;
                 let b = (b + offset) as u32;
@@ -953,6 +954,10 @@ fn advanced_face(
                         U32Vec3::new(a, c, b)
                     }
                 });
+            }
+            if mesh.triangles.len() == triangle_start {
+                debug!("Got error while triangulating {}: empty face tessellation", face_id);
+                stats.num_errors += 1;
             }
         },
         Ok(Err(e)) => {
@@ -1562,6 +1567,23 @@ fn resolve_crossing_edges(
 mod tests {
     use super::*;
     use nurbs::AbstractSurface;
+
+    #[test]
+    fn empty_face_tessellations_are_counted_as_errors() {
+        let flat = StepFile::strip_flatten(include_bytes!("../../examples/cuboid.step")).unwrap();
+        let mut step = StepFile::parse(&flat).unwrap();
+        for entity in &mut step.0 {
+            if let Entity::AdvancedFace(face) = entity {
+                // Two identical boundaries cancel under even-odd fill. That
+                // is a valid empty CDT result, not a successfully meshed face.
+                face.bounds.extend_from_within(..);
+            }
+        }
+        let (mesh, stats) = triangulate(&step);
+        assert!(stats.num_faces > 0);
+        assert_eq!(stats.num_errors, stats.num_faces);
+        assert!(mesh.triangles.is_empty());
+    }
 
     #[test]
     fn degenerate_torus_selects_branch_and_outward_normal() {
