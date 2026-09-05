@@ -581,3 +581,25 @@ All eight checkpoints pass in `local/repair-bilinear-check`. WR-TBL now has
 53,396 triangles (down from 228,454), zero face errors/panics, zero f64 or f32
 degenerates, and passes the unchanged strict mesh validator. A full sweep of
 the combined fixes is still required; known OCCT discrepancies remain open.
+
+Pass 5 completes every file: Würth 6,816 ok, 392 tessellation errors, 117 invalid
+meshes, three parser-return failures; KiCad 6,507 ok, 423 tessellation errors,
+321 invalid meshes. No InvalidInput diagnostics remain. Full reports are under
+`local/{wurth,kicad}-repair-pass5`; qualified per-file RCA exports under
+`.amp/in/artifacts/repair-pass5/{wurth,kicad}/` cover all 512/744 non-ok files
+with hash-checked coverage. Obsolete generated pass-3 compressed meshes are
+removed (3,480 files, 4,846,619,593 bytes), preserving their reports, diagnostics,
+metrics, manifests and frozen worker. Baseline and complete pass-4/5 meshes remain.
+
+D-SUB 242117113's independent volume defect is now isolated to torus chart
+handedness. Switching the angular/radial roles from major-polar to minor-polar
+reverses orientation; lowering previously omitted the corresponding reflection.
+A differential-orientation assertion fails on the old minor-polar chart while
+the major-polar chart passes. Reflecting its second coordinate, consistently
+in lowering and raising, fixes the assertion and all eight strict checkpoints.
+Surface area stays 6,512.680575. Signed volume changes from 2,526.741065 to
+2,350.363572 versus OCCT 2,354.698870 (0.184% low rather than 7.31% high).
+The binary mesh has zero directed-edge imbalance, down from 2,704 unbalanced
+edges; its summed area normal is within 6e-13 of zero. This verifies winding
+closure independently of the unchanged mesh-validity harness. The fix is not
+in the frozen pass-5 worker. WR-MJ's large area discrepancy remains unresolved.

@@ -352,9 +352,12 @@ impl Surface {
                     radial_angle, *radial_start);
                 let radius = base_radius +
                     (radial_angle - *radial_start) * radial_scale;
+                // Exchanging major/minor parameter roles reverses the chart
+                // orientation. Reflect one coordinate to keep CCW outward.
+                let sin = polar_angle.sin() * if *polar_major { 1.0 } else { -1.0 };
                 Ok(DVec2::new(
                     radius * polar_angle.cos(),
-                    radius * polar_angle.sin(),
+                    radius * sin,
                 ))
             },
             Surface::NURBS { surf, chart } => Ok(chart.lower(Self::surf_lower(p, surf)?)),
@@ -807,7 +810,8 @@ impl Surface {
                 if major_radius.abs() < EPSILON || minor_radius.abs() < EPSILON {
                     return None;
                 }
-                let polar_angle = uv.y.atan2(uv.x);
+                let sin = if *polar_major { uv.y } else { -uv.y };
+                let polar_angle = sin.atan2(uv.x);
                 let (major_angle, minor_angle) = if *polar_major {
                     (polar_angle,
                      *radial_start +
@@ -1489,6 +1493,10 @@ mod tests {
         for (vertex, &(u, v)) in vertices.iter().zip(&points) {
             let raised = surface.raise(DVec2::new(u, v)).unwrap();
             assert!((raised - vertex.pos).norm() < 1e-9);
+            let du = surface.raise(DVec2::new(u + 1e-6, v)).unwrap() - raised;
+            let dv = surface.raise(DVec2::new(u, v + 1e-6)).unwrap() - raised;
+            assert!(du.cross(&dv).dot(&vertex.norm) > 0.0,
+                "both toroidal charts must preserve outward surface orientation");
         }
         let boundary_len = points.len();
         let radial_min = points.iter().map(|(u, v)| u.hypot(*v))
