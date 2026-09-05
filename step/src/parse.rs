@@ -118,7 +118,7 @@ impl<'a> Parse<'a> for Logical {
         alt((
             map(tag(".T."), |_| Logical(Some(true))),
             map(tag(".F."), |_| Logical(Some(false))),
-            map(tag(".UNKNOWN."), |_| Logical(None)),
+            map(tag(".U."), |_| Logical(None)),
         ))(s)
     }
 }
@@ -334,6 +334,13 @@ pub(crate) fn parse_complex_mapping(s: &str) -> IResult<Entity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logical_uses_iso_unknown_literal() {
+        assert_eq!(Logical::parse(".U."), Ok(("", Logical(None))));
+        assert!(Logical::parse(".UNKNOWN.").is_err());
+    }
+
     #[test]
     fn test_parse_entity_decl() {
         parse_entity_decl(b"#3=SHAPE_DEFINITION_REPRESENTATION(#4,#10);").unwrap();
