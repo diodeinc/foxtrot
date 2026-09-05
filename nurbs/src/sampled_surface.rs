@@ -9,9 +9,18 @@ pub struct SampledSurface<const N: usize> {
     /// Sample indices arranged as an implicit kd-tree over the 3D sample
     /// positions (median at the middle of each range, axis = depth % 3).
     kd: Vec<u32>,
+    /// Control-hull bounds and the contiguous sample range of each knot cell.
+    cells: Vec<SurfaceCell>,
 }
 
 const PROJECTION_TOL: f64 = 64. * f64::EPSILON;
+
+#[derive(Debug, Clone)]
+struct SurfaceCell {
+    spans: [usize; 2],
+    bounds: [DVec3; 2],
+    samples: std::ops::Range<usize>,
+}
 
 struct DistanceModel {
     spans: [usize; 2],
@@ -127,6 +136,7 @@ where
     pub fn new(surf: NDBSplineSurface<N>) -> Self {
         const N: usize = 8;
         let mut samples = Vec::new();
+        let mut cells = Vec::new();
         for i in surf.u_knots.degree()..surf.u_knots.len() - 1 - surf.u_knots.degree() {
             // Skip multiple knots
             if surf.u_knots[i] == surf.u_knots[i + 1] {
@@ -137,6 +147,7 @@ where
                     continue;
                 }
                 // Iterate over a grid within this region
+                let start = samples.len();
                 for u in 0..N {
                     let frac = (u as f64) / (N as f64 - 1.0);
                     let u = surf.u_knots[i] * (1.0 - frac) + surf.u_knots[i + 1] * frac;
@@ -155,16 +166,24 @@ where
                         samples.push((uv, q));
                     }
                 }
+                let mut bounds = surf.control_bounds([i, j]);
+                for axis in 0..3 {
+                    let roundoff = PROJECTION_TOL * bounds[0][axis].abs().max(bounds[1][axis].abs());
+                    bounds[0][axis] -= roundoff;
+                    bounds[1][axis] += roundoff;
+                }
+                cells.push(SurfaceCell { spans: [i, j], bounds, samples: start..samples.len() });
             }
         }
         let mut kd: Vec<u32> = (0..samples.len() as u32).collect();
         build_kd(&samples, &mut kd, 0);
-        Self { surf, samples, kd }
+        Self { surf, samples, kd, cells }
     }
 
     // Section 6.1 (start middle page 232)
     pub fn uv_from_point_newtons_method(&self, P: DVec3, uv_0: DVec2) -> Option<DVec2> {
-        let out = self.newtons_method_inner(P, uv_0, 256);
+        let domain = [&self.surf.u_knots, &self.surf.v_knots].map(|k| 0..k.len());
+        let out = self.newtons_method_inner(P, uv_0, 256, domain);
         if out.is_none() {
             error!("Could not find UV coordinates");
         }
@@ -233,7 +252,8 @@ where
         DistanceModel { spans, residual: r, position_scale, gradient: g, hessian: h, lo, hi, stationary, converged }
     }
 
-    fn newtons_method_inner(&self, P: DVec3, uv_0: DVec2, max_iter: usize) -> Option<DVec2> {
+    fn newtons_method_inner(&self, P: DVec3, uv_0: DVec2, max_iter: usize,
+        domain: [std::ops::Range<usize>; 2]) -> Option<DVec2> {
         let ranges = DVec2::new(self.surf.max_u() - self.surf.min_u(), self.surf.max_v() - self.surf.min_v());
         let mut uv_i = self.constrain_uv(uv_0);
         let mut radius: f64 = 1.;
@@ -242,8 +262,8 @@ where
             // At a junction, every incident cell must satisfy its one-sided
             // conditions before the point is a constrained minimum.
             let mut models = smallvec::SmallVec::<[DistanceModel; 4]>::new();
-            for u in self.surf.u_knots.spans_at(uv_i.x) {
-                for v in self.surf.v_knots.spans_at(uv_i.y) {
+            for u in self.surf.u_knots.spans_at(uv_i.x).filter(|u| domain[0].contains(u)) {
+                for v in self.surf.v_knots.spans_at(uv_i.y).filter(|v| domain[1].contains(v)) {
                     models.push(self.distance_model(P, uv_i, ranges, [u, v]));
                 }
             }
@@ -334,10 +354,32 @@ where
                 }
             }
         }
-        let result = seeds.into_iter()
-            .filter_map(|seed| self.newtons_method_inner(p, seed, 256))
-            .min_by_key(|&uv| ordered_float::OrderedFloat(
-                self.surf.derivs_relative_to::<0>(uv, p)[0][0].norm_squared()));
+        let distance = |uv| self.surf.derivs_relative_to::<0>(uv, p)[0][0].norm_squared();
+        let domain = [&self.surf.u_knots, &self.surf.v_knots].map(|k| 0..k.len());
+        let mut result = seeds.iter().copied()
+            .filter_map(|seed| self.newtons_method_inner(p, seed, 256, domain.clone()))
+            .min_by_key(|&uv| ordered_float::OrderedFloat(distance(uv)));
+        let mut error = result.map_or(f64::INFINITY, distance);
+        // A nearby sample need not lie in the basin of the nearby surface
+        // sheet. Consider every knot cell whose control hull could improve
+        // the current projection. Keep each search within its cell: a bound
+        // on surface position is not a bound on an unrestrained Newton basin.
+        for cell in &self.cells {
+            let bounds = cell.bounds;
+            let lower_bound: f64 = (0..3).map(|i|
+                (bounds[0][i] - p[i]).max(p[i] - bounds[1][i]).max(0.).powi(2)).sum();
+            if lower_bound >= error { continue; }
+            let seed = self.samples[cell.samples.clone()].iter()
+                .min_by_key(|(_, q)| ordered_float::OrderedFloat(dist2(*q, p))).unwrap().0;
+            let domain = cell.spans.map(|span| span..span + 1);
+            if let Some(uv) = self.newtons_method_inner(p, seed, 256, domain) {
+                let candidate_error = distance(uv);
+                if candidate_error < error {
+                    result = Some(uv);
+                    error = candidate_error;
+                }
+            }
+        }
         if result.is_none() {
             error!("Could not find UV coordinates");
         }
@@ -697,6 +739,32 @@ mod tests {
         let uv = sampled.uv_from_point(DVec3::new(1.24, 2.0, 0.0)).unwrap();
         close(uv.x, 0.31, 1e-10);
         assert!((0.0..=1.0).contains(&uv.y));
+    }
+
+    #[test]
+    fn inverse_projection_finds_the_nearby_sheet_not_the_nearby_sample() {
+        // Two close parallel strips joined above the target. The nearest
+        // grid sample belongs to the left strip, but the target is on the
+        // right strip. Newton on the left stops at an off-surface minimum.
+        let controls: Vec<Vec<DVec3>> = [(0., 0.1), (0., 0.8), (0.001, 1.), (0.001, 0.)]
+            .iter().map(|&(x, y)| [0., 1.].iter()
+                .map(|&z| DVec3::new(x, y, z)).collect()).collect();
+        let u = KnotVector::from_multiplicities(1, &[0., 1., 2., 3.], &[2, 1, 1, 2]);
+        let v = KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
+        let target = DVec3::new(0.001, 0.5, 0.33);
+        let polynomial = SampledSurface::new(NDBSplineSurface::new(
+            true, true, u.clone(), v.clone(), controls.clone(),
+        ));
+        let uv = polynomial.uv_from_point(target).unwrap();
+        assert!((polynomial.surf.point(uv) - target).norm() < 1e-12);
+        let rational = SampledSurface::new(NDBSplineSurface::new(
+            true, true, u, v, controls.iter().zip([0.25, 0.5, 2., 1.].iter())
+                .map(|(row, &w)| row.iter().map(|p|
+                    nalgebra_glm::DVec4::new(p.x * w, p.y * w, p.z * w, w)
+                ).collect()).collect(),
+        ));
+        let uv = rational.uv_from_point(target).unwrap();
+        assert!((rational.surf.point(uv) - target).norm() < 1e-12);
     }
 
     #[test]

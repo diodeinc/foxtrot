@@ -12,6 +12,10 @@ pub trait AbstractSurface {
     fn point_from_basis(&self, uspan: usize, Nu: &VecF,
                                vspan: usize, Nv: &VecF) -> DVec3;
 
+    /// Cartesian control-hull bounds for one knot cell. Rational weights
+    /// must be positive for the convex-hull property to apply.
+    fn control_bounds(&self, spans: [usize; 2]) -> [DVec3; 2];
+
     fn derivs<const E: usize>(&self, uv: DVec2) -> Vec<Vec<DVec3>> {
         self.derivs_relative_to::<E>(uv, DVec3::zeros())
     }

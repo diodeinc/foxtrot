@@ -2054,3 +2054,54 @@ flagged models remain invalid. Evidence: `/tmp/pole-identity-workspace-tests.log
 `local/repair-pole-identity-wurth`, `local/bounded-pole-regressions`, frozen
 `local/repair-pole-identity-worker`. The intermediate exact-quotient worker
 misses one USB pole and is retained only as diagnostic evidence.
+
+### Additional disk cleanup and inverse-sheet investigation
+
+Removed another 3,651 obsolete mesh exports (5,959,055,057 bytes), retaining
+metadata and requiring each input path/hash to be covered by the newer full
+pass-19 sweep. Inventory: `local/disk-cleanup-followup.json`. Input corpora,
+OCCT, frozen workers, diagnostic reproductions, pass 19 and active pass 20 are
+preserved. About 19 GB is free after cleanup.
+
+The Fastron horizontal axial inductor's surface 2557 has two neighboring
+boundary samples whose nearest-grid Newton start reaches the wrong surface
+sheet, with 0.105686 mm residual. None of the 64 starts in that selected cell
+reaches the correct sheet. A start in another knot cell reaches 7.535e-11 mm.
+The exact source vertex 2541 itself succeeds; the failure concerns its two
+neighboring samples. Reproduction and full numerical tables are preserved in
+`local/inverse-seed-rca/`.
+
+An initial control-hull-pruned multi-start experiment passes 136 workspace
+tests but does not fix the actual model: residual remains 0.093348 mm. A hull
+bounds the surface cell, not an unconstrained Newton basin which may leave
+that cell. The repair under investigation therefore restricts each candidate
+search to its knot cell, using the same bounded distance model rather than
+adding a revolution-specific antipodal seed. No successful corpus outcome is
+claimed for this work yet.
+
+### Complete pass 20
+
+The frozen pole-identity worker completes all 7,328 Würth inputs and then all
+7,251 KiCad inputs. Exact manifest path/hash sets and worker digest are checked.
+Würth: 6,987 ok / 331 invalid_mesh / 7 tessellation_error / 3 parser rejections.
+KiCad: 7,217 ok / 34 invalid_mesh / 0 tessellation_error. Compared with pass 19,
+the three capacitor regressions recover; Bourns loses its curve errors but
+still fails mesh validation. No passing file regresses. Per-file evidence:
+`.amp/in/artifacts/repair-pass20/{wurth,kicad}.{json,csv}` and `regressions.json`.
+These checks do not establish manifold topology or OCCT geometry equivalence.
+
+The subsequent cell-bounded inverse experiment now recovers both failing
+Fastron neighbors to 7.535e-11 mm residual. All 136 workspace tests pass.
+The 452-file Würth and 156-file KiCad repair cohorts complete against the
+frozen `local/repair-inverse-cells-worker`; this change is not in pass 20.
+Würth: 115 ok / 327 invalid / 7 face errors / 3 parser rejections. KiCad:
+133 ok / 23 invalid. Four Würth inductors (HCI-1890 and three RCIS parts) and
+eleven KiCad axial inductors recover. No status regression or increased f64
+degenerate count occurs in either cohort. Median triangulation-time ratios
+versus the prior full sweep are 1.63x/1.48x; these concurrent runs are not an
+isolated benchmark. The repair adds cached per-knot-cell control hulls and
+search domains to the existing bounded Newton model, with no conic-specific
+branch, neighboring-vertex hint, or distance-tolerance escape. The analytic
+folded-strip regression covers polynomial and rational surfaces. Evidence:
+`local/repair-inverse-cells-{wurth,kicad}` and
+`/tmp/inverse-cells-workspace-tests.log`. A new full sweep is still required.

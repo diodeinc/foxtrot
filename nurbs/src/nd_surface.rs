@@ -82,6 +82,22 @@ impl<const D: usize> NDBSplineSurface<D> {
         self.v_knots.max_t()
     }
 
+    pub(crate) fn span_control_bounds(&self, spans: [usize; 2],
+        cartesian: impl Fn(TVec<f64, D>) -> DVec3,
+    ) -> [DVec3; 2] {
+        let mut bounds = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
+        for row in &self.control_points[spans[0] - self.u_knots.degree()..=spans[0]] {
+            for &point in &row[spans[1] - self.v_knots.degree()..=spans[1]] {
+                let point = cartesian(point);
+                for i in 0..3 {
+                    bounds[0][i] = bounds[0][i].min(point[i]);
+                    bounds[1][i] = bounds[1][i].max(point[i]);
+                }
+            }
+        }
+        bounds
+    }
+
     /// Tests whether a rational boundary lies within `uncertainty` of its
     /// first Cartesian control. Positive weights give a convex-hull bound
     /// on the entire iso-curve. Zero uncertainty requires exact coincidence.

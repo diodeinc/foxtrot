@@ -14,6 +14,10 @@ impl AbstractSurface for BSplineSurface {
         self.surface_point_from_basis(uspan, Nu, vspan, Nv)
     }
 
+    fn control_bounds(&self, spans: [usize; 2]) -> [DVec3; 2] {
+        self.span_control_bounds(spans, |p| p)
+    }
+
     fn derivs_relative_to<const E: usize>(&self, uv: DVec2, reference: DVec3) -> Vec<Vec<DVec3>> {
         self.derivs_in_span::<E>(uv, [self.u_knots.find_span(uv.x), self.v_knots.find_span(uv.y)], reference)
     }
