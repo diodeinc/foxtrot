@@ -1116,6 +1116,36 @@ fn extrusion_surface(curve: HomogeneousCurve, vector: DVec3, boundary: &[DVec3])
     Ok(Surface::NURBS(SampledSurface::new(surface)))
 }
 
+fn revolution_surface(curve: HomogeneousCurve, origin: DVec3, axis: DVec3)
+    -> Result<Surface, Error>
+{
+    if axis.norm_squared() == 0.0 {
+        return Err(Error::InvalidGeometry("zero revolution axis"));
+    }
+    let axis = axis.normalize();
+    let q = std::f64::consts::FRAC_1_SQRT_2;
+    let controls = curve.control_points.into_iter().map(|h| {
+        let p = h.xyz() / h.w;
+        let axial = origin + axis * (p - origin).dot(&axis);
+        let radial = p - axial;
+        (0..9).map(|j| {
+            let theta = j as f64 * std::f64::consts::FRAC_PI_4;
+            let wj = if j % 2 == 0 { 1.0 } else { q };
+            // The second parameter is the standard four-span rational
+            // quadratic circle, not an angular parameter.  Dividing the odd
+            // radial controls by wj puts them at tangent intersections.
+            let rotated = radial * theta.cos() + axis.cross(&radial) * theta.sin();
+            let point = axial + rotated / wj;
+            let weight = h.w * wj;
+            DVec4::new(point.x * weight, point.y * weight, point.z * weight, weight)
+        }).collect()
+    }).collect();
+    let circle_knots = KnotVector::from_multiplicities(
+        2, &[0.0, 0.25, 0.5, 0.75, 1.0], &[3, 2, 2, 2, 3]);
+    let surface = NURBSSurface::new(curve.open, false, curve.knots, circle_knots, controls);
+    Ok(Surface::NURBS(SampledSurface::new(surface)))
+}
+
 fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3]) -> Result<Surface, Error> {
     match &s[surf] {
         Entity::CylindricalSurface(c) => {
@@ -1150,6 +1180,14 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3]) -> Result
                 .ok_or(Error::InvalidStepEntity("Vector"))?;
             let vector = direction(s, v.orientation)?.normalize() * v.magnitude.0;
             extrusion_surface(homogeneous_curve(s, e.swept_curve)?, vector, boundary)
+        },
+        Entity::SurfaceOfRevolution(r) => {
+            let placement = s.entity(r.axis_position)
+                .ok_or(Error::InvalidStepEntity("Axis1Placement"))?;
+            let origin = cartesian_point(s, placement.location)?;
+            let axis = direction(s, placement.axis
+                .ok_or(Error::MissingStepField("Axis1Placement.axis"))?)?;
+            revolution_surface(homogeneous_curve(s, r.swept_curve)?, origin, axis)
         },
         Entity::BSplineSurfaceWithKnots(b) =>
         {
@@ -1543,6 +1581,55 @@ fn resolve_crossing_edges(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nurbs::AbstractSurface;
+
+    fn test_curve(rational: bool) -> HomogeneousCurve {
+        let points = [DVec3::new(2.0, -1.0, 0.5), DVec3::new(3.0, 1.0, 2.0)];
+        let weights = if rational { [1.0, 2.0] } else { [1.0, 1.0] };
+        HomogeneousCurve {
+            open: true,
+            knots: KnotVector::from_multiplicities(1, &[0.0, 1.0], &[2, 2]),
+            control_points: points.into_iter().zip(weights).map(|(p, w)|
+                DVec4::new(p.x * w, p.y * w, p.z * w, w)).collect(),
+        }
+    }
+
+    fn nurbs(surface: Surface) -> SampledSurface<4> {
+        match surface { Surface::NURBS(s) => s, _ => panic!("expected NURBS") }
+    }
+
+    #[test]
+    fn exact_extrusion_points_and_normal() {
+        let vector = DVec3::new(0.5, -1.0, 2.0);
+        let boundary = [DVec3::new(-10.0, -10.0, -10.0), DVec3::new(10.0, 10.0, 10.0)];
+        let surface = nurbs(extrusion_surface(test_curve(true), vector, &boundary).unwrap());
+        let uv = glm::DVec2::new(0.4, 0.3);
+        let basis = (DVec3::new(2.0, -1.0, 0.5) * 0.6
+            + DVec3::new(3.0, 1.0, 2.0) * 0.8) / 1.4;
+        assert!((surface.surf.point(uv) - (basis + vector * uv.y)).norm() < 1e-12);
+        let d = surface.surf.derivs::<1>(uv);
+        let expected = d[1][0].cross(&vector).normalize();
+        assert!(d[1][0].cross(&d[0][1]).normalize().dot(&expected) > 1.0 - 1e-12);
+    }
+
+    #[test]
+    fn exact_revolution_points_and_normal_about_skew_axis() {
+        let origin = DVec3::new(-0.5, 0.25, 1.0);
+        let axis = DVec3::new(1.0, 2.0, -1.0).normalize();
+        let surface = nurbs(revolution_surface(test_curve(false), origin, axis).unwrap());
+        let uv = glm::DVec2::new(0.4, 0.125);
+        let p = DVec3::new(2.0, -1.0, 0.5) * 0.6 + DVec3::new(3.0, 1.0, 2.0) * 0.4;
+        let axial = origin + axis * (p - origin).dot(&axis);
+        let radial = p - axial;
+        let expected = axial + radial * std::f64::consts::FRAC_1_SQRT_2
+            + axis.cross(&radial) * std::f64::consts::FRAC_1_SQRT_2;
+        assert!((surface.surf.point(uv) - expected).norm() < 1e-12);
+        let d = surface.surf.derivs::<1>(uv);
+        let normal = d[1][0].cross(&d[0][1]);
+        assert!(normal.norm() > 1e-6);
+        assert!(normal.dot(&d[1][0]).abs() < 1e-10);
+        assert!(normal.dot(&d[0][1]).abs() < 1e-10);
+    }
 
     #[test]
     fn counts_unsupported_face_surfaces_in_both_shell_types() {
