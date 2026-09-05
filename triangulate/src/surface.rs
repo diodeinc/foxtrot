@@ -106,7 +106,7 @@ pub enum Surface {
 }
 
 impl Surface {
-    pub fn new_nurbs(surf: SampledSurface<4>, uncertainty: f64) -> Self {
+    pub fn new_nurbs(surf: SampledSurface<4>, uncertainty: f64, has_seam: bool) -> Self {
         if let Some(normal) = surf.surf.bilinear_plane_normal() {
             return Self::new_plane(normal, DVec3::zeros(), DVec3::zeros())
                 .expect("regular planar patch has a nonzero finite normal");
@@ -114,8 +114,8 @@ impl Surface {
         // Bounded, nonperiodic splines can still have matching endpoint
         // iso-curves. Identify the seam geometrically for the chart without
         // changing their knots, endpoint derivatives or bounded inverse domain.
-        let u_periodic = !surf.surf.u_open || surf.surf.rational_boundaries_coincide(0, uncertainty);
-        let v_periodic = !surf.surf.v_open || surf.surf.rational_boundaries_coincide(1, uncertainty);
+        let u_periodic = !surf.surf.u_open || (has_seam && surf.surf.rational_boundaries_coincide(0, uncertainty));
+        let v_periodic = !surf.surf.v_open || (has_seam && surf.surf.rational_boundaries_coincide(1, uncertainty));
         let chart = if u_periodic ^ v_periodic {
             let periodic = if u_periodic { 0 } else { 1 };
             let radial = 1 - periodic;
@@ -1108,9 +1108,11 @@ mod tests {
         let surf = SampledSurface::new(NURBSSurface::new(true, true,
             KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),
             KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]), controls));
-        let exact = Surface::new_nurbs(surf.clone(), 0.);
+        let exact = Surface::new_nurbs(surf.clone(), 0., true);
         assert!(matches!(exact, Surface::NURBS { chart: SplineChart::Cartesian { .. }, .. }));
-        let closed = Surface::new_nurbs(surf, 1e-10);
+        let no_seam = Surface::new_nurbs(surf.clone(), 1e-10, false);
+        assert!(matches!(no_seam, Surface::NURBS { chart: SplineChart::Cartesian { .. }, .. }));
+        let closed = Surface::new_nurbs(surf, 1e-10, true);
         assert!(matches!(closed, Surface::NURBS { chart: SplineChart::Polar { periodic: 0, .. }, .. }));
     }
 
@@ -1123,7 +1125,7 @@ mod tests {
             vec![DVec4::new(1e-16, 0., 1., 1.), DVec4::new(1., 0., 1., 1.), DVec4::new(1., 0., 0., 1.)],
         ];
         let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
-            false, true, knots(), knots(), controls)), 1e-9);
+            false, true, knots(), knots(), controls)), 1e-9, false);
         assert_eq!(surface.lower(DVec3::new(1e-11, 0., 1. + 1e-11)).unwrap(), DVec2::zeros());
         let away = surface.raise(DVec2::new(0.1, 0.1)).unwrap();
         assert!(surface.lower(away).unwrap().norm() > 0.1);
@@ -1310,7 +1312,7 @@ mod tests {
             [(1., 0.), (0., 1.), (-1., 0.), (0., -1.), (1., 0.)].iter()
                 .map(|&(x, y)| vec![DVec4::new(x, y, 0., 1.), DVec4::new(x, y, 1., 1.)])
                 .collect(),
-        )), 0.);
+        )), 0., false);
         let raw = vec![(0., 1.), (0.1, 1.), (0.6, 1.), (1., 1.),
                        (1., 0.), (0.6, 0.), (0.1, 0.), (0., 0.)];
         let (surf, chart) = match &surface {
@@ -1392,7 +1394,7 @@ mod tests {
                 };
                 let mut surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
                     periodic != 0, periodic != 1, u_knots, v_knots, controls,
-                )), 0.);
+                )), 0., false);
                 assert!(matches!(surface, Surface::NURBS { chart: SplineChart::Polar { .. }, .. }));
                 let mut vertices = Vec::new();
                 let mut edges = Vec::new();
@@ -1471,7 +1473,7 @@ mod tests {
         }).collect();
         let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
             true, true, knots(), knots(), control_points,
-        )), 0.);
+        )), 0., false);
         let mut points = vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
         let mut vertices = Vec::new();
 
@@ -1516,7 +1518,7 @@ mod tests {
             KnotVector::from_multiplicities(1, &[-6.17, 1.], &[2, 2]),
             vec![vec![DVec4::new(18., 4.665, -3.75, 1.), DVec4::new(18., 4.665, 3.42, 1.)],
                  vec![DVec4::new(18., -3.835, -3.75, 1.), DVec4::new(18., -3.835, 3.42, 1.)]],
-        )), 0.);
+        )), 0., false);
         assert!(matches!(surface, Surface::Plane { .. }));
         let mut vertices: Vec<_> = [(3.665, -3.75), (4.665, -3.75), (4.665, 3.42), (3.665, 3.42)]
             .iter().map(|&(y, z)| Vertex { pos: DVec3::new(18., y, z), norm: DVec3::zeros(), color: DVec3::zeros() }).collect();

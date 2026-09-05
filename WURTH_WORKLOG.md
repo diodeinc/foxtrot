@@ -953,3 +953,31 @@ area 169.176084 versus 160.459846 (5.43% difference), with matching bounds;
 signed volume 103.280538 versus 106.651604. Retain this approximation defect
 alongside WR-MJ rather than enlarging the oracle tolerance. Evidence:
 `local/repair-closed-{check,capacitor,capacitor-occt}`.
+
+### Pass 9 and topological seam qualification
+
+Full pass 9 covers all 7,328 Würth files (6,758 ok, 203 invalid meshes,
+364 tessellation errors, 3 source crashes) and all 7,251 KiCad files
+(7,115 ok, 125 invalid meshes, 11 tessellation errors). Per-file observations,
+face IDs and coverage evidence: `.amp/in/artifacts/repair-pass9/`.
+KiCad disk recovery retains 6,461 original atomic ok results and reruns the
+remaining 790 with the identical frozen worker; the final path/hash coverage
+is exact. The original eight-shard union is not asserted for this recovery.
+
+Geometric endpoint proximity alone incorrectly closes thin open spline patches.
+Require a repeated, oppositely oriented EDGE_CURVE in the source boundary before
+inferring closure for an otherwise bounded spline. Explicit closure flags are
+unchanged. This recovers 99 of the 164 pass-9 Würth regressions; 63 tessellation
+errors and two invalid meshes remain in that cohort. It does not establish a
+complete seam-axis interpretation, and the remaining regressions need further
+RCA. Workspace tests, eight checkpoints, two resistors and the capacitor pass.
+Evidence: `local/wurth-topological-seam-regressions` and
+`local/repair-topological-seam-{check,resistor,capacitor}`.
+
+Disk maintenance removes superseded generated meshes only: 1,167 baseline
+meshes (about 1.58 GB), 429 pass-7 Würth meshes (446 MB), 149 pass-7 KiCad
+meshes (38 MB), and about 661 MB of incremental compiler caches. 1,105 targeted
+STLs are losslessly compressed (3.78 GB original). Older baseline/final/pass-1
+through pass-6 worker logs are losslessly gzip-compressed: append `.gz` to old
+log links or decompress them. Sources, manifests, results, metrics and frozen
+workers remain available; pass-7 and newer logs remain plain text.

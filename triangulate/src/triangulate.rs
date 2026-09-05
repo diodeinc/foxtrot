@@ -838,12 +838,14 @@ fn advanced_face(
     let mut edges = Vec::new();
     let mut unwrap_ranges = Vec::new();
     let mut boundary_points = Vec::new();
+    let mut has_seam = false;
     let v_start = mesh.verts.len();
     let mut num_pts = 0;
     for b in bounds {
-        let (bound_contours, edge_loop_len) =
+        let (bound_contours, edge_loop_len, bound_has_seam) =
             crate::timing::time("face:face_bound", || face_bound(s, *b))?;
         boundary_points.extend_from_slice(&bound_contours);
+        has_seam |= bound_has_seam;
 
         match bound_contours.len() {
             // We should always have non-zero items in the contour
@@ -898,7 +900,7 @@ fn advanced_face(
 
     // Swept surfaces use the actual trims to choose a finite NURBS domain.
     let mut surf = crate::timing::time("face:get_surface",
-        || get_surface(s, face_geometry, &boundary_points, uncertainty))?;
+        || get_surface(s, face_geometry, &boundary_points, uncertainty, has_seam))?;
 
     // Add curvature samples before constraint insertion. The CDT subdivides
     // constraints at existing vertices, including samples exactly on an edge.
@@ -1088,7 +1090,7 @@ fn extrusion_surface(curve: HomogeneousCurve, vector: DVec3, boundary: &[DVec3],
     ]).collect();
     let surface = NURBSSurface::new(curve.open, true, curve.knots,
         KnotVector::from_multiplicities(1, &[range.0, range.1], &[2, 2]), controls);
-    Ok(Surface::new_nurbs(SampledSurface::new(surface), uncertainty))
+    Ok(Surface::new_nurbs(SampledSurface::new(surface), uncertainty, false))
 }
 
 fn revolution_surface(curve: HomogeneousCurve, origin: DVec3, axis: DVec3, uncertainty: f64)
@@ -1117,10 +1119,10 @@ fn revolution_surface(curve: HomogeneousCurve, origin: DVec3, axis: DVec3, uncer
     let circle_knots = KnotVector::from_multiplicities(
         2, &[0.0, 0.25, 0.5, 0.75, 1.0], &[3, 2, 2, 2, 3]);
     let surface = NURBSSurface::new(false, curve.open, circle_knots, curve.knots, controls);
-    Ok(Surface::new_nurbs(SampledSurface::new(surface), uncertainty))
+    Ok(Surface::new_nurbs(SampledSurface::new(surface), uncertainty, false))
 }
 
-fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3], uncertainty: f64) -> Result<Surface, Error> {
+fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3], uncertainty: f64, has_seam: bool) -> Result<Surface, Error> {
     match &s[surf] {
         Entity::CylindricalSurface(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position)?;
@@ -1210,7 +1212,7 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3], uncertain
                 v_knot_vec,
                 control_points_list,
             );
-            Ok(Surface::new_nurbs(SampledSurface::new(surf), uncertainty))
+            Ok(Surface::new_nurbs(SampledSurface::new(surf), uncertainty, has_seam))
         },
         Entity::ComplexEntity(v) if v.len() == 2 => {
             let bspline = if let Entity::BSplineSurfaceWithKnots(b) = &v[0] {
@@ -1261,7 +1263,7 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3], uncertain
                 v_knot_vec,
                 control_points_list,
             );
-            Ok(Surface::new_nurbs(SampledSurface::new(surf), uncertainty))
+            Ok(Surface::new_nurbs(SampledSurface::new(surf), uncertainty, has_seam))
 
         },
         e => {
@@ -1281,7 +1283,7 @@ fn control_points_2d(s: &StepFile, rows: &Vec<Vec<CartesianPoint>>) -> Result<Ve
         .collect()
 }
 
-fn face_bound(s: &StepFile, b: FaceBound) -> Result<(Vec<DVec3>, usize), Error> {
+fn face_bound(s: &StepFile, b: FaceBound) -> Result<(Vec<DVec3>, usize, bool), Error> {
     let (bound, orientation) = match &s[b] {
         Entity::FaceBound(b) => (b.bound, b.orientation),
         Entity::FaceOuterBound(b) => (b.bound, b.orientation),
@@ -1289,16 +1291,24 @@ fn face_bound(s: &StepFile, b: FaceBound) -> Result<(Vec<DVec3>, usize), Error> 
     };
     match &s[bound] {
         Entity::EdgeLoop(e) => {
+            let mut orientations = HashMap::new();
+            let mut has_seam = false;
+            for id in &e.edge_list {
+                let edge = s.entity(*id).ok_or(Error::InvalidStepEntity("OrientedEdge"))?;
+                if let Some(previous) = orientations.insert(edge.edge_element, edge.orientation) {
+                    has_seam |= previous != edge.orientation;
+                }
+            }
             let mut d = edge_loop(s, &e.edge_list)?;
             if !orientation {
                 d.reverse()
             }
-            Ok((d, e.edge_list.len()))
+            Ok((d, e.edge_list.len(), has_seam))
         },
         Entity::VertexLoop(v) => {
             // This is an "edge loop" with a single vertex, which is
             // used for cones and not really anything else.
-            Ok((vec![vertex_point(s, v.loop_vertex)?], 0))
+            Ok((vec![vertex_point(s, v.loop_vertex)?], 0, false))
         }
         _ => Err(Error::InvalidStepEntity("FaceBound.bound")),
     }
@@ -1722,7 +1732,7 @@ mod tests {
                 ENDSEC;END-ISO-10303-21;", if outer { "T" } else { "F" });
             let flat = StepFile::strip_flatten(text.as_bytes()).unwrap();
             let step = StepFile::parse(&flat).unwrap();
-            let mut surface = get_surface(&step, Id::new(5), &[], 0.).unwrap();
+            let mut surface = get_surface(&step, Id::new(5), &[], 0., false).unwrap();
             let mut verts: Vec<_> = [0.5_f64, 0.7, 0.9].iter().map(|&u| {
                 let radius = 1.0 + 2.0 * v.cos();
                 mesh::Vertex {
