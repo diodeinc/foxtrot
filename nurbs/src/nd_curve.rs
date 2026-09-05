@@ -86,19 +86,18 @@ impl<const D: usize> NDBSplineCurve<D> {
     ///
     /// ALGORITHM A3.2
     pub fn curve_derivs<const E: usize>(&self, u: f64) -> Vec<TVec<f64, D>> {
-        let (origin, mut derivatives) = self.curve_derivs_relative::<E>(u, |p, origin| p - origin);
+        let (origin, mut derivatives) = self.curve_derivs_relative::<E>(u, self.knots.find_span(u), |p, origin| p - origin);
         derivatives[0] += origin;
         derivatives
     }
 
-    pub(crate) fn curve_derivs_relative<const E: usize>(&self, u: f64,
+    pub(crate) fn curve_derivs_relative<const E: usize>(&self, u: f64, span: usize,
         difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
     ) -> (TVec<f64, D>, Vec<TVec<f64, D>>) {
         let p = self.knots.degree();
 
         let du = min(E, p);
 
-        let span = self.knots.find_span(u);
         let N_derivs = self.knots.basis_funs_derivs_for_span(span, u, du);
 
         // Partition of unity: a constant contributes only to the position,

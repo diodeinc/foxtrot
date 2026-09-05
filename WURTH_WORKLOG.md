@@ -1985,3 +1985,26 @@ area check. Both USB models now have zero f64 and f32 degenerate facets and
 pass the strengthened gate. The other four flagged Würth models remain
 invalid. Evidence: `/tmp/bounded-pole-workspace-tests.log`,
 `local/repair-bounded-pole-wurth`, frozen `local/repair-bounded-pole-worker`.
+
+### Resolve curve projection at nonsmooth knot junctions
+
+Directly loading Bourns L34.3/W20.3 curve #45959 disproves the initial external
+diagnosis. The OCCT extraction accidentally selected curve #45994, which
+shares the endpoints but has different knots and controls. There is no
+downstream near-incidence rejection: the failing solver itself returns None.
+The exact source curve's nearest seed is its C0 knot u=0.566534474389, with
+one-sided unit gradients -3.76297e-9 and +5.49289e-9 and residual 4.18252e-8.
+It is a one-sided minimum, but the old unrestricted smooth model oscillates
+across the corner for 256 iterations.
+
+Evaluate derivatives in explicitly selected knot intervals, constrain each
+Newton step to its interval, and require stationarity on every incident side.
+Interiors, corners and domain ends share this path; no source tolerance or
+nearest-sample fallback is introduced. All 133 workspace tests pass, including
+polynomial/rational corners and traversal across a nonstationary knot. The
+exact reproduction now returns the knot; the whole Bourns model meshes all
+468 faces/four shells with zero face errors and zero f64 degenerates. Its
+f32 export remains invalid. Evidence: `local/bourns-cavity-projection` (with
+the mistaken research explicitly corrected), `/tmp/curve-cells-workspace-tests.log`,
+frozen `local/repair-curve-cells-worker`. The diagnostic example is removed
+from the source tree after preserving its reproduction under `local/`.

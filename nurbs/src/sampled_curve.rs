@@ -34,53 +34,57 @@ impl<const N: usize> SampledCurve<N>
     // Section 6.1 (start middle page 232)
     pub fn u_from_point_newtons_method(&self, P: DVec3, u_0: f64) -> Option<f64> {
         const TOL: f64 = 64.0 * f64::EPSILON;
-        let min = self.min_u();
-        let max = self.max_u();
-        let range = max - min;
-        let constrain = |u: f64| u.clamp(min, max);
-        let mut u = constrain(u_0);
+        let range = self.max_u() - self.min_u();
+        let mut u = u_0.clamp(self.min_u(), self.max_u());
         for _ in 0..256 {
-            let derivs = self.curve.derivs::<2>(u);
-            let r = derivs[0] - P;
-            let tangent = derivs[1] * range;
-            let speed = tangent.norm();
-            let unit = if speed > 0.0 { tangent / speed } else { DVec3::zeros() };
-            let gradient = dot(&r, &unit);
-            let position_scale = derivs[0].abs() + P.abs();
-            // First-order stationarity, not a fixed world-space distance or
-            // a signed cosine test. A normal offset cannot mask tangential error.
-            if gradient.abs() <= TOL * (speed + dot(&unit.abs(), &position_scale))
-                || (u == min && gradient >= 0.0) || (u == max && gradient <= 0.0) {
-                return Some(u);
-            }
-            // Use distance curvature when it defines a descent direction;
-            // otherwise retain Gauss--Newton. Work in derivative-normalized
-            // coordinates and bound travel to one parameter domain.
-            let inverse_speed = range / speed;
-            let hessian = 1.0 + dot(&(derivs[2] * inverse_speed), &r) * inverse_speed;
-            let metric = if hessian.is_finite() && hessian > 0.0 { hessian } else { 1.0 };
-            let step = (-gradient / speed / metric).clamp(-1.0, 1.0) * range;
-            // Test the full step, not a backtracked step: line-search failure
-            // must not become success merely by halving until nothing moves.
-            if u + step == u {
-                return Some(u);
-            }
-            let mut alpha = 1.0;
-            let mut accepted = None;
-            for _ in 0..40 {
-                let candidate = constrain(u + alpha * step);
-                let candidate_r = self.curve.point(candidate) - P;
-                let delta = candidate - u;
-                let slope = gradient * speed * (delta / range);
-                let change = 0.5 * dot(&(candidate_r - r), &(candidate_r + r));
-                let roundoff = TOL * dot(&(candidate_r.abs() + r.abs()), &position_scale);
-                if slope < 0.0 && change <= 1e-4 * slope + roundoff {
-                    accepted = Some(candidate);
-                    break;
+            let mut converged = true;
+            let mut accepted: Option<(f64, DVec3)> = None;
+            // The distance is only piecewise smooth. Keep each Newton model
+            // within its knot interval and require stationarity on every side
+            // of a junction, just as at the curve's domain endpoints.
+            for span in self.curve.knots.spans_at(u) {
+                let (min, max) = (self.curve.knots[span], self.curve.knots[span + 1]);
+                let derivs = self.curve.derivs_in_span::<2>(u, span);
+                let r = derivs[0] - P;
+                let tangent = derivs[1] * range;
+                let speed = tangent.norm();
+                let unit = if speed > 0.0 { tangent / speed } else { DVec3::zeros() };
+                let gradient = dot(&r, &unit);
+                let position_scale = derivs[0].abs() + P.abs();
+                // A normal offset cannot mask a resolvable tangential error.
+                if gradient.abs() <= TOL * (speed + dot(&unit.abs(), &position_scale))
+                    || (u == min && gradient >= 0.0) || (u == max && gradient <= 0.0) {
+                    continue;
                 }
-                alpha *= 0.5;
+                // Use distance curvature when it defines a descent direction;
+                // otherwise retain Gauss--Newton.
+                let inverse_speed = range / speed;
+                let hessian = 1.0 + dot(&(derivs[2] * inverse_speed), &r) * inverse_speed;
+                let metric = if hessian.is_finite() && hessian > 0.0 { hessian } else { 1.0 };
+                let step = (-gradient / speed / metric).clamp(-1.0, 1.0) * range;
+                // Only the full step can establish representability convergence,
+                // not a failed line search halved until nothing moves.
+                if (u + step).clamp(min, max) == u { continue; }
+                converged = false;
+                let mut alpha = 1.0;
+                for _ in 0..40 {
+                    let candidate = (u + alpha * step).clamp(min, max);
+                    let candidate_r = self.curve.point(candidate) - P;
+                    let slope = gradient * speed * ((candidate - u) / range);
+                    let change = 0.5 * dot(&(candidate_r - r), &(candidate_r + r));
+                    let roundoff = TOL * dot(&(candidate_r.abs() + r.abs()), &position_scale);
+                    if slope < 0.0 && change <= 1e-4 * slope + roundoff {
+                        if accepted.map_or(true, |(_, other_r)|
+                            dot(&(candidate_r - other_r), &(candidate_r + other_r)) < 0.) {
+                            accepted = Some((candidate, candidate_r));
+                        }
+                        break;
+                    }
+                    alpha *= 0.5;
+                }
             }
-            u = accepted?;
+            if converged { return Some(u); }
+            u = accepted?.0;
         }
         None
     }
@@ -323,6 +327,32 @@ mod tests {
             assert_eq!(curve.u_from_point(DVec3::new(-size, 0., 0.)), Some(0.));
             assert_eq!(curve.u_from_point(DVec3::new(2. * size, 0., 0.)), Some(1.));
         }
+    }
+
+    #[test]
+    fn curve_projection_resolves_both_sides_of_knot_corners() {
+        fn check<const N: usize>(curve: NDBSplineCurve<N>)
+            where NDBSplineCurve<N>: AbstractCurve
+        {
+            let curve = SampledCurve::new(curve);
+            let pole = DVec3::new(0., -0.1, 0.);
+            assert_eq!(curve.u_from_point(pole), Some(0.5));
+            for seed in [0.1, 0.5, 0.9] {
+                assert_eq!(curve.u_from_point_newtons_method(pole, seed), Some(0.5));
+                // A knot is not a minimum when either incident interval has
+                // a descent direction, even if the other side is stationary.
+                for target in [0.25, 0.75] {
+                    let p = curve.curve.point(target);
+                    let actual = curve.u_from_point_newtons_method(p, seed).unwrap();
+                    assert!((actual - target).abs() < 1e-14);
+                }
+            }
+        }
+        let knots = KnotVector::from_multiplicities(1, &[0., 0.5, 1.], &[2, 1, 2]);
+        let points = [DVec3::new(-1., 1., 0.), DVec3::zeros(), DVec3::new(1., 1., 0.)];
+        check(NDBSplineCurve::new(true, knots.clone(), points.to_vec()));
+        check(NDBSplineCurve::new(true, knots,
+            points.iter().map(|p| nalgebra_glm::DVec4::new(p.x, p.y, p.z, 1.)).collect()));
     }
 
     #[test]

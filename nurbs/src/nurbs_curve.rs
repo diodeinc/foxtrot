@@ -18,7 +18,11 @@ impl AbstractCurve for NURBSCurve {
     ///
     /// ALGORITHM A4.2
     fn derivs<const E: usize>(&self, u: f64) -> Vec<DVec3> {
-        let (origin, mut derivs) = self.curve_derivs_relative::<E>(u, crate::rational_difference);
+        self.derivs_in_span::<E>(u, self.knots.find_span(u))
+    }
+
+    fn derivs_in_span<const E: usize>(&self, u: f64, span: usize) -> Vec<DVec3> {
+        let (origin, mut derivs) = self.curve_derivs_relative::<E>(u, span, crate::rational_difference);
         derivs[0].w += origin.w;
         let mut CK = vec![DVec3::zeros(); E + 1];
         for k in 0..=E {
