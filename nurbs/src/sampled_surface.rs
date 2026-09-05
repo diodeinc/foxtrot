@@ -21,6 +21,7 @@ struct DistanceModel {
     hessian: [f64; 3],
     lo: DVec2,
     hi: DVec2,
+    stationary: [bool; 2],
     converged: bool,
 }
 
@@ -229,7 +230,7 @@ where
         // Only the full-cell model step may establish representability
         // convergence, never a step shortened by the trust region.
         let converged = (0..2).all(|i| stationary[i] || candidate[i] == uv[i]);
-        DistanceModel { spans, residual: r, position_scale, gradient: g, hessian: h, lo, hi, converged }
+        DistanceModel { spans, residual: r, position_scale, gradient: g, hessian: h, lo, hi, stationary, converged }
     }
 
     fn newtons_method_inner(&self, P: DVec3, uv_0: DVec2, max_iter: usize) -> Option<DVec2> {
@@ -261,16 +262,14 @@ where
                         dot(&q, &(m.gradient + 0.5 * DVec2::new(h[0] * q.x + h[1] * q.y,
                             h[1] * q.x + h[2] * q.y)))
                     };
-                    // A coupled model can invent transverse motion from
-                    // quotient roundoff. Keep the exact knot representative
-                    // unless leaving it improves the actual residual distance.
-                    for (i, knots) in [&self.surf.u_knots, &self.surf.v_knots].iter().enumerate() {
-                        if candidate[i] == uv_i[i] { continue; }
-                        let (lo, hi) = (knots[m.spans[i]], knots[m.spans[i] + 1]);
-                        let knot = if candidate[i] - lo <= hi - candidate[i] { lo } else { hi };
-                        if (knot - uv_i[i]).abs() > radius * ranges[i] { continue; }
+                    // A coupled step may displace an already stationary
+                    // active bound through quotient roundoff. Retain that
+                    // bound unless leaving it improves actual distance; do
+                    // not reset unconverged or interior coordinates to knots.
+                    for i in 0..2 {
+                        if !m.stationary[i] || (m.lo[i] != 0. && m.hi[i] != 0.) { continue; }
                         let mut bound = candidate;
-                        bound[i] = knot;
+                        bound[i] = uv_i[i];
                         // Keep the original descent trial when a knot variant
                         // has no predicted gain; it cannot prove convergence.
                         if prediction(bound) >= 0. { continue; }

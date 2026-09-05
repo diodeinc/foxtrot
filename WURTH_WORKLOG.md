@@ -1772,3 +1772,40 @@ remain unchanged (8/20/8 and 16/3 respectively), with no new status failures.
 Evidence: `/tmp/intersection-endpoint-{before,workspace-tests}.log`,
 `local/repair-intersection-endpoint-{investigate,check,kicad}` and frozen
 `local/repair-intersection-endpoint-worker`.
+
+### Complete pass 16 and correct overbroad knot candidates
+
+The complete frozen knot-descent worker processes all 7,328 Würth files,
+then all 7,251 KiCad files. Exact manifest path/hash sets, shard unions and
+worker hashes match. Würth: 6,941 ok / 331 invalid_mesh / 53 tessellation_error
+/ 3 crash. KiCad: 7,112 ok / 139 invalid_mesh. Per-file evidence is in
+`.amp/in/artifacts/repair-pass16/{wurth,kicad}.{json,csv}`. Seventeen KiCad
+files recover versus pass 15, but 46 Würth files gain projection errors.
+TBL 691378100020 remains an ok-to-invalid regression; CIRCM12643220100404
+recovers. These results are not completion of the repair request.
+
+The CMB-XS 744821110 trace establishes the projection regression: the nearby-
+knot comparison repeatedly resets an unconverged coordinate and destroys the
+trust radius (3.26e-55 after 130 iterations), despite a remaining nonstationary
+gradient. Evidence: `local/cmb-projection-probe.log`, including surface #849.
+Restrict the comparison to retaining a stationary, already active bound.
+Interior/unconverged parameters must follow the minimization model, not jump
+to a nearby knot. No tolerance or convergence criterion is relaxed.
+
+Workspace tests pass (`/tmp/active-bound-workspace-tests.log`). The 151-file
+Würth cohort is 92 ok / 52 invalid_mesh / 7 tessellation_error: all 46 new
+projection errors disappear, with no status regressions against pass 16.
+Against pass 15, TBL still regresses and CIRCM still recovers. The 20-file
+KiCad cohort is 7 ok / 13 invalid_mesh: seven recover against pass 15, but
+11 pass-16 successes return to invalid meshes and one other file recovers.
+Those mesh defects remain open; the broad knot rule was not a sound repair.
+Evidence: `local/repair-active-bound-{wurth,kicad}`, frozen worker
+`local/repair-active-bound-worker`.
+
+### Additional disk cleanup
+
+Removed rebuildable `target/debug` and obsolete `local/swept-target` after
+checking that no Cargo build or corpus worker was running. Reclaimed about
+5 GB; free space rises from 8.9 to 14 GB. STEP inputs, frozen workers, RCA
+reports, manifests and diagnostic evidence are retained. Use nonincremental
+builds and avoid regenerating debug build caches unnecessarily.
