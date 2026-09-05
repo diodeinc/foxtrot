@@ -82,12 +82,15 @@ fn kd_nearest(
     }
 }
 
-/// Minimize a quadratic on a rectangle. A minimum is either its stationary
-/// interior point or a minimum on one of four edges, including the corners.
-fn quadratic_step(g: DVec2, h: [f64; 3], lo: DVec2, hi: DVec2) -> DVec2 {
+/// Compare the rectangle's stationary candidates after mapping each step to
+/// representable parameters. Axis candidates keep a resolvable direction free
+/// when rounding prevents the other component of a coupled step from moving.
+fn quadratic_step(g: DVec2, h: [f64; 3], lo: DVec2, hi: DVec2,
+                  represent: impl Fn(DVec2) -> DVec2) -> DVec2 {
     let [a, b, d] = h;
     let mut best = DVec2::zeros();
     let mut consider = |q: DVec2| {
+        let q = represent(q);
         // Compare in factored form so a resolved thin direction is not
         // erased by the common contribution of a much larger direction.
         let sum = q + best;
@@ -106,6 +109,8 @@ fn quadratic_step(g: DVec2, h: [f64; 3], lo: DVec2, hi: DVec2) -> DVec2 {
     for y in [lo.y, hi.y] {
         if a > 0. { consider(DVec2::new((-(g.x + b * y) / a).clamp(lo.x, hi.x), y)); }
     }
+    if a > 0. { consider(DVec2::new((-g.x / a).clamp(lo.x, hi.x), 0.)); }
+    if d > 0. { consider(DVec2::new(0., (-g.y / d).clamp(lo.y, hi.y))); }
     let det = a.mul_add(d, -b * b);
     if a > 0. && det > 0. {
         let q = DVec2::new(b.mul_add(g.y, -d * g.x), b.mul_add(g.x, -a * g.y)) / det;
@@ -172,6 +177,17 @@ where
                    uv.y.clamp(self.surf.min_v(), self.surf.max_v()))
     }
 
+    fn stepped_uv(&self, uv: DVec2, ranges: DVec2, spans: [usize; 2], step: DVec2) -> DVec2 {
+        let mut candidate = uv + step.component_mul(&ranges);
+        for (i, knots) in [&self.surf.u_knots, &self.surf.v_knots].iter().enumerate() {
+            let (min, max) = (knots[spans[i]], knots[spans[i] + 1]);
+            candidate[i] = if step[i] == (min - uv[i]) / ranges[i] { min }
+                else if step[i] == (max - uv[i]) / ranges[i] { max }
+                else { candidate[i].clamp(min, max) };
+        }
+        candidate
+    }
+
     fn distance_model(&self, P: DVec3, uv: DVec2, ranges: DVec2, spans: [usize; 2]) -> DistanceModel {
         // Fixed unit-domain coordinates preserve the surface differential's
         // rank and scale continuously, including at collapsed boundaries.
@@ -207,10 +223,12 @@ where
         ];
         let lo = DVec2::new(domains[0].0 - uv.x, domains[1].0 - uv.y).component_div(&ranges);
         let hi = DVec2::new(domains[0].1 - uv.x, domains[1].1 - uv.y).component_div(&ranges);
-        let uv_step = quadratic_step(g, h, lo, hi).component_mul(&ranges);
+        let step = quadratic_step(g, h, lo, hi,
+            |q| (self.stepped_uv(uv, ranges, spans, q) - uv).component_div(&ranges));
+        let candidate = self.stepped_uv(uv, ranges, spans, step);
         // Only the full-cell model step may establish representability
         // convergence, never a step shortened by the trust region.
-        let converged = (0..2).all(|i| stationary[i] || uv[i] + uv_step[i] == uv[i]);
+        let converged = (0..2).all(|i| stationary[i] || candidate[i] == uv[i]);
         DistanceModel { spans, residual: r, position_scale, gradient: g, hessian: h, lo, hi, converged }
     }
 
@@ -232,16 +250,10 @@ where
             let mut accepted: Option<(DVec2, DVec3, bool)> = None;
             for _ in 0..40 {
                 for m in models.iter().filter(|m| !m.converged) {
-                    let step = quadratic_step(m.gradient, m.hessian, m.lo.sup(&DVec2::repeat(-radius)), m.hi.inf(&DVec2::repeat(radius)));
-                    let mut candidate = uv_i + step.component_mul(&ranges);
-                    for (i, knots) in [&self.surf.u_knots, &self.surf.v_knots].iter().enumerate() {
-                        let (min, max) = (knots[m.spans[i]], knots[m.spans[i] + 1]);
-                        // Preserve the exact knot when the model hits a bound;
-                        // normalization and restoration need not roundtrip it.
-                        candidate[i] = if step[i] == m.lo[i] { min }
-                            else if step[i] == m.hi[i] { max }
-                            else { candidate[i].clamp(min, max) };
-                    }
+                    let step = quadratic_step(m.gradient, m.hessian,
+                        m.lo.sup(&DVec2::repeat(-radius)), m.hi.inf(&DVec2::repeat(radius)),
+                        |q| (self.stepped_uv(uv_i, ranges, m.spans, q) - uv_i).component_div(&ranges));
+                    let candidate = self.stepped_uv(uv_i, ranges, m.spans, step);
                     let candidate_r = self.surf.derivs_in_span::<0>(candidate, m.spans, P)[0][0];
                     let q = (candidate - uv_i).component_div(&ranges);
                     let h = m.hessian;
@@ -363,11 +375,26 @@ mod tests {
     fn bounded_quadratic_preserves_thin_directions_and_handles_indefinite_curvature() {
         let lo = DVec2::repeat(-1.);
         let hi = DVec2::repeat(1.);
-        let q = quadratic_step(DVec2::new(-0.3, -0.7e-32), [1., 0., 1e-32], lo, hi);
+        let q = quadratic_step(DVec2::new(-0.3, -0.7e-32), [1., 0., 1e-32], lo, hi, |q| q);
         close(q.x, 0.3, 1e-15);
         close(q.y, 0.7, 1e-15);
-        let q = quadratic_step(DVec2::new(-0.1, 0.), [1., 2., 1.], lo, hi);
+        let q = quadratic_step(DVec2::new(-0.1, 0.), [1., 2., 1.], lo, hi, |q| q);
         assert_eq!(q, DVec2::new(1., -1.));
+    }
+
+    #[test]
+    fn rounded_coupled_steps_keep_the_representable_direction_free() {
+        let origin = DVec2::new(0.5, 1.);
+        let g = DVec2::new(1e-44, -1e-17);
+        let h = [1e-42, -1e-26, 1.];
+        let lo = DVec2::new(-0.5, -0.5);
+        let hi = DVec2::new(0.5, 1.);
+        let represent = |q: DVec2| (origin + q) - origin;
+        let continuous = represent(quadratic_step(g, h, lo, hi, |q| q));
+        assert!(continuous.x > 0. && continuous.y == 0.);
+        let discrete = quadratic_step(g, h, lo, hi, represent);
+        assert!(discrete.x < 0. && discrete.y == 0.);
+        assert!(g.x * discrete.x + 0.5 * h[0] * discrete.x * discrete.x < 0.);
     }
 
     #[test]

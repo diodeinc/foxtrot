@@ -1538,3 +1538,24 @@ space; its global-position-norm estimate is not yet accepted because it could
 erase thin directions. Any such bound must respect the existing componentwise
 projection error model and singularities. Prioritize the pass-13 regressions
 before resuming this prototype.
+
+### Compare quadratic projection candidates after parameter rounding
+
+WL-SIQW-3535 exposed a coupled quadratic step whose radial component is less
+than half a parameter ULP. Rounding removes that component but retains angular
+motion in the wrong direction. Compare candidates after mapping them to actual
+representable parameters; include the two axis stationary candidates so the
+remaining direction can descend independently. Share exact knot restoration
+between the convergence model and trust-region trials. This does not relax
+stationarity or accept shortened-step stagnation.
+
+The SIQW direct reproduction now has no face errors or f64 degenerates. The
+dome reproduction still reaches the iteration limit and remains open. A
+synthetic coupled-quadratic regression checks that rounding changes ascent
+into descent only when the representable candidates are compared. Workspace
+tests pass; the 54-file lowering cohort has 43 ok / 11 invalid_mesh and no
+face errors; all eight checkpoints pass. Evidence:
+`/tmp/representable-step-workspace-tests.log`,
+`local/repair-representable-step-{lowering,check}` and frozen
+`local/repair-representable-step-worker`. These are focused checks, not a new
+full-corpus result.
