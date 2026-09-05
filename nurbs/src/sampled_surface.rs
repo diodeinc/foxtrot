@@ -1,6 +1,6 @@
-use nalgebra_glm::{dot, length, length2, DMat2x2, DVec2, DVec3};
 use crate::{abstract_surface::AbstractSurface, nd_surface::NDBSplineSurface};
 use log::error;
+use nalgebra_glm::{dot, DVec2, DVec3};
 
 #[derive(Debug, Clone)]
 pub struct SampledSurface<const N: usize> {
@@ -70,7 +70,8 @@ fn kd_nearest(
 }
 
 impl<const N: usize> SampledSurface<N>
-    where NDBSplineSurface<N>: AbstractSurface
+where
+    NDBSplineSurface<N>: AbstractSurface,
 {
     pub fn new(surf: NDBSplineSurface<N>) -> Self {
         const N: usize = 8;
@@ -99,8 +100,7 @@ impl<const N: usize> SampledSurface<N>
 
                         let v_span = surf.v_knots.find_span(v);
                         let v_basis = surf.v_knots.basis_funs_for_span(v_span, v);
-                        let q = surf.point_from_basis(
-                            u_span, &u_basis, v_span, &v_basis);
+                        let q = surf.point_from_basis(u_span, &u_basis, v_span, &v_basis);
                         samples.push((uv, q));
                     }
                 }
@@ -138,84 +138,114 @@ impl<const N: usize> SampledSurface<N>
     }
 
     fn newtons_method_inner(&self, P: DVec3, uv_0: DVec2, max_iter: usize) -> Option<DVec2> {
-        let eps1 = 0.01; // a Euclidean distance error bound
-        let eps2 = 0.01; // a cosine error bound
-
+        // Work in unit-domain coordinates, then normalize each Jacobian
+        // column.  Thus neither knot magnitudes nor the physical units of the
+        // model determine conditioning or convergence.
+        const STATIONARITY_TOL: f64 = 64.0 * f64::EPSILON;
+        const DAMPING: f64 = 1e-12;
+        const ARMIJO: f64 = 1e-4;
         let mut uv_i = self.constrain_uv(uv_0);
         for _ in 0..max_iter {
-            // The surface and its derivatives at uv_i
-            let derivs = self.surf.derivs::<2>(uv_i);
+            let derivs = self.surf.derivs::<1>(uv_i);
             let S = derivs[0][0];
-            let S_u = derivs[1][0];
-            let S_v = derivs[0][1];
-            let S_uu = derivs[2][0];
-            let S_uv = derivs[1][1]; // S_vu is the same
-            let S_vv = derivs[0][2];
             let r = S - P;
-
-            // If |S(uv_i) - P| < \epsilon_1  and
-            //    |S_u(uv_i) dot (S(uv_i) - P)| / |S_u(uv_i)| / |S(uv_i) - P| < \epsilon_2  and
-            //    |S_v(uv_i) dot (S(uv_i) - P)| / |S_v(uv_i)| / |S(uv_i) - P| < \epsilon_2
-            // then we are done
-            let r_len = length(&r);
-            if r_len < eps1 {
-                let su_len = length(&S_u);
-                let sv_len = length(&S_v);
-                // Skip cosine check when the derivative or residual is
-                // degenerate (near-zero) to avoid 0/0 = NaN failures.
-                // Use a tight threshold so we only bypass for truly
-                // degenerate surfaces (collapsed control point rows).
-                let cos_u_ok = su_len < 1e-10 || r_len < 1e-10
-                    || dot(&r, &S_u).abs() / su_len / r_len < eps2;
-                let cos_v_ok = sv_len < 1e-10 || r_len < 1e-10
-                    || dot(&r, &S_v).abs() / sv_len / r_len < eps2;
-                if cos_u_ok && cos_v_ok {
-                    return Some(uv_i);
+            let ranges = DVec2::new(
+                self.surf.max_u() - self.surf.min_u(),
+                self.surf.max_v() - self.surf.min_v(),
+            );
+            let columns = [derivs[1][0] * ranges.x, derivs[0][1] * ranges.y];
+            let norms = DVec2::new(columns[0].norm(), columns[1].norm());
+            let unit = [
+                if norms.x > 0.0 {
+                    columns[0] / norms.x
+                } else {
+                    DVec3::zeros()
+                },
+                if norms.y > 0.0 {
+                    columns[1] / norms.y
+                } else {
+                    DVec3::zeros()
+                },
+            ];
+            let gradient = DVec2::new(dot(&r, &unit[0]), dot(&r, &unit[1]));
+            let mut projected = gradient;
+            let mut free = [true, true];
+            let domains = [
+                (self.surf.min_u(), self.surf.max_u(), self.surf.u_open),
+                (self.surf.min_v(), self.surf.max_v(), self.surf.v_open),
+            ];
+            for i in 0..2 {
+                let (min, max, open) = domains[i];
+                if open
+                    && ((uv_i[i] == min && gradient[i] >= 0.0)
+                        || (uv_i[i] == max && gradient[i] <= 0.0))
+                {
+                    projected[i] = 0.0;
+                    free[i] = false;
                 }
             }
-
-            // Otherwise, compute uv_{i+1} by computing:
-            // let r(u, v) = S(u, v) - P
-            // let f(u, v) = r(u, v) dot S_u(u, v)
-            // let g(u, v) = r(u, v) dot S_v(u, v)
-            // let K_i = -(f(uv_{i}), g(uv_{i}))
-            // let J_i = [[df/du, df/dv], [dg/du, dg/dv]]
-            //           = [[|S_u|^2 + r dot S_uu, S_u dot S_v + r dot S_uv],
-            //              [S_u dot S_v + r dot S_vu, |S_v|^2 + r dot S_vv]]
-            // let delta_i = (J_i)^{-1} * K_i
-            // let uv_{i+1} = delta_i + uv_i
-            let f = dot(&r, &S_u);
-            let g = dot(&r, &S_v);
-            let K_i = -DVec2::new(f, g);
-            let J_i = symmetric2x2(
-                length2(&S_u) + dot(&r, &S_uu),
-                dot(&S_u, &S_v) + dot(&r, &S_uv),
-                length2(&S_v) + dot(&r, &S_vv),
-            );
-            let delta_i = match J_i.try_inverse() {
-                None => {
-                    // Singular Jacobian (e.g. degenerate surface edge where
-                    // a whole row of control points collapses to one point).
-                    // If we're already reasonably close, accept the result.
-                    if r_len < eps1 * 10.0 {
-                        return Some(uv_i);
-                    }
-                    return None;
-                },
-                Some(m) => m * K_i,
-            };
-            let uv_ip1 = self.constrain_uv(uv_i + delta_i);
-
-            // If the values didn't change much, we can stop iterating
-            // if |(u_{i+1} - u_i) * S_u(u_i, v_i) + (v_{i+1} - v_i) * S_v(u_i, v_i) | < \epsilon_1
-
-            let delta_i = uv_ip1 - uv_i;
-            if length(&(delta_i.x * S_u + delta_i.y * S_v)) < eps1 {
-                return Some(uv_ip1);
+            // Test each parameter direction at its own scale. A large normal
+            // offset or a long u direction must not erase a resolvable thin v
+            // direction. Position roundoff is likewise componentwise.
+            let position_scale = S.abs() + P.abs();
+            if (0..2).all(|i| {
+                projected[i].abs()
+                    <= STATIONARITY_TOL * (norms[i] + dot(&unit[i].abs(), &position_scale))
+            }) {
+                return Some(uv_i);
             }
 
-            // otherwise, iterate again
-            uv_i = uv_ip1;
+            // Levenberg-damped Gauss--Newton in derivative-normalized
+            // coordinates.  The positive damping makes this a descent
+            // direction even when the two derivatives are dependent.
+            let fit_unit = [
+                if free[0] { unit[0] } else { DVec3::zeros() },
+                if free[1] { unit[1] } else { DVec3::zeros() },
+            ];
+            let correlation = dot(&fit_unit[0], &fit_unit[1]);
+            let a = fit_unit[0].norm_squared() + DAMPING;
+            let d = fit_unit[1].norm_squared() + DAMPING;
+            let det = a * d - correlation * correlation;
+            let q = DVec2::new(
+                (-d * projected.x + correlation * projected.y) / det,
+                (correlation * projected.x - a * projected.y) / det,
+            );
+            let normalized_step = DVec2::new(
+                if norms.x > 0.0 { q.x / norms.x } else { 0.0 },
+                if norms.y > 0.0 { q.y / norms.y } else { 0.0 },
+            );
+            let uv_step = DVec2::new(normalized_step.x * ranges.x, normalized_step.y * ranges.y);
+            let mut alpha = 1.0;
+            let mut accepted = None;
+            for _ in 0..40 {
+                let candidate = self.constrain_uv(uv_i + alpha * uv_step);
+                let candidate_r = self.surf.point(candidate) - P;
+                let mut actual_q = DVec2::zeros();
+                for i in 0..2 {
+                    // A periodic seam changes the stored representative, not
+                    // the direction travelled along the parameter domain.
+                    let delta = if domains[i].2 {
+                        candidate[i] - uv_i[i]
+                    } else {
+                        alpha * uv_step[i]
+                    };
+                    actual_q[i] = norms[i] * delta / ranges[i];
+                }
+                let slope = dot(&gradient, &actual_q);
+                // Subtract squared distances in factored form. Near a normal
+                // projection their difference is below the rounding error of
+                // either squared norm; account for position evaluation error
+                // rather than stalling before first-order convergence.
+                let change = 0.5 * dot(&(candidate_r - r), &(candidate_r + r));
+                let roundoff = STATIONARITY_TOL
+                    * dot(&(candidate_r.abs() + r.abs()), &position_scale);
+                if slope < 0.0 && change <= ARMIJO * slope + roundoff {
+                    accepted = Some(candidate);
+                    break;
+                }
+                alpha *= 0.5;
+            }
+            uv_i = accepted?;
         }
         None
     }
@@ -224,7 +254,11 @@ impl<const N: usize> SampledSurface<N>
         assert!(!self.samples.is_empty());
         let mut best = (f64::INFINITY, u32::MAX);
         kd_nearest(&self.samples, &self.kd, 0, p, &mut best);
-        let best_idx = if best.1 == u32::MAX { 0 } else { best.1 as usize };
+        let best_idx = if best.1 == u32::MAX {
+            0
+        } else {
+            best.1 as usize
+        };
         let best_uv = self.samples[best_idx].0;
         self.uv_from_point_newtons_method(p, best_uv)
     }
@@ -237,19 +271,190 @@ impl<const N: usize> SampledSurface<N>
     // nearest sample so results stay well-defined on such surfaces.
 }
 
-/// Builds the symmetric matrix [[a, b], [b, d]]
-fn symmetric2x2(a: f64, b: f64, d: f64) -> DMat2x2 {
-    // In column major order; because it's symmetric, it doesn't matter
-    let mut mat = DMat2x2::identity();
-    mat.set_column(0, &DVec2::new(a, b));
-    mat.set_column(1, &DVec2::new(b, d));
-    mat
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::KnotVector;
+
+    fn plane(
+        u_domain: [f64; 2],
+        v_domain: [f64; 2],
+        origin: DVec3,
+        u_edge: DVec3,
+        v_edge: DVec3,
+    ) -> SampledSurface<3> {
+        SampledSurface::new(NDBSplineSurface::new(
+            true,
+            true,
+            KnotVector::from_multiplicities(1, &u_domain, &[2, 2]),
+            KnotVector::from_multiplicities(1, &v_domain, &[2, 2]),
+            vec![
+                vec![origin, origin + v_edge],
+                vec![origin + u_edge, origin + u_edge + v_edge],
+            ],
+        ))
+    }
+
+    fn close(a: f64, b: f64, tolerance: f64) {
+        assert!((a - b).abs() <= tolerance, "{} != {}", a, b);
+    }
+
+    #[test]
+    fn projection_resolves_thin_directions_despite_large_normal_offset() {
+        let sampled = plane(
+            [0.0, 1.0],
+            [0.0, 1.0],
+            DVec3::zeros(),
+            DVec3::new(1.0, 0.0, 0.0),
+            DVec3::new(0.0, 1e-16, 0.0),
+        );
+        let uv = sampled
+            .uv_from_point(DVec3::new(0.35, 0.73e-16, 2.0))
+            .unwrap();
+        close(uv.x, 0.35, 1e-12);
+        close(uv.y, 0.73, 1e-12);
+    }
+
+    #[test]
+    fn curved_patch_normal_projection_is_stationary() {
+        let sampled = SampledSurface::new(NDBSplineSurface::new(
+            true,
+            true,
+            KnotVector::from_multiplicities(2, &[0.0, 1.0], &[3, 3]),
+            KnotVector::from_multiplicities(1, &[0.0, 1.0], &[2, 2]),
+            [(0.0, 0.0), (0.5, 0.0), (1.0, 1.0)]
+                .iter()
+                .map(|&(x, z)| vec![DVec3::new(x, 0.0, z), DVec3::new(x, 1.0, z)])
+                .collect(),
+        ));
+        let expected = DVec2::new(0.37, 0.73);
+        let p = sampled.surf.point(expected);
+        let normal = DVec3::new(-2.0 * expected.x, 0.0, 1.0).normalize();
+        for offset in [0.0, -0.05, 0.05] {
+            let uv = sampled.uv_from_point(p + normal * offset).unwrap();
+            close(uv.x, expected.x, 1e-10);
+            close(uv.y, expected.y, 1e-10);
+        }
+    }
+
+    #[test]
+    fn periodic_projection_can_descend_across_the_seam() {
+        let w = 0.5_f64.sqrt();
+        let circle = [
+            (1., 0., 1.),
+            (1., 1., w),
+            (0., 1., 1.),
+            (-1., 1., w),
+            (-1., 0., 1.),
+            (-1., -1., w),
+            (0., -1., 1.),
+            (1., -1., w),
+            (1., 0., 1.),
+        ];
+        let sampled = SampledSurface::new(NDBSplineSurface::new(
+            false,
+            true,
+            KnotVector::from_multiplicities(2, &[0., 1., 2., 3., 4.], &[3, 2, 2, 2, 3]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            circle
+                .iter()
+                .map(|&(x, y, w)| {
+                    [0., 1.]
+                        .iter()
+                        .map(|z| nalgebra_glm::DVec4::new(x * w, y * w, z * w, w))
+                        .collect()
+                })
+                .collect(),
+        ));
+        let expected = DVec2::new(0.01, 0.6);
+        let uv = sampled
+            .uv_from_point_newtons_method(sampled.surf.point(expected), DVec2::new(3.99, 0.4))
+            .unwrap();
+        close(uv.x, expected.x, 1e-10);
+        close(uv.y, expected.y, 1e-10);
+    }
+
+    #[test]
+    fn inverse_projection_round_trip_and_normal_offset() {
+        let sampled = plane(
+            [0.0, 1.0],
+            [0.0, 1.0],
+            DVec3::new(2.0, -3.0, 4.0),
+            DVec3::new(3.0, 0.0, 0.0),
+            DVec3::new(0.0, 5.0, 0.0),
+        );
+        let expected = DVec2::new(0.371, 0.826);
+        let point = sampled.surf.point(expected);
+        let round_trip = sampled.uv_from_point(point).unwrap();
+        let normal_projection = sampled
+            .uv_from_point(point + DVec3::new(0.0, 0.0, 37.0))
+            .unwrap();
+        close(round_trip.x, expected.x, 1e-10);
+        close(round_trip.y, expected.y, 1e-10);
+        close(normal_projection.x, expected.x, 1e-10);
+        close(normal_projection.y, expected.y, 1e-10);
+    }
+
+    #[test]
+    fn inverse_projection_obeys_active_boundaries() {
+        let sampled = plane(
+            [-2.0, 4.0],
+            [10.0, 20.0],
+            DVec3::zeros(),
+            DVec3::new(6.0, 0.0, 0.0),
+            DVec3::new(0.0, 10.0, 0.0),
+        );
+        let uv = sampled.uv_from_point(DVec3::new(-7.0, 4.0, 3.0)).unwrap();
+        close(uv.x, -2.0, 0.0);
+        close(uv.y, 14.0, 1e-10);
+    }
+
+    #[test]
+    fn inverse_projection_is_invariant_to_domain_and_length_scale() {
+        for scale in [1e-9, 1e9] {
+            let sampled = plane(
+                [1e6, 1e6 + 1e-5],
+                [-3e-7, 8e-7],
+                DVec3::zeros(),
+                DVec3::new(scale, 0.0, 0.0),
+                DVec3::new(0.0, 2.0 * scale, 0.0),
+            );
+            let expected = DVec2::new(1e6 + 0.63e-5, -3e-7 + 0.24 * 1.1e-6);
+            let uv = sampled.uv_from_point(sampled.surf.point(expected)).unwrap();
+            close(uv.x, expected.x, 2e-10);
+            close(uv.y, expected.y, 2e-16);
+        }
+    }
+
+    #[test]
+    fn inverse_projection_resolves_thin_patch_direction() {
+        let sampled = plane(
+            [0.0, 1.0],
+            [0.0, 1.0],
+            DVec3::zeros(),
+            DVec3::new(1.0, 0.0, 0.0),
+            DVec3::new(0.0, 1e-12, 0.0),
+        );
+        let uv = sampled
+            .uv_from_point(DVec3::new(0.35, 0.73e-12, 2e-12))
+            .unwrap();
+        close(uv.x, 0.35, 1e-10);
+        close(uv.y, 0.73, 1e-10);
+    }
+
+    #[test]
+    fn inverse_projection_handles_a_singular_derivative_direction() {
+        let sampled = plane(
+            [0.0, 1.0],
+            [0.0, 1.0],
+            DVec3::zeros(),
+            DVec3::new(4.0, 0.0, 0.0),
+            DVec3::zeros(),
+        );
+        let uv = sampled.uv_from_point(DVec3::new(1.24, 2.0, 0.0)).unwrap();
+        close(uv.x, 0.31, 1e-10);
+        assert!((0.0..=1.0).contains(&uv.y));
+    }
 
     #[test]
     fn constrains_multiple_periods_and_preserves_domain_endpoints() {
