@@ -7,6 +7,7 @@ use crate::surface::Surface;
 
 const BSPLINE_POINTS_PER_KNOT: usize = 8;
 const ELLIPSE_SAMPLES_PER_REV: usize = 32;
+const CONIC_MAX_DEPTH: usize = 20;
 
 #[derive(Debug)]
 pub enum Curve {
@@ -16,6 +17,11 @@ pub enum Curve {
         world_from_eplane: DMat4,
         closed: bool,
         dir: bool
+    },
+    OpenConic {
+        plane_from_world: DMat4,
+        world_from_plane: DMat4,
+        hyperbola: bool,
     },
     Line,
     BSplineCurveWithKnots {
@@ -52,6 +58,33 @@ impl Curve {
                       radius: f64, closed: bool, dir: bool) -> Result<Self, Error> {
         Self::new_ellipse(location, axis, ref_direction,
                           radius, radius, closed, dir)
+    }
+
+    fn new_open_conic(location: DVec3, axis: DVec3, ref_direction: DVec3,
+                      x_scale: f64, y_scale: f64, hyperbola: bool)
+        -> Result<Self, Error>
+    {
+        let world_from_plane = Surface::make_affine_transform(
+            axis, x_scale * ref_direction, y_scale * axis.cross(&ref_direction), location);
+        let plane_from_world = world_from_plane
+            .try_inverse()
+            .ok_or(Error::SingularTransform("open conic transform"))?;
+        Ok(Self::OpenConic { plane_from_world, world_from_plane, hyperbola })
+    }
+
+    pub fn new_hyperbola(location: DVec3, axis: DVec3, ref_direction: DVec3,
+                         semi_axis: f64, semi_imag_axis: f64) -> Result<Self, Error> {
+        Self::new_open_conic(location, axis, ref_direction,
+                             semi_axis, semi_imag_axis, true)
+    }
+
+    pub fn new_parabola(location: DVec3, axis: DVec3, ref_direction: DVec3,
+                        focal_dist: f64) -> Result<Self, Error> {
+        if focal_dist == 0.0 {
+            return Err(Error::InvalidGeometry("parabola focal distance is zero"));
+        }
+        Self::new_open_conic(location, axis, ref_direction,
+                             focal_dist, 2.0 * focal_dist, false)
     }
 
     pub fn new_line() -> Self {
@@ -91,6 +124,56 @@ impl Curve {
             Self::Line => Ok(vec![u, v]),
             Self::BSplineCurveWithKnots { curve, dir } => Self::curve_points(u, v, curve, is_loop, *dir),
             Self::NURBSCurve { curve, dir } => Self::curve_points(u, v, curve, is_loop, *dir),
+            Self::OpenConic { plane_from_world, world_from_plane, hyperbola } => {
+                let local = |p: DVec3| plane_from_world * DVec4::new(p.x, p.y, p.z, 1.0);
+                let a = local(u);
+                let b = local(v);
+                if *hyperbola && (a.x < -1e-9 || b.x < -1e-9) {
+                    return Err(Error::InvalidGeometry("hyperbola endpoint is on negative branch"));
+                }
+                let t0 = if *hyperbola { a.y.asinh() } else { a.y };
+                let t1 = if *hyperbola { b.y.asinh() } else { b.y };
+                if !t0.is_finite() || !t1.is_finite() {
+                    return Err(Error::InvalidGeometry("open conic parameter is not finite"));
+                }
+
+                let eval = |t: f64| {
+                    let p = if *hyperbola {
+                        DVec4::new(t.cosh(), t.sinh(), 0.0, 1.0)
+                    } else {
+                        DVec4::new(t * t, t, 0.0, 1.0)
+                    };
+                    glm::vec4_to_vec3(&(world_from_plane * p))
+                };
+                let tangent = |t: f64| {
+                    let p = if *hyperbola {
+                        DVec4::new(t.sinh(), t.cosh(), 0.0, 0.0)
+                    } else {
+                        DVec4::new(2.0 * t, 1.0, 0.0, 0.0)
+                    };
+                    glm::normalize(&glm::vec4_to_vec3(&(world_from_plane * p)))
+                };
+                let max_angle = 2.0 * std::f64::consts::PI / ELLIPSE_SAMPLES_PER_REV as f64;
+                let mut parameters = vec![t0];
+                fn subdivide<F: Fn(f64) -> DVec3>(
+                    out: &mut Vec<f64>, tangent: &F, a: f64, b: f64,
+                    max_angle: f64, depth: usize,
+                ) {
+                    let angle = tangent(a).dot(&tangent(b)).clamp(-1.0, 1.0).acos();
+                    if angle > max_angle && depth < CONIC_MAX_DEPTH {
+                        let m = (a + b) * 0.5;
+                        subdivide(out, tangent, a, m, max_angle, depth + 1);
+                        subdivide(out, tangent, m, b, max_angle, depth + 1);
+                    } else {
+                        out.push(b);
+                    }
+                }
+                subdivide(&mut parameters, &tangent, t0, t1, max_angle, 0);
+                let mut out: Vec<_> = parameters.into_iter().map(eval).collect();
+                out[0] = u;
+                *out.last_mut().unwrap() = v;
+                Ok(out)
+            },
             Self::Ellipse {
                 eplane_from_world, world_from_eplane, closed, dir
             } => {
@@ -137,5 +220,60 @@ impl Curve {
                 Ok(out_world)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_near(a: DVec3, b: DVec3) {
+        assert!((a - b).norm() < 1e-10, "{:?} != {:?}", a, b);
+    }
+
+    #[test]
+    fn hyperbola_uses_positive_branch_and_endpoint_parameter_direction() {
+        let curve = Curve::new_hyperbola(
+            DVec3::new(3.0, 4.0, 5.0),
+            DVec3::new(0.0, 1.0, 0.0),
+            DVec3::new(0.0, 0.0, 1.0),
+            2.0, 0.5,
+        ).unwrap();
+        let point = |t: f64| DVec3::new(3.0 + 0.5 * t.sinh(), 4.0, 5.0 + 2.0 * t.cosh());
+
+        let forward = curve.build(point(-1.0), point(1.5), false).unwrap();
+        assert!(forward.len() > 2);
+        assert_near(forward[0], point(-1.0));
+        assert_near(*forward.last().unwrap(), point(1.5));
+
+        let reverse = curve.build(point(1.5), point(-1.0), false).unwrap();
+        assert_eq!(forward.len(), reverse.len());
+        for (a, b) in forward.iter().zip(reverse.iter().rev()) {
+            assert_near(*a, *b);
+        }
+
+        assert!(curve.build(DVec3::new(3.0, 4.0, 3.0), point(1.0), false).is_err());
+    }
+
+    #[test]
+    fn parabola_supports_negative_focal_distance_and_both_directions() {
+        let curve = Curve::new_parabola(
+            DVec3::new(1.0, 2.0, 3.0),
+            DVec3::new(0.0, 0.0, 1.0),
+            DVec3::new(0.0, 1.0, 0.0),
+            -2.0,
+        ).unwrap();
+        let point = |t: f64| DVec3::new(1.0 + 4.0 * t, 2.0 - 2.0 * t * t, 3.0);
+
+        let forward = curve.build(point(-2.0), point(1.0), false).unwrap();
+        assert!(forward.len() > 2);
+        let reverse = curve.build(point(1.0), point(-2.0), false).unwrap();
+        assert_eq!(forward.len(), reverse.len());
+        for (a, b) in forward.iter().zip(reverse.iter().rev()) {
+            assert_near(*a, *b);
+        }
+        assert_eq!(Curve::new_parabola(
+            DVec3::zeros(), DVec3::z(), DVec3::x(), 0.0,
+        ).unwrap_err(), Error::InvalidGeometry("parabola focal distance is zero"));
     }
 }

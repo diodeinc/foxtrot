@@ -1215,6 +1215,15 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
                                edge_curve.edge_start == edge_curve.edge_end,
                                edge_curve.same_sense ^ !orientation)?
         },
+        Entity::Hyperbola(c) => {
+            let (location, axis, ref_direction) = axis2_placement_3d(s, c.position.cast())?;
+            Curve::new_hyperbola(location, axis, ref_direction,
+                                 c.semi_axis.0.0.0, c.semi_imag_axis.0.0.0)?
+        },
+        Entity::Parabola(c) => {
+            let (location, axis, ref_direction) = axis2_placement_3d(s, c.position.cast())?;
+            Curve::new_parabola(location, axis, ref_direction, c.focal_dist.0)?
+        },
         Entity::BSplineCurveWithKnots(c) => {
             if c.self_intersect.0 == Some(true) {
                 return Err(Error::SelfIntersectingCurve);
