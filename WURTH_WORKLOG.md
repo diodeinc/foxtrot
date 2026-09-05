@@ -1369,3 +1369,53 @@ Evidence: `local/repair-knot-cell-{lowering,check,regressions,kicad}` and
 regression cohort have zero measured f64 degenerates; their failures occur
 after f32 export. This does not yet establish whether each is avoidable
 sampling or an intrinsic output-representation limit.
+
+### Complete pass 12 — still not complete repair
+
+Run all 7,328 Würth files, then all 7,251 KiCad files with the frozen
+`repair-knot-cell-worker` (source commit 9e7db4a; SHA-256
+`0370db3bd880bac3d60ff74df5003fa23d1f9a86f7ac8b6c011448bc165ce862`).
+Eight disjoint shards per corpus verify every path/hash, the exact merged
+manifest set, counts and common worker digest. Failure meshes are compressed
+only after atomic case-result publication. Results:
+
+| Corpus | Pass | Invalid mesh | Face errors | Source worker errors |
+| --- | ---: | ---: | ---: | ---: |
+| Würth | 6,958 | 355 | 12 | 3 |
+| KiCad | 7,096 | 155 | 0 | 0 |
+
+Of invalid meshes, 16 Würth and 15 KiCad files already contain f64 degenerate
+triangles; the other 339 and 140 fail only after f32 export. Compared with
+pass 11, eight previously passing Würth files and 17 KiCad files now fail the
+exported-mesh gate. These regressions are not waived. Fresh per-file diagnostics,
+provenance and reproduction commands: `.amp/in/artifacts/repair-pass12/`.
+Full logs: `local/{wurth,kicad}-repair-pass12`; orchestration log:
+`local/repair-pass12.log`.
+
+Six of the remaining Würth face-error files are confirmed invalid source
+geometry, not a radius-boundary implementation omission. Both OLLT EE13_6_6
+variants and OLSTM EE13_7_6 variants 750370423, 750810014, 7508110341 and
+7508110351 declare surface #36 as DEGENERATE_TOROIDAL_SURFACE with equal radii
+0.127/0.127. Its formal WR1 requires **major_radius < minor_radius**, not <=.
+The current strict rejection is correct; do not silently reinterpret this
+entity as an ordinary horn torus. Reference:
+https://www.steptools.com/stds/stp_aim/html/t_degenerate_toroidal_surface.html.
+Together with the two mislabeled Parasolid files and the missing #0 reference,
+there are nine confirmed invalid-source inputs. The six other face-error files
+have two boundary-cancellation cases and four CrossingFixedEdge cases; their
+upstream causes remain under investigation.
+
+The independent WR-MJ geometry defect persists despite passing the mesh gate:
+surface #171 area is now 983.7192077441117 versus OCCT 62.408. New trace:
+`local/wrmj-pass12-probe.log`. Earlier raw-knot samples alone yield 535.624,
+so merely adding unconstrained points is insufficient.
+
+Before adding internal knot constraints, investigated Spade's
+`add_constraint_and_split`. It does not propagate user edge parity on splits
+and may reroute through an existing vertex. Oracle tracing disproves a proposed
+"internal first, reject original boundary crossings" invariant: restarted legs
+can cross a parity-true edge that the original segment did not cross, corrupting
+classification. Do not adopt that API here. Keep vertex-free `try_add_constraint`
+and explicitly split tagged input constraints; internal constraints must not
+toggle boundary parity. Do not skip a rejected internal edge to manufacture a
+passing face. This design is not implemented yet.
