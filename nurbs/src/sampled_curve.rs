@@ -1,4 +1,4 @@
-use nalgebra_glm::{dot, length, length2, DVec3};
+use nalgebra_glm::{dot, DVec3};
 use crate::{abstract_curve::AbstractCurve, nd_curve::NDBSplineCurve};
 
 #[derive(Debug)]
@@ -32,111 +32,53 @@ impl<const N: usize> SampledCurve<N>
     }
 
     // Section 6.1 (start middle page 232)
-    pub fn u_from_point_newtons_method(&self, P: DVec3, u_0: f64) -> f64 {
-        const BASE_NEWTON_ITERS: usize = 128;
-        const MAX_NEWTON_ITERS: usize = 256;
-        const EXTRA_ITERS_RESIDUAL_GATE: f64 = 2.0;
-        const EXTRA_ITERS_MIN_REL_PROGRESS: f64 = 0.005;
-        const EXTRA_ITERS_MAX_STALL: usize = 4;
-        let eps1 = 0.01; // a Euclidean distance error bound
-        let eps2 = 0.01; // a cosine error bound
-
-        let mut u_i = u_0;
-        let mut max_iters = BASE_NEWTON_ITERS;
-        let mut prev_r_len = f64::INFINITY;
-        let mut extra_stall_iters = 0usize;
-        for iter in 0..MAX_NEWTON_ITERS {
-            let derivs = self.curve.derivs::<2>(u_i);
-            let C = derivs[0];
-            let C_p = derivs[1];
-            let C_pp = derivs[2];
-            let r = C - P;
-
-            // If we are close to the point and close to the right angle, then return
-            let r_len = length(&r);
-            let cp_len = length(&C_p);
-            if r_len <= eps1 {
-                // Skip cosine check when derivative or residual is degenerate
-                // (near-zero) to avoid 0/0 = NaN causing infinite loops.
-                if cp_len < 1e-10 || r_len < 1e-10
-                    || dot(&C_p, &r) / cp_len / r_len <= eps2
-                {
-                    return u_i;
+    pub fn u_from_point_newtons_method(&self, P: DVec3, u_0: f64) -> Option<f64> {
+        const TOL: f64 = 64.0 * f64::EPSILON;
+        let min = self.min_u();
+        let max = self.max_u();
+        let range = max - min;
+        let constrain = |u: f64| {
+            if self.curve.open { u.clamp(min, max) }
+            else if u < min || u > max { min + (u - min).rem_euclid(range) }
+            else { u }
+        };
+        let mut u = constrain(u_0);
+        for _ in 0..256 {
+            let derivs = self.curve.derivs::<1>(u);
+            let r = derivs[0] - P;
+            let tangent = derivs[1] * range;
+            let speed = tangent.norm();
+            let unit = if speed > 0.0 { tangent / speed } else { DVec3::zeros() };
+            let gradient = dot(&r, &unit);
+            let position_scale = derivs[0].abs() + P.abs();
+            // First-order stationarity, not a fixed world-space distance or
+            // a signed cosine test. A normal offset cannot mask tangential error.
+            if gradient.abs() <= TOL * (speed + dot(&unit.abs(), &position_scale))
+                || (self.curve.open
+                    && ((u == min && gradient >= 0.0) || (u == max && gradient <= 0.0))) {
+                return Some(u);
+            }
+            // Derivative-scaled Gauss--Newton is a descent direction even
+            // where the squared-distance Hessian is negative.
+            let step = -gradient / speed * range;
+            let mut alpha = 1.0;
+            let mut accepted = None;
+            for _ in 0..40 {
+                let candidate = constrain(u + alpha * step);
+                let candidate_r = self.curve.point(candidate) - P;
+                let delta = if self.curve.open { candidate - u } else { alpha * step };
+                let slope = gradient * speed * (delta / range);
+                let change = 0.5 * dot(&(candidate_r - r), &(candidate_r + r));
+                let roundoff = TOL * dot(&(candidate_r.abs() + r.abs()), &position_scale);
+                if slope < 0.0 && change <= 1e-4 * slope + roundoff {
+                    accepted = Some(candidate);
+                    break;
                 }
+                alpha *= 0.5;
             }
-
-            // calculate the next `u`
-            // let f(u) = C'(u) dot (C(u) - P)
-            // u_{ip1} = u_i - (f(u_i) / f'(u_i)) = u_i - (C'(u_i) dot (C(u_i) - P)) / (C''(u_i) dot (C(u_i) - P) + |C'(u_i)|^2)
-            let denom = dot(&C_pp, &r) + length2(&C_p);
-            if denom.abs() < 1e-30 {
-                // Degenerate: zero curvature and zero first derivative
-                return u_i;
-            }
-            let delta_i = -dot(&C_p, &r) / denom;
-            let mut u_ip1 = u_i + delta_i;
-
-            // Handle NaN from degenerate curves
-            if u_ip1.is_nan() {
-                return u_i;
-            }
-
-            // clamp the `u` onto the curve
-            if u_ip1 < self.curve.min_u() {
-                u_ip1 = if self.curve.open {
-                    self.curve.min_u()
-                } else {
-                    self.curve.max_u() - (self.curve.min_u() - u_ip1)
-                };
-            }
-            if u_ip1 > self.curve.max_u() {
-                u_ip1 = if self.curve.open {
-                    self.curve.max_u()
-                } else {
-                    self.curve.min_u() + (u_ip1 - self.curve.max_u())
-                };
-            }
-
-            // if the point didnt move much, return
-            let step_len = length(&((u_ip1 - u_i) * C_p));
-            if step_len <= eps1 {
-                return u_ip1;
-            }
-
-            // Most inputs converge quickly; only spend the extra budget when
-            // already close enough that more Newton steps are likely useful.
-            if iter + 1 == BASE_NEWTON_ITERS {
-                if r_len <= eps1 * EXTRA_ITERS_RESIDUAL_GATE
-                    || step_len <= eps1 * EXTRA_ITERS_RESIDUAL_GATE
-                {
-                    max_iters = MAX_NEWTON_ITERS;
-                } else {
-                    return u_ip1;
-                }
-            } else if iter + 1 > BASE_NEWTON_ITERS {
-                let rel_progress = if prev_r_len.is_finite() && prev_r_len > 0.0 {
-                    (prev_r_len - r_len) / prev_r_len
-                } else {
-                    1.0
-                };
-                if rel_progress < EXTRA_ITERS_MIN_REL_PROGRESS {
-                    extra_stall_iters += 1;
-                } else {
-                    extra_stall_iters = 0;
-                }
-                if extra_stall_iters >= EXTRA_ITERS_MAX_STALL {
-                    return u_ip1;
-                }
-            }
-            if iter + 1 >= max_iters {
-                return u_ip1;
-            }
-
-            prev_r_len = r_len;
-            u_i = u_ip1;
+            u = accepted?;
         }
-        // Failed to converge; return best guess
-        u_i
+        None
     }
 
     pub fn min_u(&self) -> f64 {
@@ -147,7 +89,7 @@ impl<const N: usize> SampledCurve<N>
         self.curve.max_u()
     }
 
-    pub fn u_from_point(&self, p: DVec3) -> f64 {
+    pub fn u_from_point(&self, p: DVec3) -> Option<f64> {
         use ordered_float::OrderedFloat;
         let best_u = self.samples.iter()
             .min_by_key(|(_u, pos)| OrderedFloat((pos - p).norm()))
@@ -187,5 +129,43 @@ impl<const N: usize> SampledCurve<N>
             result.reverse();
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::KnotVector;
+
+    #[test]
+    fn short_curves_resolve_parameters_instead_of_returning_the_nearest_sample() {
+        for size in [1e-12, 1e-3, 1.0, 1e6] {
+            let curve = SampledCurve::new(NDBSplineCurve::new(true,
+                KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+                vec![DVec3::zeros(), DVec3::new(size, 0., 0.)]));
+            for parameter in [0.123456, 0.50001, 0.50002, 0.99999] {
+                for normal_offset in [0., 100.] {
+                    let p = DVec3::new(size * parameter, normal_offset, 0.);
+                    let actual = curve.u_from_point(p).unwrap();
+                    assert!((actual - parameter).abs() < 1e-13);
+                }
+            }
+            assert_eq!(curve.u_from_point(DVec3::new(-size, 0., 0.)), Some(0.));
+            assert_eq!(curve.u_from_point(DVec3::new(2. * size, 0., 0.)), Some(1.));
+        }
+    }
+
+    #[test]
+    fn curved_projection_converges_at_a_normal_offset_in_different_knot_units() {
+        for domain in [[0., 1.], [0., 1e-8], [100., 200.]] {
+            let curve = SampledCurve::new(NDBSplineCurve::new(true,
+                KnotVector::from_multiplicities(2, &domain, &[3, 3]),
+                vec![DVec3::new(0., 0., 0.), DVec3::new(0.5, 0., 0.), DVec3::new(1., 1., 0.)]));
+            // C(t)=(t,t²,0); this small normal offset retains a unique minimum.
+            let t = 0.31;
+            let p = DVec3::new(t, t * t, 0.) + 0.02 * DVec3::new(-2. * t, 1., 0.);
+            let actual = curve.u_from_point(p).unwrap();
+            assert!(((actual - domain[0]) / (domain[1] - domain[0]) - t).abs() < 1e-12);
+        }
     }
 }

@@ -106,7 +106,8 @@ impl Curve {
                 (curve.max_u(), curve.min_u())
             }
         } else {
-            (curve.u_from_point(u), curve.u_from_point(v))
+            (curve.u_from_point(u).ok_or(Error::InvalidGeometry("curve start projection did not converge"))?,
+             curve.u_from_point(v).ok_or(Error::InvalidGeometry("curve end projection did not converge"))?)
         };
         let mut c = curve.as_polyline(t_start, t_end, BSPLINE_POINTS_PER_KNOT);
         if c.is_empty() {

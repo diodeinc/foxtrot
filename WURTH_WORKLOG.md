@@ -529,3 +529,17 @@ files are selected for targeted rerun; other failure classes remain actionable.
 Disk maintenance removes 3,519 obsolete generated pass-2 compressed scratch
 meshes (4,727,878,200 bytes), preserving its reports/logs/metrics/manifests and
 frozen worker. Baseline and newer complete pass-3/pass-4 evidence remain.
+
+Curve projection has the same independent fixed-distance defect previously
+removed from surface projection: its signed cosine test accepts antiparallel
+residuals, and the 0.01 world-unit tolerance can return the nearest cached
+parameter without solving a short edge at all. Replace its heuristic extra
+iteration/stall state with derivative-scaled, line-search Gauss--Newton and
+first-order stationarity. Failure now propagates rather than returning an
+unconverged best guess. The scalar solver uses the same descent/roundoff contract
+as surface inversion and removes 58 production lines from the solver.
+Regression tests resolve distinct nearby parameters across 1e-12..1e6 geometry
+scales, with normal offsets, endpoint minima, curved projections and different
+knot units. NURBS/triangulate tests pass; all eight strict model checkpoints pass
+in `local/repair-curve-check`. This does not fix WR-MJ surface undersampling or
+WR-TBL's 112 floating-cross-zero facets; those are explicitly still reproduced.
