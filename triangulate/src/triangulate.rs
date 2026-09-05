@@ -526,7 +526,7 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                     .unwrap_or(DVec3::new(0.5, 0.5, 0.5));
                 crate::timing::time("shape:mesh_faces", || match &s[*id] {
                     Entity::ManifoldSolidBrep(b) =>
-                        closed_shell(s, b.outer, &mut mesh, &mut stats,
+                        shell(s, b.outer.cast(), &mut mesh, &mut stats,
                             &styled_item_colors, default_color, shape.uncertainty),
                     Entity::ShellBasedSurfaceModel(b) =>
                         for v in &b.sbsm_boundary {
@@ -535,7 +535,7 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                         },
                     Entity::BrepWithVoids(b) =>
                         // TODO: handle voids
-                        closed_shell(s, b.outer, &mut mesh, &mut stats,
+                        shell(s, b.outer.cast(), &mut mesh, &mut stats,
                             &styled_item_colors, default_color, shape.uncertainty),
                     _ => {
                         warn!("Skipping {:?} (not a known solid)", s[*id]);
@@ -719,78 +719,15 @@ fn shell(
     default_color: DVec3,
     uncertainty: f64,
 ) {
-    match &s[c] {
-        Entity::ClosedShell(_) => closed_shell(
-            s,
-            c.cast(),
-            mesh,
-            stats,
-            styled_item_colors,
-            default_color,
-            uncertainty,
-        ),
-        Entity::OpenShell(_) => open_shell(
-            s,
-            c.cast(),
-            mesh,
-            stats,
-            styled_item_colors,
-            default_color,
-            uncertainty,
-        ),
-        h => warn!("Skipping {:?} (unknown Shell type)", h),
-    }
-}
-
-fn open_shell(
-    s: &StepFile,
-    c: OpenShell,
-    mesh: &mut Mesh,
-    stats: &mut Stats,
-    styled_item_colors: &HashMap<usize, DVec3>,
-    default_color: DVec3,
-    uncertainty: f64,
-) {
-    let Some(cs) = s.entity(c) else {
-        error!("Failed to get OpenShell {:?}", c);
-        stats.num_errors += 1;
-        return;
+    let faces = match &s[c] {
+        Entity::ClosedShell(shell) => &shell.cfs_faces,
+        Entity::OpenShell(shell) => &shell.cfs_faces,
+        h => {
+            warn!("Skipping {:?} (unknown Shell type)", h);
+            return;
+        },
     };
-    for face in &cs.cfs_faces {
-        if let Err(err) = advanced_face(
-            s,
-            *face,
-            mesh,
-            stats,
-            styled_item_colors,
-            default_color,
-            uncertainty,
-        ) {
-            // Per-face failures are common on large boards and summarised
-            // once at the end of triangulate(); keep the per-face detail off
-            // the console (console logging is expensive in wasm workers).
-            stats.num_errors += 1;
-            debug!("Failed to triangulate {:?}: {}", s[*face], err);
-        }
-    }
-    stats.num_shells += 1;
-}
-
-fn closed_shell(
-    s: &StepFile,
-    c: ClosedShell,
-    mesh: &mut Mesh,
-    stats: &mut Stats,
-    styled_item_colors: &HashMap<usize, DVec3>,
-    default_color: DVec3,
-    uncertainty: f64,
-) {
-    let Some(cs) = s.entity(c) else {
-        error!("Failed to get ClosedShell {:?}", c);
-        stats.num_errors += 1;
-        return;
-    };
-    for face in &cs.cfs_faces {
+    for face in faces {
         if let Err(err) = advanced_face(
             s,
             *face,

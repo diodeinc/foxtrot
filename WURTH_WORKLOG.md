@@ -1881,3 +1881,20 @@ their counts (eight Würth and 16 KiCad facets after the sampling change), so
 none of the remaining flags can be dismissed as this diagnostic cancellation.
 No mesh generation or gate changes. Evidence: `/tmp/collinear-tests.log`,
 `local/repair-collinear-{wurth,kicad}`, frozen `local/repair-collinear-worker`.
+
+### Share open/closed shell traversal before adding cavity shells
+
+Consolidate the duplicated open-shell and closed-shell face loops into `shell`.
+This removes two wrappers and 63 net lines while retaining the existing
+meshing path. All 46 triangulate library tests pass; the CP_Radial reproduction
+exports byte-identical STL before and after. Evidence:
+`/tmp/shell-refactor-tests.log`, `local/curve-measure-cp/refactor*`, frozen
+`local/repair-shell-refactor-worker`.
+
+Direct source inspection resolves the capacitor's missing-face question:
+BREP_WITH_VOIDS #15 has outer shell #16 (43 faces) and void shell #1963,
+whose underlying shell #1964 contains five more faces. The shape dispatcher
+explicitly skips `voids`. These are #1965, #1998, #2030, #2047 and #2074,
+not the five complex spline faces tentatively discussed in the research
+report. The STEP file and OCCT each contain 48 faces; OCCT did not split a
+43-face source. Fixing void traversal is the next behavior change.
