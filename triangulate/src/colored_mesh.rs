@@ -31,19 +31,13 @@ pub struct ColoredSubmesh {
     pub indices: Vec<u32>,
 }
 
-struct ColoredBucket {
-    submesh: ColoredSubmesh,
-}
-
-impl ColoredBucket {
+impl ColoredSubmesh {
     fn new(color: [f32; 4]) -> Self {
         Self {
-            submesh: ColoredSubmesh {
-                color,
-                positions: Vec::new(),
-                normals: Vec::new(),
-                indices: Vec::new(),
-            },
+            color,
+            positions: Vec::new(),
+            normals: Vec::new(),
+            indices: Vec::new(),
         }
     }
 
@@ -60,14 +54,14 @@ impl ColoredBucket {
             }
         }
 
-        let index = u32::try_from(self.submesh.positions.len())
-            .map_err(|_| "too many vertices for u32 index")?;
-        self.submesh.positions.push([
+        let index =
+            u32::try_from(self.positions.len()).map_err(|_| "too many vertices for u32 index")?;
+        self.positions.push([
             vertex.pos.x as f32,
             vertex.pos.y as f32,
             vertex.pos.z as f32,
         ]);
-        self.submesh.normals.push([
+        self.normals.push([
             vertex.norm.x as f32,
             vertex.norm.y as f32,
             vertex.norm.z as f32,
@@ -120,7 +114,7 @@ pub fn tessellate_step_bytes(
 
 /// Group an already-triangulated `Mesh` into per-colour sub-meshes.
 pub fn group_mesh_by_color(mesh: &Mesh) -> Result<TessellatedMesh, String> {
-    let mut buckets: HashMap<ColorKey, ColoredBucket> = HashMap::new();
+    let mut buckets: HashMap<ColorKey, ColoredSubmesh> = HashMap::new();
     let mut vertex_indices = vec![None; mesh.verts.len()];
 
     for tri in mesh.triangles.iter() {
@@ -143,18 +137,14 @@ pub fn group_mesh_by_color(mesh: &Mesh) -> Result<TessellatedMesh, String> {
         let key = triangle_color_key(va, vb, vc);
         let bucket = buckets
             .entry(key)
-            .or_insert_with(|| ColoredBucket::new(key.to_rgba()));
+            .or_insert_with(|| ColoredSubmesh::new(key.to_rgba()));
         let a = bucket.insert_vertex(key, ia, va, &mut vertex_indices)?;
         let b = bucket.insert_vertex(key, ib, vb, &mut vertex_indices)?;
         let c = bucket.insert_vertex(key, ic, vc, &mut vertex_indices)?;
-        bucket.submesh.indices.extend([a, b, c]);
+        bucket.indices.extend([a, b, c]);
     }
 
-    let mut submeshes = buckets
-        .into_values()
-        .map(|bucket| bucket.submesh)
-        .filter(|s| !s.positions.is_empty() && !s.indices.is_empty())
-        .collect::<Vec<_>>();
+    let mut submeshes = buckets.into_values().collect::<Vec<_>>();
     // Largest groups first for deterministic ordering.
     submeshes.sort_by(|a, b| a.indices.len().cmp(&b.indices.len()).reverse());
     Ok(TessellatedMesh { submeshes })
@@ -244,6 +234,51 @@ mod tests {
         assert_eq!(submesh.positions.len(), 4);
         assert_eq!(submesh.normals, vec![[0.0, 0.0, 1.0]; 4]);
         assert_eq!(submesh.indices, vec![0, 1, 2, 0, 2, 3]);
+    }
+
+    #[test]
+    fn groups_shared_vertices_by_color() {
+        let mut mesh = Mesh {
+            verts: (0..5)
+                .map(|i| vertex(DVec3::new(i as f64, 0.0, 0.0), DVec3::new(0.0, 0.0, 1.0)))
+                .collect(),
+            triangles: vec![],
+        };
+        // Unreferenced vertices must not produce empty color groups.
+        assert!(group_mesh_by_color(&mesh).unwrap().submeshes.is_empty());
+        for (i, v) in mesh.verts.iter_mut().enumerate() {
+            v.color = if i < 3 { DVec3::x() } else { DVec3::y() };
+        }
+        mesh.triangles = vec![
+            Triangle {
+                verts: U32Vec3::new(0, 1, 2),
+            },
+            Triangle {
+                verts: U32Vec3::new(0, 3, 4),
+            },
+            Triangle {
+                verts: U32Vec3::new(0, 2, 1),
+            },
+        ];
+
+        let tess = group_mesh_by_color(&mesh).unwrap();
+        assert_eq!(tess.submeshes.len(), 2);
+        let red = &tess.submeshes[0];
+        assert_eq!(red.color, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(
+            red.positions,
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]
+        );
+        assert_eq!(red.normals, [[0.0, 0.0, 1.0]; 3]);
+        assert_eq!(red.indices, [0, 1, 2, 0, 2, 1]);
+        let green = &tess.submeshes[1];
+        assert_eq!(green.color, [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(
+            green.positions,
+            [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [4.0, 0.0, 0.0]]
+        );
+        assert_eq!(green.normals, [[0.0, 0.0, 1.0]; 3]);
+        assert_eq!(green.indices, [0, 1, 2]);
     }
 
     #[test]
