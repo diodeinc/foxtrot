@@ -225,7 +225,10 @@ where
             if uv_i + uv_step == uv_i {
                 return Some(uv_i);
             }
-            let mut alpha = 1.0;
+            // A shifted indefinite Hessian can request arbitrarily large
+            // travel. Start line search within one normalized domain rather
+            // than spending its iteration budget shrinking an unbounded step.
+            let mut alpha = 1.0 / normalized_step.amax().max(1.0);
             let mut accepted = None;
             for _ in 0..40 {
                 let candidate = self.constrain_uv(uv_i + alpha * uv_step);
@@ -323,6 +326,22 @@ mod tests {
 
     fn close(a: f64, b: f64, tolerance: f64) {
         assert!((a - b).abs() <= tolerance, "{} != {}", a, b);
+    }
+
+    #[test]
+    fn negative_curvature_projection_bounds_the_trial_step_to_the_domain() {
+        let sampled = SampledSurface::new(NDBSplineSurface::new(true, true,
+            KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [(0., 0.), (0.5, 0.), (1., 10000.)].iter().map(|&(x, y)|
+                vec![DVec3::new(x, y, 0.), DVec3::new(x, y, 1.)]).collect()));
+        let p = DVec3::new(0.001, 0.0001, 0.5);
+        let uv = sampled.uv_from_point_newtons_method(p, DVec2::new(0., 0.5)).unwrap();
+        let d = sampled.surf.derivs::<1>(uv);
+        let r = d[0][0] - p;
+        assert!(uv.x > 0. && uv.x < 0.001);
+        assert!(r.norm() < (sampled.surf.point(DVec2::new(0., 0.5)) - p).norm());
+        assert!(r.dot(&d[1][0]).abs() / d[1][0].norm() < 1e-12);
     }
 
     #[test]

@@ -1171,3 +1171,36 @@ worker to 27 ok / 20 invalid / 7 face errors. Both UMRF models pass; all six RST
 models clear lowering errors but retain invalid facets. Temporary instrumentation
 is removed. Logs: `local/inverse-probe-lowering`; results:
 `local/repair-surface-ulp-{lowering,check}`.
+
+### Bounded surface trial steps
+
+CMANC-XL 7848053201, CMBNC-TypeXL 7448053201, and FIRM 1770105311 fail
+immediately when negative distance curvature makes the shifted Hessian request
+parameter steps of order 1e8–1e9. Forty halvings cannot reach the local descent
+region. Start line search with travel limited to one normalized parameter
+domain, retaining its direction and the existing convergence tests. An analytic
+high-curvature extruded parabola reproduces the old failure and verifies the
+new solution's stationarity. Workspace tests and eight checkpoints pass.
+All three named models now pass. The 54-file lowering cohort is 30 ok, 20
+invalid meshes and four files with face errors. SMB, WPCC-RX/TX and OLRM remain.
+Evidence: `local/repair-surface-step-{lowering,check}`.
+
+### Pass 11 regression investigation — do not treat targeted passes as completion
+
+Full pass 11 (torus worker, before the two later surface solver fixes) processes
+all 7,328 Würth inputs, then all 7,251 KiCad inputs. Würth: 6,664 ok, 572 invalid
+meshes, 89 face errors, three source crashes. KiCad: 7,109 ok, 140 invalid meshes,
+two face errors. Exact path/hash coverage and common worker digests are verified;
+failure STLs are compressed after result publication.
+
+There are 347 previously passing Würth regressions (296 invalid meshes, 51 face
+errors). The initial suspicion that LINE projection caused most is contradicted
+by archived-worker bisection: 229/230 examined failures already occur before
+the LINE change, mostly after directed closed-curve trimming. CNSA-1210 has a
+projected loop start 3.7279626446548087e-7 from its smooth parameter seam. Eight
+samples in that tiny clipped span yield five adjacent f32 collisions and 15
+exported degenerate facets. Its shared vertex is 1.8428e-5 off-curve, so the
+endpoint-induced bend must not be discarded with those redundant samples.
+Evidence: `.amp/in/artifacts/closed-trim-regressions/`. This sampling defect is
+not yet fixed. Uncertainty-based LINE snapping is rejected: 25/33 known lens
+models have real resolved offsets smaller than their declared uncertainty.
