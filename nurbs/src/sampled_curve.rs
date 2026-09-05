@@ -98,6 +98,10 @@ impl<const N: usize> SampledCurve<N>
     }
 
     pub fn as_polyline(&self, u_start: f64, u_end: f64, num_points_per_knot: usize) -> Vec<DVec3> {
+        assert!(num_points_per_knot > 0);
+        // A degree-one span is exactly a line segment, including rational
+        // spans. Keep its knots, but do not manufacture redundant samples.
+        let num_points_per_knot = if self.curve.knots.degree() == 1 { 1 } else { num_points_per_knot };
         let (u_min, u_max) = if u_start < u_end {
             (u_start, u_end)
         } else {
@@ -108,7 +112,6 @@ impl<const N: usize> SampledCurve<N>
 
         // TODO this could be faster if we skip to the right start/end sections
 
-        assert!(num_points_per_knot > 0);
         for i in 0..self.curve.knots.len() - 1 {
             // Skip multiple knots
             if self.curve.knots[i] == self.curve.knots[i + 1] {
@@ -136,6 +139,16 @@ impl<const N: usize> SampledCurve<N>
 mod tests {
     use super::*;
     use crate::KnotVector;
+
+    #[test]
+    fn linear_spans_keep_corners_without_redundant_samples() {
+        let curve = SampledCurve::new(NDBSplineCurve::new(true,
+            KnotVector::from_multiplicities(1, &[0., 0.5, 1.], &[2, 1, 2]),
+            vec![DVec3::new(0., 0., 0.), DVec3::new(1., 0., 0.), DVec3::new(1., 1., 0.)]));
+        let points = curve.as_polyline(0.25, 0.75, 8);
+        assert_eq!(points, vec![DVec3::new(0.5, 0., 0.), DVec3::new(1., 0., 0.), DVec3::new(1., 0.5, 0.)]);
+        assert_eq!(curve.as_polyline(0.75, 0.25, 8), points.into_iter().rev().collect::<Vec<_>>());
+    }
 
     #[test]
     fn short_curves_resolve_parameters_instead_of_returning_the_nearest_sample() {

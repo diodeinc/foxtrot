@@ -543,3 +543,22 @@ scales, with normal offsets, endpoint minima, curved projections and different
 knot units. NURBS/triangulate tests pass; all eight strict model checkpoints pass
 in `local/repair-curve-check`. This does not fix WR-MJ surface undersampling or
 WR-TBL's 112 floating-cross-zero facets; those are explicitly still reproduced.
+
+The complete targeted exponent rerun finishes: all 547 Würth and 90 KiCad
+InvalidInput files lose that diagnostic. Würth outcomes are 407 ok, 108 invalid
+meshes, 32 other tessellation errors; KiCad outcomes are 50 ok, 17 invalid meshes,
+23 other tessellation errors. These are selected subsets, not a new full sweep.
+Reports: `local/{wurth,kicad}-scale-check`. Retained meshes are compressed after
+validation. Separate A/B reproduction of RPSMA 63012242121508 establishes that
+the curve solver change resolves two omitted faces: scale-only worker has two
+errors, curve-fixed worker has zero (232 faces, 115,316 triangles).
+
+Degree-one spline spans now emit their trim endpoints and intervening knots,
+not eight redundant points along each straight segment. Rational degree-one
+spans are also straight; changing parameter speed does not require curvature
+samples. A regression keeps a piecewise-linear corner and checks reversed trims.
+The eight strict checkpoints pass in `local/repair-linear-check`. This reduction
+alone does not resolve the planar spline chart defect: WR-TBL's floating-cross-
+zero count changes from 112 to 224 as the CDT changes. The next independently
+verified geometry reduction addresses that root cause rather than keeping
+redundant samples to accidentally influence the triangulator.
