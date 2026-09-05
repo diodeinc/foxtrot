@@ -125,21 +125,31 @@ impl Curve {
                                      is_loop: bool, dir: bool) -> Result<Vec<DVec3>, Error>
         where NDBSplineCurve<N>: AbstractCurve
     {
-        let (t_start, t_end) = if is_loop {
-            // Full-loop edge: sample the entire parameter range.  For closed
-            // spline curves, the start and end vertices are identical, so the
-            // direction cannot be recovered from their parameters; use the
-            // oriented edge / same_sense direction instead.
-            if dir {
-                (curve.min_u(), curve.max_u())
-            } else {
-                (curve.max_u(), curve.min_u())
-            }
-        } else {
-            (curve.u_from_point(u).ok_or(Error::InvalidGeometry("curve start projection did not converge"))?,
-             curve.u_from_point(v).ok_or(Error::InvalidGeometry("curve end projection did not converge"))?)
+        let t_start = curve.u_from_point(u)
+            .ok_or(Error::InvalidGeometry("curve start projection did not converge"))?;
+        let t_end = if is_loop { t_start } else {
+            curve.u_from_point(v)
+                .ok_or(Error::InvalidGeometry("curve end projection did not converge"))?
         };
-        let mut c = curve.as_polyline(t_start, t_end, BSPLINE_POINTS_PER_KNOT);
+        // A closed curve has two arcs between its endpoints. EDGE_CURVE's
+        // same_sense selects the directed arc, including traversal of the cut.
+        // Full loops start at the actual vertex, not the first knot.
+        let wraps = is_loop || (curve.is_closed()
+            && if dir { t_end < t_start } else { t_end > t_start });
+        let ranges = if wraps {
+            let (exit, entry) = if dir { (curve.max_u(), curve.min_u()) }
+                                else { (curve.min_u(), curve.max_u()) };
+            vec![(t_start, exit), (entry, t_end)]
+        } else {
+            vec![(t_start, t_end)]
+        };
+        let mut c = Vec::new();
+        for (a, b) in ranges {
+            if wraps && a == b { continue; }
+            let segment = curve.as_polyline(a, b, BSPLINE_POINTS_PER_KNOT);
+            let skip = usize::from(!c.is_empty());
+            c.extend(segment.into_iter().skip(skip));
+        }
         if c.is_empty() {
             return Err(Error::InvalidGeometry("curve polyline is empty"));
         }
@@ -261,6 +271,25 @@ impl Curve {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closed_spline_trims_follow_edge_sense_and_start_at_the_vertex() {
+        let curve = SampledCurve::new(NDBSplineCurve::new(false,
+            nurbs::KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),
+            vec![DVec3::zeros(), DVec3::x(), DVec3::new(1., 1., 0.), DVec3::y(), DVec3::zeros()]));
+        let a = DVec3::new(0.5, 0., 0.);
+        let b = DVec3::new(0., 0.5, 0.);
+        let forward = Curve::curve_points(a, b, &curve, false, true).unwrap();
+        let reverse = Curve::curve_points(a, b, &curve, false, false).unwrap();
+        assert_eq!(forward, vec![a, DVec3::x(), DVec3::new(1., 1., 0.), DVec3::y(), b]);
+        assert_eq!(reverse, vec![a, DVec3::zeros(), b]);
+        assert_eq!(Curve::curve_points(b, a, &curve, false, true).unwrap(),
+            reverse.into_iter().rev().collect::<Vec<_>>());
+        let full = Curve::curve_points(a, a, &curve, true, true).unwrap();
+        assert_eq!(full, vec![a, DVec3::x(), DVec3::new(1., 1., 0.), DVec3::y(), DVec3::zeros(), a]);
+        assert_eq!(Curve::curve_points(a, a, &curve, true, false).unwrap(),
+            full.into_iter().rev().collect::<Vec<_>>());
+    }
 
     #[test]
     fn polyline_reduction_preserves_bends_reversals_and_small_curvature() {

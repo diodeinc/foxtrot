@@ -93,6 +93,10 @@ impl<const N: usize> SampledCurve<N>
         self.curve.max_u()
     }
 
+    pub fn is_closed(&self) -> bool {
+        !self.curve.open
+    }
+
     pub fn u_from_point(&self, p: DVec3) -> Option<f64> {
         use ordered_float::OrderedFloat;
         let best_u = self.samples.iter()

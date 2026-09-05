@@ -1098,3 +1098,24 @@ files, 28 now pass, ten reach mesh validation, and 16 retain tessellation errors
 No distance tolerance changes or coordinate snapping are involved. Evidence:
 `local/repair-bounded-all-{lowering,check}`. Intermediate surface-only evidence
 is retained separately as `local/repair-bounded-{lowering,check}`.
+
+### Directed closed-curve trims
+
+WR-SMB 61612202121306 face #486 uses EDGE_CURVEs #490 and #504 on identical
+closed splines #495/#505. The edges have opposite endpoint order but both declare
+same_sense=true. They therefore cover complementary directed arcs. The previous
+sampler ignored same_sense for non-loop spline edges and sampled the same arc
+twice; cancellation correctly exposed the earlier wrong curve discretization.
+Whole-loop edges also started at the first knot rather than their actual vertex,
+omitting part of the curve when that vertex was away from the knot seam.
+
+Represent the directed trim as one or two bounded parameter intervals, joining
+at the closed seam once. Both partial arcs and whole loops use the actual
+projected start vertex. Square-curve regressions exercise complementary arcs,
+both directions, and whole loops starting midway along an edge; they fail before
+and pass after. Workspace tests and eight checkpoints pass. Four of the 14
+identical-curve cohort files now reach mesh validation; ten still have face
+errors. WR-SMB's six canceled faces clear but two other faces now expose lowering
+failures. Remaining CIRCM12 cancellations are torus seams, not this curve bug.
+All eleven KiCad crossing-cohort files still reach mesh validation with no face
+errors. Evidence: `local/repair-closed-trim-{identical,smb,check,kicad}`.
