@@ -1962,9 +1962,9 @@ mod tests {
                 control_points: vec![DVec4::new(0., radius, 0., 1.), DVec4::new(1., 1., 0., 1.)],
             };
             let surface = revolution_surface(curve, DVec3::zeros(), DVec3::x(), uncertainty).unwrap();
-            let Surface::NURBS { chart: crate::surface::SplineChart::Polar { radial_origin, .. }, .. }
+            let Surface::NURBS { chart: crate::surface::SplineChart::Polar { angular, origin: chart_origin, .. }, .. }
                 = surface else { panic!("expected polar spline chart") };
-            assert_eq!(radial_origin, origin);
+            assert_eq!(chart_origin[1 - angular], origin);
         }
     }
 

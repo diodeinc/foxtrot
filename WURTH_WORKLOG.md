@@ -1956,3 +1956,14 @@ the six flagged Würth models rejects all six, including two that previously
 passed the STL-only gate. Evidence: `/tmp/f64-gate-tests.log` and
 `local/repair-f64-gate-wurth`. Pass 18 predates this strengthened gate and
 cavity-shell traversal; its totals are not current all-corpus certification.
+
+### Store spline-chart transforms as coordinate data
+
+Replace seven separately named polar-chart fields with the angular axis,
+two-coordinate origin/scale and parameter bounds. Remove the axis-dependent
+construction branches without changing the mapping or acceptance domain.
+This is a behavior-preserving prerequisite for representing bounded pole
+sectors with the same chart as periodic disks. All 47 triangulate library
+tests pass; the capacitor's exported STL is byte-identical to the previous
+worker. Evidence: `/tmp/chart-data-tests.log`, `local/chart-data-check`, frozen
+`local/repair-chart-data-worker`.

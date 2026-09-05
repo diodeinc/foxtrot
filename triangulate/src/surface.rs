@@ -10,13 +10,10 @@ use crate::{Error, mesh::{Mesh, Triangle, Vertex}};
 pub enum SplineChart {
     Cartesian { v_scale: f64 },
     Polar {
-        periodic: usize,
-        periodic_min: f64,
-        period: f64,
-        radial_origin: f64,
-        radial_scale: f64,
-        radial_min: f64,
-        radial_max: f64,
+        angular: usize,
+        origin: DVec2,
+        scale: DVec2,
+        bounds: [DVec2; 2],
     },
 }
 
@@ -24,13 +21,13 @@ impl SplineChart {
     fn lower(&self, raw: DVec2) -> DVec2 {
         match *self {
             Self::Cartesian { v_scale } => DVec2::new(raw.x, raw.y * v_scale),
-            Self::Polar { periodic, periodic_min, period, radial_origin, radial_scale, .. } => {
-                let other = 1 - periodic;
-                let radius = (raw[other] - radial_origin) / radial_scale;
-                let angle = 2.0 * PI * (raw[periodic] - periodic_min).rem_euclid(period) / period;
+            Self::Polar { angular, origin, scale, .. } => {
+                let radial = 1 - angular;
+                let radius = (raw[radial] - origin[radial]) / scale[radial];
+                let angle = 2.0 * PI * (raw[angular] - origin[angular]).rem_euclid(scale[angular]) / scale[angular];
                 let mut mapped = DVec2::zeros();
-                mapped[periodic] = radius * angle.cos();
-                mapped[other] = -radial_scale.signum() * radius * angle.sin();
+                mapped[angular] = radius * angle.cos();
+                mapped[radial] = -scale[radial].signum() * radius * angle.sin();
                 mapped
             },
         }
@@ -39,23 +36,22 @@ impl SplineChart {
     fn raw(&self, mapped: DVec2) -> Option<DVec2> {
         match *self {
             Self::Cartesian { v_scale } => Some(DVec2::new(mapped.x, mapped.y / v_scale)),
-            Self::Polar { periodic, periodic_min, period, radial_origin, radial_scale,
-                          radial_min, radial_max } => {
-                let other = 1 - periodic;
+            Self::Polar { angular, origin, scale, bounds } => {
+                let radial = 1 - angular;
                 let radius = mapped.norm();
-                let radial = radial_origin + radial_scale * radius;
+                let coordinate = origin[radial] + scale[radial] * radius;
                 // Account only for arithmetic error in a chart roundtrip.
                 // Sampling outside the represented radial domain is rejected.
                 let roundoff = 8.0 * EPSILON
-                    * (radial_origin.abs() + (radial_scale * radius).abs());
-                if radial < radial_min - roundoff || radial > radial_max + roundoff {
+                    * (origin[radial].abs() + (scale[radial] * radius).abs());
+                if coordinate < bounds[0][radial] - roundoff || coordinate > bounds[1][radial] + roundoff {
                     return None;
                 }
-                let sin = -radial_scale.signum() * mapped[other];
-                let angle = sin.atan2(mapped[periodic]).rem_euclid(2.0 * PI);
+                let sin = -scale[radial].signum() * mapped[radial];
+                let angle = sin.atan2(mapped[angular]).rem_euclid(2.0 * PI);
                 let mut raw = DVec2::zeros();
-                raw[periodic] = periodic_min + period * angle / (2.0 * PI);
-                raw[other] = radial.clamp(radial_min, radial_max);
+                raw[angular] = origin[angular] + scale[angular] * angle / (2.0 * PI);
+                raw[radial] = coordinate.clamp(bounds[0][radial], bounds[1][radial]);
                 Some(raw)
             },
         }
@@ -117,34 +113,24 @@ impl Surface {
         let u_periodic = !surf.surf.u_open || (has_seam && surf.surf.rational_boundaries_coincide(0, uncertainty));
         let v_periodic = !surf.surf.v_open || (has_seam && surf.surf.rational_boundaries_coincide(1, uncertainty));
         let chart = if u_periodic ^ v_periodic {
-            let periodic = if u_periodic { 0 } else { 1 };
-            let radial = 1 - periodic;
-            let (radial_min, radial_max) = if radial == 0 {
-                (surf.surf.min_u(), surf.surf.max_u())
-            } else {
-                (surf.surf.min_v(), surf.surf.max_v())
-            };
-            let min_point = surf.surf.rational_boundary_is_point(radial, radial_min, uncertainty);
-            let max_point = surf.surf.rational_boundary_is_point(radial, radial_max, uncertainty);
+            let angular = if u_periodic { 0 } else { 1 };
+            let radial = 1 - angular;
+            let bounds = [DVec2::new(surf.surf.min_u(), surf.surf.min_v()),
+                          DVec2::new(surf.surf.max_u(), surf.surf.max_v())];
+            let min_point = surf.surf.rational_boundary_is_point(radial, bounds[0][radial], uncertainty);
+            let max_point = surf.surf.rational_boundary_is_point(radial, bounds[1][radial], uncertainty);
             if min_point && max_point {
                 SplineChart::Cartesian { v_scale: surf.surf.aspect_ratio() }
             } else {
-                let span = radial_max - radial_min;
-                let (radial_origin, radial_scale) = if min_point {
-                    (radial_min, span)
-                } else if max_point {
-                    (radial_max, -span)
-                } else {
-                    (radial_min - span, span)
-                };
-                let (periodic_min, periodic_max) = if periodic == 0 {
-                    (surf.surf.min_u(), surf.surf.max_u())
-                } else {
-                    (surf.surf.min_v(), surf.surf.max_v())
-                };
-                SplineChart::Polar { periodic, periodic_min,
-                    period: periodic_max - periodic_min, radial_origin, radial_scale,
-                    radial_min, radial_max }
+                let mut origin = bounds[0];
+                let mut scale = bounds[1] - bounds[0];
+                if max_point {
+                    origin[radial] = bounds[1][radial];
+                    scale[radial] = -scale[radial];
+                } else if !min_point {
+                    origin[radial] -= scale[radial];
+                }
+                SplineChart::Polar { angular, origin, scale, bounds }
             }
         } else {
             SplineChart::Cartesian { v_scale: surf.surf.aspect_ratio() }
@@ -1154,7 +1140,7 @@ mod tests {
         let no_seam = Surface::new_nurbs(surf.clone(), 1e-10, false);
         assert!(matches!(no_seam, Surface::NURBS { chart: SplineChart::Cartesian { .. }, .. }));
         let closed = Surface::new_nurbs(surf, 1e-10, true);
-        assert!(matches!(closed, Surface::NURBS { chart: SplineChart::Polar { periodic: 0, .. }, .. }));
+        assert!(matches!(closed, Surface::NURBS { chart: SplineChart::Polar { angular: 0, .. }, .. }));
     }
 
     #[test]
@@ -1385,12 +1371,21 @@ mod tests {
     fn polar_charts_roundtrip_with_positive_orientation() {
         for periodic in [0, 1] {
             for scale in [-3.0, 3.0] {
-                let chart = SplineChart::Polar {
-                    periodic, periodic_min: 2.0, period: 5.0,
-                    radial_origin: if scale > 0.0 { -1.0 } else { 2.0 },
-                    radial_scale: scale, radial_min: -1.0, radial_max: 2.0,
-                };
                 let other = 1 - periodic;
+                let mut origin = DVec2::zeros();
+                let mut scales = DVec2::zeros();
+                let mut bounds = [DVec2::zeros(); 2];
+                origin[periodic] = 2.0;
+                origin[other] = if scale > 0.0 { -1.0 } else { 2.0 };
+                scales[periodic] = 5.0;
+                scales[other] = scale;
+                bounds[0][periodic] = 2.0;
+                bounds[1][periodic] = 7.0;
+                bounds[0][other] = -1.0;
+                bounds[1][other] = 2.0;
+                let chart = SplineChart::Polar {
+                    angular: periodic, origin, scale: scales, bounds,
+                };
                 let mut raw = DVec2::zeros();
                 raw[periodic] = 3.1;
                 raw[other] = 0.4;
