@@ -885,3 +885,37 @@ quotient would require an explicitly lossy triangle-soup contract, not a claim
 of STEP-solid preservation. No filtering or relaxed harness gate was added.
 Removed generated `target/debug/incremental` caches to free about 3 GiB;
 retained source and corpus evidence.
+
+### Pass 8 and exact polyline reduction
+
+Full pass 8 (before polyline reduction): Würth 6,891 ok, 238 invalid meshes,
+196 tessellation errors, 3 source crashes; KiCad 7,094 ok, 129 invalid meshes,
+28 tessellation errors. Exact 7,328/7,251 coverage and shard worker identities
+verified. Per-file exports: `.amp/in/artifacts/repair-pass8/`. Compared to pass 7,
+seven new Würth lowering errors and two invalid meshes appear, plus ten new
+KiCad crossing failures. Rational arithmetic improves the two SMRW domes but
+regresses the SMCW dome and other pole cases; this is still unresolved.
+Deleted only superseded pass-6 generated meshes (675 files, 408,821,773 bytes).
+
+Direct f64/f32 triangle probes on IQXC-26 show the short-trim repair introduced
+eight redundant samples on exactly straight microscopic spline segments. The
+28 exported degenerate facets lie on four planar faces (#1683/#1139,
+#1687/#1143, #1691/#1147, #1717/#1161). These are not necessary curved samples:
+the redundant collinear points divide one straight edge into unrepresentable
+f32 intervals. Evidence: `local/crystal-quantization-probe.log`.
+
+Reduce the sampled polyline in place by removing only exactly collinear points
+between their neighbours, with robust predicates in all three projections.
+Corners, reversals and any nonzero curvature remain; outside the predicate
+exponent envelope samples remain unchanged. This preserves the represented
+polyline as a point set and traversal, unlike snapping or dropping output
+triangles. The straight-cubic short-trim regression fails before and passes
+after; curved short-trim, reversal and tiny-curvature tests pass, as do workspace
+tests and eight checkpoints. IQXC-26 now passes with no exported degenerates.
+Evidence: `local/repair-straight-{check,crystal}`.
+
+On the 114 pass-7 Würth regressions, exact reduction brings 27 to ok, leaving
+69 invalid meshes and 18 tessellation errors; KiCad's six-case cohort has one
+ok, one invalid mesh and four tessellation errors. Error-stage shifts are not
+equivalent to fixes. Full-corpus verification remains necessary after this
+change. Evidence: `local/{wurth,kicad}-straight-regressions`.
