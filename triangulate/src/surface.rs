@@ -263,7 +263,109 @@ impl Surface {
         }
     }
 
-    fn prepare(&mut self, verts: &[Vertex]) -> Result<(), Error> {
+    fn angular_distance(a: DVec3, b: DVec3) -> f64 {
+        a.cross(&b).norm().atan2(a.dot(&b))
+    }
+
+    fn point_minor_arc_distance(p: DVec3, a: DVec3, b: DVec3) -> Result<f64, Error> {
+        let cross = a.cross(&b);
+        let cross_norm = cross.norm();
+        if cross_norm <= 32.0 * EPSILON {
+            if a.dot(&b) < 0.0 {
+                return Err(Error::InvalidGeometry("ambiguous antipodal spherical edge"));
+            }
+            return Ok(Self::angular_distance(p, a));
+        }
+        let n = cross / cross_norm;
+        let projected = p - n * p.dot(&n);
+        let projected_norm = projected.norm();
+        let endpoint_distance = Self::angular_distance(p, a)
+            .min(Self::angular_distance(p, b));
+        if projected_norm <= 32.0 * EPSILON {
+            return Ok(endpoint_distance);
+        }
+        let projected = projected / projected_norm;
+        let arc_angle = cross_norm.atan2(a.dot(&b));
+        let on_arc = |x: DVec3| {
+            Self::angular_distance(a, x) <= arc_angle
+                && Self::angular_distance(x, b) <= arc_angle
+        };
+        let mut distance = endpoint_distance;
+        if on_arc(projected) {
+            distance = distance.min(Self::angular_distance(p, projected));
+        }
+        if on_arc(-projected) {
+            distance = distance.min(Self::angular_distance(p, -projected));
+        }
+        Ok(distance)
+    }
+
+    fn spherical_winding_sum(q: DVec3, points: &[DVec3],
+                             edges: &[(usize, usize)]) -> Result<(f64, f64), Error> {
+        let mut sum = 0.0;
+        let mut magnitude = 0.0;
+        for &(i, j) in edges {
+            let (a, b) = (*points.get(i).ok_or(Error::InvalidGeometry("boundary edge index"))?,
+                          *points.get(j).ok_or(Error::InvalidGeometry("boundary edge index"))?);
+            let numerator = q.dot(&a.cross(&b));
+            let denominator = 1.0 + q.dot(&a) + a.dot(&b) + b.dot(&q);
+            let term = 2.0 * numerator.atan2(denominator);
+            sum += term;
+            magnitude += term.abs();
+        }
+        // A forward error allowance proportional to the work and accumulated
+        // angle.  Candidates whose sign is not resolved are rejected.
+        let error = 64.0 * EPSILON * (magnitude + edges.len() as f64 * PI);
+        Ok((sum, error))
+    }
+
+    fn sphere_chart(points: &[DVec3], edges: &[(usize, usize)]) -> Result<DVec3, Error> {
+        let mut candidates = Vec::with_capacity(edges.len());
+        for (edge_index, &(i, j)) in edges.iter().enumerate() {
+            let a = *points.get(i).ok_or(Error::InvalidGeometry("boundary edge index"))?;
+            let b = *points.get(j).ok_or(Error::InvalidGeometry("boundary edge index"))?;
+            let sum_norm = (a + b).norm();
+            let cross_norm = a.cross(&b).norm();
+            if sum_norm <= 32.0 * EPSILON {
+                return Err(Error::InvalidGeometry("ambiguous antipodal spherical edge"));
+            }
+            if cross_norm > 32.0 * EPSILON {
+                candidates.push((cross_norm.atan2(a.dot(&b)), edge_index));
+            }
+        }
+        candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+        for (_, selected) in candidates {
+            let (i, j) = edges[selected];
+            let a = points[i];
+            let b = points[j];
+            let m = (a + b).normalize();
+            let n = a.cross(&b).normalize();
+            let mut clearance = Self::angular_distance(m, a)
+                .min(Self::angular_distance(m, b));
+            for (edge_index, &(u, v)) in edges.iter().enumerate() {
+                if edge_index != selected {
+                    clearance = clearance.min(Self::point_minor_arc_distance(
+                        m, points[u], points[v])?);
+                }
+            }
+            let clearance_error = 64.0 * EPSILON * (edges.len() as f64 + 1.0);
+            if !clearance.is_finite() || clearance <= clearance_error {
+                continue;
+            }
+            let delta = clearance * 0.5;
+            let exterior_pole = delta.cos() * m - delta.sin() * n;
+            let q = -exterior_pole.normalize();
+            let (winding, winding_error) = Self::spherical_winding_sum(q, points, edges)?;
+            if winding > winding_error {
+                return Ok(q);
+            }
+        }
+        Err(Error::CouldNotLower)
+    }
+
+    fn prepare(&mut self, verts: &[Vertex], boundary_edges: &[(usize, usize)],
+               same_sense: bool) -> Result<(), Error> {
         if verts.is_empty() {
             return Err(Error::InvalidGeometry("surface has no vertices"));
         }
@@ -282,12 +384,20 @@ impl Surface {
                 }
             },
             Surface::Sphere { mat, mat_i, location, .. } => {
-                let ref_direction = (verts[0].pos - *location).normalize();
-                let d1 = (verts[verts.len() - 1].pos - *location).normalize();
-                let axis = ref_direction.cross(&d1).normalize();
-
-                *mat = Self::make_rigid_transform(
-                        axis, ref_direction, *location);
+                let points: Vec<_> = verts.iter().map(|v| {
+                    let offset = v.pos - *location;
+                    if offset.norm_squared() <= EPSILON {
+                        Err(Error::InvalidGeometry("sphere boundary at center"))
+                    } else {
+                        Ok(offset.normalize())
+                    }
+                }).collect::<Result<_, _>>()?;
+                let oriented_edges: Vec<_> = boundary_edges.iter().map(|&(a, b)| {
+                    if same_sense { (a, b) } else { (b, a) }
+                }).collect();
+                let chart_center = Self::sphere_chart(&points, &oriented_edges)?;
+                let axis = Self::fallback_perpendicular(chart_center);
+                *mat = Self::make_rigid_transform(axis, chart_center, *location);
                 *mat_i = mat
                     .try_inverse()
                     .ok_or(Error::SingularTransform("sphere transform"))?;
@@ -330,17 +440,19 @@ impl Surface {
         }
     }
 
-    pub fn lower_verts(&mut self, verts: &mut [Vertex])
+    pub fn lower_verts(&mut self, verts: &mut [Vertex], boundary_edges: &[(usize, usize)],
+                       same_sense: bool)
         -> Result<Vec<(f64, f64)>, Error>
     {
         let name = self.type_name();
-        crate::timing::time(name, || self.lower_verts_inner(verts))
+        crate::timing::time(name, || self.lower_verts_inner(verts, boundary_edges, same_sense))
     }
 
-    fn lower_verts_inner(&mut self, verts: &mut [Vertex])
+    fn lower_verts_inner(&mut self, verts: &mut [Vertex], boundary_edges: &[(usize, usize)],
+                         same_sense: bool)
         -> Result<Vec<(f64, f64)>, Error>
     {
-        self.prepare(verts)?;
+        self.prepare(verts, boundary_edges, same_sense)?;
         let mut pts = Vec::with_capacity(verts.len());
         for v in verts {
             // Project to the 2D subspace for triangulation
@@ -964,6 +1076,110 @@ mod tests {
     use super::*;
     use nurbs::{BSplineSurface, KnotVector};
 
+    fn latitude_loop(latitude: f64, segments: usize, reverse: bool,
+                     vertices: &mut Vec<Vertex>, edges: &mut Vec<(usize, usize)>) {
+        let start = vertices.len();
+        for i in 0..segments {
+            let angle = 2.0 * PI * i as f64 / segments as f64;
+            vertices.push(Vertex {
+                pos: DVec3::new(latitude.cos() * angle.cos(),
+                                latitude.cos() * angle.sin(), latitude.sin()),
+                norm: DVec3::zeros(),
+                color: DVec3::zeros(),
+            });
+        }
+        for i in 0..segments {
+            let edge = (start + i, start + (i + 1) % segments);
+            edges.push(if reverse { (edge.1, edge.0) } else { edge });
+        }
+    }
+
+    fn lower_sphere(mut vertices: Vec<Vertex>, edges: &[(usize, usize)], same_sense: bool)
+        -> (Surface, Vec<Vertex>, Vec<(f64, f64)>, DVec3)
+    {
+        let mut surface = Surface::new_sphere(DVec3::zeros(), 1.0).unwrap();
+        let points = surface.lower_verts(&mut vertices, edges, same_sense).unwrap();
+        let chart_center = match &surface {
+            Surface::Sphere { mat, .. } => mat.column(0).xyz(),
+            _ => unreachable!(),
+        };
+        for (vertex, &(u, v)) in vertices.iter().zip(&points) {
+            assert!(u.is_finite() && v.is_finite());
+            assert!((surface.raise(DVec2::new(u, v)).unwrap() - vertex.pos).norm() < 1e-12);
+            assert!(vertex.norm.dot(&vertex.pos) > 1.0 - 1e-12);
+        }
+        (surface, vertices, points, chart_center)
+    }
+
+    #[test]
+    fn spherical_point_to_minor_arc_distance_selects_interior_and_endpoint() {
+        let a = DVec3::new(1.0, 0.0, 0.0);
+        let b = DVec3::new(0.0, 1.0, 0.0);
+        let interior = DVec3::new(1.0, 1.0, 0.2).normalize();
+        let distance = Surface::point_minor_arc_distance(interior, a, b).unwrap();
+        assert!((distance - 0.2_f64.atan2(2.0_f64.sqrt())).abs() < 1e-14);
+
+        let beyond = DVec3::new(-0.01, 1.0, 0.001).normalize();
+        let endpoint = Surface::angular_distance(beyond, b);
+        assert!((Surface::point_minor_arc_distance(beyond, a, b).unwrap() - endpoint).abs()
+            < 1e-14);
+    }
+
+    #[test]
+    fn oriented_hemisphere_has_exterior_antipode_and_nonzero_mesh() {
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        latitude_loop(0.0, 32, false, &mut vertices, &mut edges);
+        let (_surface, _vertices, points, q) = lower_sphere(vertices, &edges, true);
+        assert!((-q).z < 0.0, "chart antipode must be outside the north hemisphere");
+        let area2: f64 = edges.iter().map(|&(i, j)|
+            points[i].0 * points[j].1 - points[j].0 * points[i].1).sum();
+        assert!(area2.abs() > 1.0);
+        let mut triangulation = cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
+        triangulation.run().unwrap();
+        assert!(triangulation.triangles().next().is_some());
+    }
+
+    #[test]
+    fn same_sense_reversal_selects_equivalent_spherical_chart() {
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        latitude_loop(-0.35, 24, false, &mut vertices, &mut edges);
+        let reversed: Vec<_> = edges.iter().map(|&(a, b)| (b, a)).collect();
+        let (_, _, _, q1) = lower_sphere(vertices.clone(), &edges, true);
+        let (_, _, _, q2) = lower_sphere(vertices, &reversed, false);
+        assert!(q1.dot(&q2) > 1.0 - 1e-14);
+        assert!((-q1).z < -0.35_f64.sin());
+    }
+
+    #[test]
+    fn spherical_band_and_multiple_holes_put_antipode_in_known_exterior() {
+        let mut band_vertices = Vec::new();
+        let mut band_edges = Vec::new();
+        latitude_loop(-0.4, 32, false, &mut band_vertices, &mut band_edges);
+        latitude_loop(0.4, 32, true, &mut band_vertices, &mut band_edges);
+        let (_, _, _, band_q) = lower_sphere(band_vertices, &band_edges, true);
+        assert!((-band_q).z.abs() > 0.4_f64.sin());
+
+        // A north cap with two clockwise holes.  The holes are represented by
+        // small geodesic diamonds, making this also a non-convex trim region.
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        latitude_loop(-0.2, 40, false, &mut vertices, &mut edges);
+        for center_x in [-0.45_f64, 0.45] {
+            let start = vertices.len();
+            for p in [
+                DVec3::new(center_x - 0.12, 0.0, 0.8),
+                DVec3::new(center_x, 0.12, 0.8),
+                DVec3::new(center_x + 0.12, 0.0, 0.8),
+                DVec3::new(center_x, -0.12, 0.8),
+            ] { vertices.push(Vertex { pos: p.normalize(), norm: DVec3::zeros(), color: DVec3::zeros() }); }
+            for i in 0..4 { edges.push((start + (i + 1) % 4, start + i)); }
+        }
+        let (_, _, _, q) = lower_sphere(vertices, &edges, true);
+        assert!((-q).z < -0.2_f64.sin());
+    }
+
     #[test]
     fn periodic_seam_bound_retains_a_full_width_uv_polygon() {
         let period = 2.0 * PI;
@@ -1073,7 +1289,7 @@ mod tests {
 
     fn assert_band_tessellates(mut surface: Surface, mut vertices: Vec<Vertex>,
                                edges: Vec<(usize, usize)>) {
-        let mut points = surface.lower_verts(&mut vertices).unwrap();
+        let mut points = surface.lower_verts(&mut vertices, &edges, true).unwrap();
         for (vertex, &(u, v)) in vertices.iter().zip(&points) {
             let raised = surface.raise(DVec2::new(u, v)).unwrap();
             assert!((raised - vertex.pos).norm() < 1e-9);

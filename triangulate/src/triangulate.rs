@@ -905,7 +905,7 @@ fn advanced_face(
     // Add curvature samples before constraint insertion. The CDT subdivides
     // constraints at existing vertices, including samples exactly on an edge.
     let mut pts = crate::timing::time("face:lower_verts",
-        || surf.lower_verts(&mut mesh.verts[v_start..]))?;
+        || surf.lower_verts(&mut mesh.verts[v_start..], &edges, same_sense))?;
     crate::timing::time("face:unwrap_periodic",
         || surf.unwrap_periodic(&mut pts, &edges, &unwrap_ranges));
     crate::timing::time("face:resolve_crossing_edges",
@@ -1605,7 +1605,7 @@ mod tests {
                     norm: DVec3::zeros(), color: DVec3::zeros(),
                 }
             }).collect();
-            let uv = surface.lower_verts(&mut verts).unwrap();
+            let uv = surface.lower_verts(&mut verts, &[], true).unwrap();
             for (i, u) in [0.5_f64, 0.7, 0.9].iter().enumerate() {
                 let expected = DVec3::new(v.cos() * u.cos(), v.cos() * u.sin(), v.sin());
                 assert!(verts[i].norm.dot(&expected) > 1.0 - 1e-12);
