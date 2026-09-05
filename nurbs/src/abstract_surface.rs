@@ -12,6 +12,11 @@ pub trait AbstractSurface {
     fn point_from_basis(&self, uspan: usize, Nu: &VecF,
                                vspan: usize, Nv: &VecF) -> DVec3;
 
-    fn derivs<const E: usize>(&self, uv: DVec2) -> Vec<Vec<DVec3>>;
-}
+    fn derivs<const E: usize>(&self, uv: DVec2) -> Vec<Vec<DVec3>> {
+        self.derivs_relative_to::<E>(uv, DVec3::zeros())
+    }
 
+    /// The zeroth entry is S(uv) - reference, evaluated before restoring
+    /// world coordinates. Higher derivatives are translation invariant.
+    fn derivs_relative_to<const E: usize>(&self, uv: DVec2, reference: DVec3) -> Vec<Vec<DVec3>>;
+}

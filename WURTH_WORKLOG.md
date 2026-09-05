@@ -1278,3 +1278,15 @@ the remaining four lowering models. A like-for-like six-model comparison keeps
 UMRF 111001/112001 passing only with mixed per-axis convergence; OLRM, WPCC-RX/TX
 and SMB remain failures (`local/repair-{seam,relative-mixed}-remaining`). These
 experimental changes are not yet committed or counted as recovered files.
+
+### Query-relative surface derivative jets
+
+Add a derivative evaluation whose zeroth entry is the residual relative to a
+query, before restoring world coordinates. Nonrational surfaces retain their
+anchored sum; rational surfaces translate homogeneous controls with fused
+multiply-add before rational evaluation. Ordinary derivatives use the same
+path with a zero reference. This avoids losing resolvable residuals when a
+small surface is far from the origin, without a second evaluation algorithm.
+The translated-plane regression verifies residuals below a world-coordinate
+ULP for both surface types. Workspace tests pass. This commit exposes the
+evaluation primitive only; solver integration is a separate logic change.

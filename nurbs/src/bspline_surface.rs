@@ -14,7 +14,9 @@ impl AbstractSurface for BSplineSurface {
         self.surface_point_from_basis(uspan, Nu, vspan, Nv)
     }
 
-    fn derivs<const E: usize>(&self, uv: DVec2) -> Vec<Vec<DVec3>> {
-        self.surface_derivs::<E>(uv)
+    fn derivs_relative_to<const E: usize>(&self, uv: DVec2, reference: DVec3) -> Vec<Vec<DVec3>> {
+        let (origin, mut derivatives) = self.surface_derivs_relative::<E>(uv, |p, origin| p - origin);
+        derivatives[0][0] += origin - reference;
+        derivatives
     }
 }

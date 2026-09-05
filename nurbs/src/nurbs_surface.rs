@@ -18,8 +18,14 @@ impl AbstractSurface for NURBSSurface {
         p.xyz() / (p.w + origin.w) + origin.xyz() / origin.w
     }
 
-    fn derivs<const E: usize>(&self, uv: DVec2) -> Vec<Vec<DVec3>> {
-        let (origin, mut derivs) = self.surface_derivs_relative::<E>(uv, crate::rational_difference);
+    fn derivs_relative_to<const E: usize>(&self, uv: DVec2, reference: DVec3) -> Vec<Vec<DVec3>> {
+        let shift = |p: nalgebra_glm::DVec4| nalgebra_glm::DVec4::new(
+            (-reference.x).mul_add(p.w, p.x),
+            (-reference.y).mul_add(p.w, p.y),
+            (-reference.z).mul_add(p.w, p.z), p.w);
+        let (origin, mut derivs) = self.surface_derivs_relative::<E>(uv,
+            |p, origin| crate::rational_difference(shift(p), shift(origin)));
+        let origin = shift(origin);
         derivs[0][0].w += origin.w;
         let mut SKL = vec![vec![DVec3::zeros(); E + 1]; E + 1];
         let bin = |a, b| num_integer::binomial(a, b) as f64;
@@ -50,6 +56,25 @@ mod tests {
     use super::*;
     use crate::KnotVector;
     use nalgebra_glm::DVec4;
+
+    #[test]
+    fn relative_jets_retain_displacements_below_world_coordinate_precision() {
+        fn check(surface: impl AbstractSurface) {
+            let uv = DVec2::new(0.25 + 1e-10, 0.3);
+            let reference = DVec3::new(1e9 + 0.25, 0.3, 0.);
+            assert_eq!(surface.point(uv), reference);
+            let jet = surface.derivs_relative_to::<1>(uv, reference);
+            assert!((jet[0][0].x - (uv.x - 0.25)).abs() < 1e-16);
+            assert_eq!(jet[1][0], DVec3::x());
+            assert_eq!(jet[0][1], DVec3::y());
+        }
+        let knots = || KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
+        let controls: Vec<Vec<_>> = [0., 1.].iter().map(|&u|
+            [0., 1.].iter().map(|&v| DVec3::new(1e9 + u, v, 0.)).collect()).collect();
+        check(crate::BSplineSurface::new(true, true, knots(), knots(), controls.clone()));
+        check(NURBSSurface::new(true, true, knots(), knots(), controls.iter().map(|row|
+            row.iter().map(|p| DVec4::new(p.x, p.y, p.z, 1.)).collect()).collect()));
+    }
 
     #[test]
     fn rational_constant_coordinates_have_zero_derivatives() {
