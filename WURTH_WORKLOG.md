@@ -1705,3 +1705,23 @@ nondegenerate source trim. Neither validity nor invalidity of the source face
 is established. Do not infer an exact duplicate trim, or relax the projection
 termination rule based only on this experiment. Evidence:
 `local/tbl-rca/high_precision_geometry.{py,txt}`.
+
+### Evaluate descending knot candidates without a snapping tolerance
+
+Compare each quadratic trial with its nearest cell-bound variants using
+factored actual residual differences. A bound is eligible only inside the
+trust region and with negative predicted distance change. Prefer it on an
+actual-distance tie. The original trial remains available when the bound
+cannot descend. No unchanged/shortened trial establishes convergence, and
+stationarity thresholds stay unchanged.
+
+The six CIRCM12 models now have zero f64-degenerate triangles; their f32
+failures remain. All 13 axial-inductor cases pass the full gate, including
+the pass-15 KiCad regression. The 95-file Würth cohort has 63 ok / 32 invalid
+meshes and no face errors; the 16-file KiCad cohort has 13 ok / 3 invalid
+meshes. TBL 691378100020 reverts from ok to an f32-only invalid mesh; that
+regression remains open. Workspace tests pass, including the nonbinary-weight
+extrusion regression, which fails before this change. Evidence:
+`/tmp/knot-candidate-before.log`, `/tmp/knot-descent-workspace-tests.log`,
+`local/repair-knot-descent-{wurth,kicad}`; frozen
+`local/repair-knot-descent-worker`.

@@ -253,12 +253,34 @@ where
                     let step = quadratic_step(m.gradient, m.hessian,
                         m.lo.sup(&DVec2::repeat(-radius)), m.hi.inf(&DVec2::repeat(radius)),
                         |q| (self.stepped_uv(uv_i, ranges, m.spans, q) - uv_i).component_div(&ranges));
-                    let candidate = self.stepped_uv(uv_i, ranges, m.spans, step);
-                    let candidate_r = self.surf.derivs_in_span::<0>(candidate, m.spans, P)[0][0];
-                    let q = (candidate - uv_i).component_div(&ranges);
-                    let h = m.hessian;
-                    let predicted = dot(&q, &(m.gradient + 0.5 * DVec2::new(h[0] * q.x + h[1] * q.y,
-                        h[1] * q.x + h[2] * q.y)));
+                    let mut candidate = self.stepped_uv(uv_i, ranges, m.spans, step);
+                    let mut candidate_r = self.surf.derivs_in_span::<0>(candidate, m.spans, P)[0][0];
+                    let prediction = |point: DVec2| {
+                        let q = (point - uv_i).component_div(&ranges);
+                        let h = m.hessian;
+                        dot(&q, &(m.gradient + 0.5 * DVec2::new(h[0] * q.x + h[1] * q.y,
+                            h[1] * q.x + h[2] * q.y)))
+                    };
+                    // A coupled model can invent transverse motion from
+                    // quotient roundoff. Keep the exact knot representative
+                    // unless leaving it improves the actual residual distance.
+                    for (i, knots) in [&self.surf.u_knots, &self.surf.v_knots].iter().enumerate() {
+                        if candidate[i] == uv_i[i] { continue; }
+                        let (lo, hi) = (knots[m.spans[i]], knots[m.spans[i] + 1]);
+                        let knot = if candidate[i] - lo <= hi - candidate[i] { lo } else { hi };
+                        if (knot - uv_i[i]).abs() > radius * ranges[i] { continue; }
+                        let mut bound = candidate;
+                        bound[i] = knot;
+                        // Keep the original descent trial when a knot variant
+                        // has no predicted gain; it cannot prove convergence.
+                        if prediction(bound) >= 0. { continue; }
+                        let bound_r = self.surf.derivs_in_span::<0>(bound, m.spans, P)[0][0];
+                        if dot(&(bound_r - candidate_r), &(bound_r + candidate_r)) <= 0. {
+                            candidate = bound;
+                            candidate_r = bound_r;
+                        }
+                    }
+                    let predicted = prediction(candidate);
                     // Compare residual distances in factored form to retain
                     // small improvements near a nonzero normal offset.
                     let change = 0.5 * dot(&(candidate_r - m.residual), &(candidate_r + m.residual));
@@ -400,6 +422,22 @@ mod tests {
         let discrete = quadratic_step(g, h, lo, hi, represent);
         assert!(discrete.x < 0. && discrete.y == 0.);
         assert!(g.x * discrete.x + 0.5 * h[0] * discrete.x * discrete.x < 0.);
+    }
+
+    #[test]
+    fn rational_extrusion_boundary_remains_a_straight_parameter_line() {
+        let points = [(-1.767765, 3.557235, 1.),
+            (1.789502361076, 3.557235, 0.83152615303), (3.151478602946, 0.2710256648, 1.)];
+        let sampled = SampledSurface::new(NDBSplineSurface::new(true, true,
+            KnotVector::from_multiplicities(2, &[0., 1.17789368835], &[3, 3]),
+            KnotVector::from_multiplicities(1, &[7.012443731511, 7.2], &[2, 2]),
+            points.iter().map(|&(x, y, w)| [15.487556268489, 15.3].iter()
+                .map(|&z| nalgebra_glm::DVec4::new(x, y, z, 1.) * w).collect()).collect()));
+        for z in [15.487538034315, 15.46, 15.39, 15.3] {
+            let uv = sampled.uv_from_point(DVec3::new(-1.767765, 3.557235, z)).unwrap();
+            assert_eq!(uv.x, 0.);
+            close(sampled.surf.point(uv).z, z, 4. * f64::EPSILON * z);
+        }
     }
 
     #[test]
