@@ -111,6 +111,7 @@ impl<'a> StepFile<'a> {
         for p in parsed.into_iter() {
             out[p.0] = p.1;
         }
+        validate_references(&blocks[data_start..data_end], &out)?;
 
         Ok(Self(out))
     }
@@ -201,6 +202,54 @@ impl<'a> StepFile<'a> {
     }
 }
 
+/// Checks explicit entity references in the original records.  This is kept
+/// separate from `Entity::upstream`, because `$` is represented internally as
+/// ID 0 and fallback entities do not expose their parameters there.
+fn validate_references(
+    blocks: &[&[u8]],
+    entities: &[Entity],
+) -> Result<(), StepParseError> {
+    for block in blocks {
+        let equals = block.iter().position(|c| *c == b'=').expect("parsed DATA declaration");
+        let mut i = equals + 1;
+        let mut in_string = false;
+        while i < block.len() {
+            if block[i] == b'\'' {
+                if in_string && block.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_string = !in_string;
+                i += 1;
+                continue;
+            }
+            if !in_string && block[i] == b'#' {
+                let start = i + 1;
+                let mut end = start;
+                while block.get(end).map_or(false, u8::is_ascii_digit) {
+                    end += 1;
+                }
+                if end > start {
+                    let target_text = std::str::from_utf8(&block[start..end]).unwrap();
+                    let target = target_text.parse::<usize>().ok();
+                    if target.map_or(true, |target| {
+                        matches!(entities.get(target), None | Some(Entity::_EmptySlot))
+                    }) {
+                        return Err(StepParseError::new(format!(
+                            "entity {} references undefined entity #{}",
+                            String::from_utf8_lossy(&block[..equals]), target_text
+                        )));
+                    }
+                    i = end;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+    Ok(())
+}
+
 fn is_fallback_entity_record(s: &str) -> bool {
     let Some(body) = s.strip_prefix('=') else { return false };
     let Some(open) = body.find('(') else { return false };
@@ -225,6 +274,14 @@ mod tests {
     use super::*;
 
     const MINIMAL: &[u8] = b"ISO-10303-21;HEADER;ENDSEC;DATA;#1=NOT_IN_AP214('a; b''s /* text */');ENDSEC;END-ISO-10303-21;";
+
+    fn parse_data(records: &str) -> Result<(), StepParseError> {
+        let data = format!(
+            "ISO-10303-21;HEADER;ENDSEC;DATA;{}ENDSEC;END-ISO-10303-21;",
+            records
+        );
+        StepFile::parse(data.as_bytes()).map(|_| ())
+    }
 
     #[test]
     fn flatten_respects_literals_and_comments() {
@@ -253,5 +310,25 @@ mod tests {
     fn entity_returns_none_for_missing_id() {
         let file = StepFile(Vec::new());
         assert!(file.entity::<crate::ap214::CartesianPoint_>(Id::new(4)).is_none());
+    }
+
+    #[test]
+    fn rejects_missing_explicit_references_with_source_and_target() {
+        let in_range = parse_data("#1=UNKNOWN(#2);#3=UNKNOWN($);").unwrap_err().to_string();
+        assert!(in_range.contains("#1 references undefined entity #2"));
+
+        let out_of_range = parse_data("#7=UNKNOWN(#99);").unwrap_err().to_string();
+        assert!(out_of_range.contains("#7 references undefined entity #99"));
+
+        let explicit_zero = parse_data("#7=VERTEX_POINT('',#0);").unwrap_err().to_string();
+        assert!(explicit_zero.contains("#7 references undefined entity #0"));
+    }
+
+    #[test]
+    fn reference_validation_handles_literals_forward_refs_nulls_and_fallbacks() {
+        parse_data(
+            "#1=UNKNOWN('literal #404 and it''s still #405',#2,$);\
+             #2=ANOTHER_UNKNOWN('ok');"
+        ).unwrap();
     }
 }
