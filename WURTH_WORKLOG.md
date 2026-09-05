@@ -1452,3 +1452,15 @@ to approximately 0.00655 mm. This is evidence of an ill-conditioned imported
 wire, not proof that the source incidence violates its tolerance. Keep its
 canceled-boundary implementation limitation open. Reproducible incidence and
 BRepCheck evidence: `local/wurth-repair-pass12/tbl691404910001b-*`.
+
+### Distinguish refinement constraints from trim boundaries
+
+The CDT now accepts `(start, end, boundary)` records through
+`new_with_constraints`; existing boundary-only constructors use the same path.
+Internal constraints lock triangulation edges without changing region parity.
+This is the required representation for spline knot-cell refinement, not a
+second triangulation implementation. No caller generates the grid yet.
+Tests cover a hole, an internal edge inside the hole, overlapping boundary and
+internal constraints, subdivision by an existing collinear point, both insertion
+orders, and an internal-only triangulation. `cargo test -p cdt`: eight unit tests
+and two doc tests pass (`/tmp/internal-constraints-tests.log`).

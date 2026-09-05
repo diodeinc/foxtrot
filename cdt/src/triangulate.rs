@@ -16,7 +16,7 @@ type Engine = ConstrainedDelaunayTriangulation<Point2<f64>, (), bool>;
 pub struct Triangulation {
     points: Vec<Point>,
     coordinate_scale: f64,
-    edges: Vec<(usize, usize)>,
+    edges: Vec<(usize, usize, bool)>,
     engine: Engine,
     input_handles: Vec<FixedVertexHandle>,
     vertex_input: Vec<usize>,
@@ -64,6 +64,17 @@ impl Triangulation {
     where
         E: IntoIterator<Item = &'a (usize, usize)> + Copy,
     {
+        Self::new_with_constraints(points, edges.into_iter().map(|&(a, b)| (a, b, true)))
+    }
+
+    /// Creates an incremental triangulation with tagged constraints `(a, b,
+    /// boundary)`. All constraints prevent edge flips, but only boundaries
+    /// toggle inside/outside parity. Crossings must already be split at shared
+    /// input vertices. With no boundary constraints, emit the full convex hull.
+    pub fn new_with_constraints<E>(points: &[Point], edges: E) -> Result<Self, Error>
+    where
+        E: IntoIterator<Item = (usize, usize, bool)>,
+    {
         if points.is_empty() {
             return Err(Error::EmptyInput);
         }
@@ -98,10 +109,10 @@ impl Triangulation {
             // No uniform binary scale can represent this dynamic range.
             return Err(Error::InvalidInput);
         }
-        let edges: Vec<_> = edges.into_iter().copied().collect();
+        let edges: Vec<_> = edges.into_iter().collect();
         if edges
             .iter()
-            .any(|&(a, b)| a >= points.len() || b >= points.len() || a == b)
+            .any(|&(a, b, _)| a >= points.len() || b >= points.len() || a == b)
         {
             return Err(Error::InvalidEdge);
         }
@@ -177,7 +188,7 @@ impl Triangulation {
         if self.engine.num_inner_faces() == 0 {
             return Err(Error::CannotInitialize);
         }
-        for &(a, b) in &self.edges {
+        for &(a, b, boundary) in &self.edges {
             let from = self.input_handles[a];
             let to = self.input_handles[b];
             if from == to {
@@ -192,7 +203,7 @@ impl Triangulation {
                     .engine
                     .undirected_edge_data_mut(edge.as_undirected())
                     .data_mut();
-                *parity ^= true;
+                *parity ^= boundary;
             }
         }
         self.classify()?;
@@ -201,7 +212,7 @@ impl Triangulation {
     }
 
     fn classify(&mut self) -> Result<(), Error> {
-        if self.edges.is_empty() {
+        if !self.edges.iter().any(|&(_, _, boundary)| boundary) {
             self.selected = vec![true; self.engine.num_inner_faces()];
             return Ok(());
         }
@@ -332,7 +343,7 @@ impl Triangulation {
             ));
         }
         if debug && !self.complete {
-            for &(a, b) in &self.edges {
+            for &(a, b, _) in &self.edges {
                 let (p, q) = (self.points[a], self.points[b]);
                 out.push_str(&format!(r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="lime" stroke-width="2" stroke-dasharray="4"/>"#,x(p.0),y(p.1),x(q.0),y(q.1)));
             }
@@ -464,6 +475,59 @@ mod tests {
         let t = Triangulation::build_with_edges(&p, &e).unwrap();
         assert_eq!(t.triangles().count(), 0);
         assert_eq!(t.engine.num_constraints(), 4);
+    }
+
+    #[test]
+    fn internal_constraints_preserve_holes_and_overlapping_boundary_parity() {
+        let points = [
+            (0., 0.),
+            (4., 0.),
+            (4., 4.),
+            (0., 4.),
+            (1., 1.),
+            (3., 1.),
+            (3., 3.),
+            (1., 3.),
+            (2., 0.),
+        ];
+        let boundary = [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+        ];
+        let internal = [(0, 1), (0, 4), (1, 5), (2, 6), (3, 7), (4, 6)];
+        for internal_first in [false, true] {
+            let mut edges: Vec<_> = boundary
+                .iter()
+                .map(|&(a, b)| (a, b, true))
+                .chain(internal.iter().map(|&(a, b)| (a, b, false)))
+                .collect();
+            if internal_first {
+                edges.reverse();
+            }
+            let mut t = Triangulation::new_with_constraints(&points, edges).unwrap();
+            t.run().unwrap();
+            assert!(t.inside((0.5, 0.5)));
+            assert!(!t.inside((2., 2.)));
+            assert!(!t.inside((5., 2.)));
+            let area: f64 = t
+                .triangles()
+                .map(|(a, b, c)| {
+                    let (a, b, c) = (points[a], points[b], points[c]);
+                    ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)) / 2.
+                })
+                .sum();
+            assert_eq!(area, 12.);
+            assert_eq!(t.engine.num_constraints(), 14);
+        }
+        let mut t = Triangulation::new_with_constraints(&points, [(0, 2, false)]).unwrap();
+        t.run().unwrap();
+        assert!(t.inside((2., 2.)));
     }
 
     #[test]
