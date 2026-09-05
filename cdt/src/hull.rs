@@ -248,7 +248,7 @@ impl Hull {
         // item in the target bucket, then it becomes the bucket's head
         let b = self.bucket(angle);
         if self.buckets[b] == EMPTY_HULL || (self.buckets[b] == right &&
-                                             angle < self.data[right].angle)
+                                             angle <= self.data[right].angle)
         {
             self.buckets[b] = h;
         }
@@ -326,5 +326,21 @@ impl Hull {
     /// Looks up what bucket a given pseudo-angle will fall into.
     pub fn bucket(&self, angle: f64) -> usize {
         (angle * (self.buckets.len() as f64 - 1.0)).round() as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equal_angle_insertion_updates_bucket_head() {
+        let mut hull = Hull::new(3, true);
+        hull.initialize(PointIndex::new(0), 0.2, EdgeIndex::new(0)).unwrap();
+        hull.insert_bare(0.7, PointIndex::new(1), EdgeIndex::new(1)).unwrap();
+        hull.insert_bare(0.2, PointIndex::new(2), EdgeIndex::new(2)).unwrap();
+        hull.check();
+        assert_eq!(hull.values().collect::<Vec<_>>(),
+                   vec![EdgeIndex::new(2), EdgeIndex::new(0), EdgeIndex::new(1)]);
     }
 }
