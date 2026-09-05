@@ -220,6 +220,11 @@ where
                 if norms.y > 0.0 { q.y / norms.y } else { 0.0 },
             );
             let uv_step = DVec2::new(normalized_step.x * ranges.x, normalized_step.y * ranges.y);
+            // As with curve projection, only the full Newton step may
+            // establish representability convergence, never a backtracked one.
+            if uv_i + uv_step == uv_i {
+                return Some(uv_i);
+            }
             let mut alpha = 1.0;
             let mut accepted = None;
             for _ in 0..40 {
@@ -318,6 +323,22 @@ mod tests {
 
     fn close(a: f64, b: f64, tolerance: f64) {
         assert!((a - b).abs() <= tolerance, "{} != {}", a, b);
+    }
+
+    #[test]
+    fn projection_stops_at_the_nearest_representable_parameter() {
+        let sampled = plane([-41.36699254603, -41.31699254603], [0., 1.],
+            DVec3::new(0.5, 5.89, 0.05000000000001),
+            DVec3::new(0., 0., 3.552713678801e-15 - 0.05000000000001),
+            DVec3::new(1., 0., 0.));
+        let p = DVec3::new(0.75, 5.89, 0.05);
+        let uv = sampled.uv_from_point(p).unwrap();
+        assert!(uv.x > sampled.surf.min_u());
+        let error = (sampled.surf.point(uv) - p).norm_squared();
+        for bits in [uv.x.to_bits() - 1, uv.x.to_bits() + 1] {
+            let neighbor = DVec2::new(f64::from_bits(bits), uv.y);
+            assert!(error <= (sampled.surf.point(neighbor) - p).norm_squared());
+        }
     }
 
     #[test]

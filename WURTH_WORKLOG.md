@@ -1153,3 +1153,21 @@ analytic torus. Workspace tests, the new STEP integration test, and eight
 checkpoints pass. All eleven previously failing CIRCM12 models clear face
 errors: three pass and eight still have invalid mesh facets elsewhere.
 Evidence: `local/repair-complete-torus-{models,check}`.
+
+### Surface parameter representability
+
+UMRF 636101111001/112001 and all six RSTV switches converge to a parameter whose
+full Newton correction is less than half an f64 ULP. The line search then cannot
+move and reports a lowering failure. For UMRF, u=4.709888977781001 and the
+correction is 3.8586e-16. Apply the existing curve solver's representability
+termination to surfaces too: test the full Newton correction before line
+search, never a repeatedly halved trial. No tolerance is relaxed.
+
+An extruded short-line regression fails before and passes after, checks that a
+resolvable first step occurs, and compares both adjacent representable
+parameters. Workspace tests and eight checkpoints pass. The 54-file lowering
+cohort changes from 25 ok / 14 invalid / 15 face errors with the current torus
+worker to 27 ok / 20 invalid / 7 face errors. Both UMRF models pass; all six RSTV
+models clear lowering errors but retain invalid facets. Temporary instrumentation
+is removed. Logs: `local/inverse-probe-lowering`; results:
+`local/repair-surface-ulp-{lowering,check}`.
