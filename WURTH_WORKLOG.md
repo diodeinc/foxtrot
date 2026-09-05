@@ -1559,3 +1559,26 @@ face errors; all eight checkpoints pass. Evidence:
 `local/repair-representable-step-{lowering,check}` and frozen
 `local/repair-representable-step-worker`. These are focused checks, not a new
 full-corpus result.
+
+### Trust-region radius follows model fit, not just step acceptance
+
+The dome iteration trace shows a two-cycle between u=2.094395102393 and
+u=4.188790204786 at fixed v. Each model predicts a distance improvement near
+1.9e-31, but actual changes are opposite-signed 8.2e-44. The normal offset
+produces a 3e-24 acceptance allowance, so both steps pass while the radius
+remains one forever. This is a trust-region update defect, not evidence for
+changing the source control net or reinstating pole-radius snapping.
+
+Shrink the radius when actual descent is less than one quarter of predicted
+descent, including accepted roundoff-sized steps. Retain the existing
+expansion threshold and convergence conditions. A synthetic 120-degree arc
+with a large constrained offset reproduces the cycle: the test fails with the
+old update and passes with this change from both endpoints. Workspace tests
+pass. The combined 83-file lowering/checkpoint/pass-12/pass-13 change cohort
+has 61 ok / 22 invalid_mesh, no face errors, and no status regressions versus
+pass 13. Both dome variants now pass the complete exported-mesh gate. SIQW
+reaches mesh validation but retains an f32 defect.
+
+Evidence: `local/dome-cycle.log`, `/tmp/trust-radius-old-regression.log`,
+`/tmp/trust-radius-regression.log`, `/tmp/trust-fit-workspace-tests.log`,
+`local/repair-trust-fit-cohort`; frozen worker `local/repair-trust-fit-worker`.

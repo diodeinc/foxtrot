@@ -247,7 +247,7 @@ where
                 }
             }
             if models.iter().all(|m| m.converged) { return Some(uv_i); }
-            let mut accepted: Option<(DVec2, DVec3, bool)> = None;
+            let mut accepted: Option<(DVec2, DVec3, f64)> = None;
             for _ in 0..40 {
                 for m in models.iter().filter(|m| !m.converged) {
                     let step = quadratic_step(m.gradient, m.hessian,
@@ -267,11 +267,16 @@ where
                     if predicted < 0. && change <= 0.1 * predicted + roundoff
                         && accepted.as_ref().map_or(true, |(_, best, _)|
                             dot(&(candidate_r - best), &(candidate_r + best)) < 0.) {
-                        accepted = Some((candidate, candidate_r, change <= 0.75 * predicted));
+                        // Roundoff may permit a step without a resolved gain.
+                        // Such acceptance is not evidence that the quadratic
+                        // fits: reduce its radius when it overpredicts descent.
+                        let scale = if change > 0.25 * predicted { 0.25 }
+                            else if change <= 0.75 * predicted { 2. } else { 1. };
+                        accepted = Some((candidate, candidate_r, scale));
                     }
                 }
-                if let Some((_, _, expand)) = accepted {
-                    if expand { radius = (2. * radius).min(1.); }
+                if let Some((_, _, scale)) = accepted {
+                    radius = (scale * radius).min(1.);
                     break;
                 }
                 radius *= 0.25;
@@ -460,6 +465,29 @@ mod tests {
             .unwrap();
         close(uv.x, 0.35, 1e-12);
         close(uv.y, 0.73, 1e-12);
+    }
+
+    #[test]
+    fn trust_radius_shrinks_when_roundoff_accepts_a_poor_model() {
+        // A 120-degree circular arc extruded in z. At either arc endpoint,
+        // the quadratic predicts descent to the equally distant other end.
+        // The large constrained z offset masks that poor fit in acceptance,
+        // but must not prevent the trust radius from shrinking.
+        let y = 0.75_f64.sqrt();
+        let surface = NDBSplineSurface::new(true, true,
+            KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [(0.5, -y, 1.), (2., 0., 0.5), (0.5, y, 1.)].iter().map(|&(x, y, w)|
+                [1., 2.].iter().map(|&z|
+                    nalgebra_glm::DVec4::new(x * 1e-16, y * 1e-16, z, 1.) * w)
+                    .collect()).collect());
+        let sampled = SampledSurface::new(surface);
+        for u in [0., 1.] {
+            let uv = sampled.uv_from_point_newtons_method(
+                DVec3::new(2e-16, 0., 3.), DVec2::new(u, 1.)).unwrap();
+            close(uv.x, 0.5, 1e-12);
+            assert_eq!(uv.y, 1.);
+        }
     }
 
     #[test]
