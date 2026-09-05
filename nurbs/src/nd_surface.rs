@@ -144,7 +144,11 @@ impl<const D: usize> NDBSplineSurface<D> {
         let q = self.v_knots.degree();
 
         let uind = uspan - p;
-        let origin = self.control_points[uind][vspan - q];
+        // The nonnegative tensor-product basis is largest at the pair of
+        // largest axis terms. This anchor preserves tiny endpoint coordinates.
+        let uanchor = Nu.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let vanchor = Nv.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let origin = self.control_points[uind + uanchor][vspan - q + vanchor];
         let mut S = TVec::zeros();
         for l in 0..=q {
             let mut temp = TVec::zeros();
@@ -184,7 +188,9 @@ impl<const D: usize> NDBSplineSurface<D> {
 
         // Tensor-product partition of unity removes the common coordinate
         // offset from every derivative, including mixed partial derivatives.
-        let origin = self.control_points[uspan - p][vspan - q];
+        let uanchor = Nu_deriv[0].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let vanchor = Nv_deriv[0].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let origin = self.control_points[uspan - p + uanchor][vspan - q + vanchor];
         let mut temp = vec![TVec::zeros(); q + 1];
         for k in 0..=du {
             for s in 0..=q {
@@ -237,6 +243,18 @@ impl<const D: usize> NDBSplineSurface<D> {
 mod tests {
     use super::*;
     use nalgebra_glm::DVec4;
+
+    #[test]
+    fn clamped_corner_preserves_small_coordinates() {
+        let knots = || KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]);
+        let end = DVec4::new(1e-30, 2e-30, 3e-30, 1.);
+        let mut controls = vec![vec![DVec4::repeat(1.); 3]; 3];
+        controls[2][2] = end;
+        let surface = NDBSplineSurface::new(true, true, knots(), knots(), controls);
+        let uv = DVec2::repeat(1.);
+        assert_eq!(surface.surface_point(uv), end);
+        assert_eq!(surface.surface_derivs::<2>(uv)[0][0], end);
+    }
 
     #[test]
     fn constant_coordinates_have_exactly_zero_derivatives() {

@@ -40,7 +40,10 @@ impl<const D: usize> NDBSplineCurve<D> {
         let span = self.knots.find_span(u);
         let N = self.knots.basis_funs_for_span(span, u);
 
-        let origin = self.control_points[span - p];
+        // Anchor at the dominant basis term so endpoint interpolation does
+        // not subtract and re-add an unrelated, potentially large coordinate.
+        let anchor = N.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let origin = self.control_points[span - p + anchor];
         let mut C = TVec::zeros();
         for i in 0..=p {
             C += N[i] * (self.control_points[span - p + i] - origin)
@@ -63,7 +66,8 @@ impl<const D: usize> NDBSplineCurve<D> {
         // Partition of unity: a constant contributes only to the position,
         // never its derivatives. Evaluate local differences before summation
         // instead of cancelling large translated control coordinates.
-        let origin = self.control_points[span - p];
+        let anchor = N_derivs[0].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let origin = self.control_points[span - p + anchor];
         let mut CK = vec![TVec::zeros(); E + 1];
         for k in 0..=du {
             for j in 0..=p {
@@ -113,6 +117,16 @@ impl<const D: usize> NDBSplineCurve<D> {
 mod tests {
     use super::*;
     use nalgebra_glm::DVec3;
+
+    #[test]
+    fn clamped_endpoint_preserves_small_coordinates() {
+        let end = DVec3::new(1e-30, 2e-30, 3e-30);
+        let curve = NDBSplineCurve::new(true,
+            KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
+            vec![DVec3::repeat(1.), DVec3::repeat(0.5), end]);
+        assert_eq!(curve.curve_point(1.), end);
+        assert_eq!(curve.curve_derivs::<2>(1.)[0], end);
+    }
 
     #[test]
     fn constant_coordinates_have_exactly_zero_derivatives() {

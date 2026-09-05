@@ -750,3 +750,28 @@ in the KiCad L39.4/L41.9 Bourns models now triangulate; those files retain separ
 crossing-constraint defects. Evidence: `local/kicad-trim-check` and
 `local/repair-trim-check`. The full pass-6 sweep uses an earlier frozen worker
 and deliberately does not contain this change.
+
+### Pass 6 reconciliation and endpoint evaluation repair
+
+Full pass 6 covers all 7,328 Würth files (7,000 ok, 198 tessellation errors,
+127 invalid meshes, 3 source parse/reference crashes), then all 7,251 KiCad
+files (6,901 ok, 233 tessellation errors, 117 invalid meshes). Exact path/hash
+coverage and all eight shards reconcile for each corpus. Per-file evidence
+and regression tables are in `.amp/in/artifacts/repair-pass6/`. Comparing to
+pass 5 reveals 13 Würth and 9 KiCad formerly-ok regressions; improved aggregate
+counts do not establish regression freedom. These remain tracked individually.
+
+Confirmed an evaluator defect independently of the inverse solver: using the
+first active control as a translation anchor erases small endpoint coordinates
+when subtracting/re-adding a distant control. Curve and surface regressions
+return zero instead of 1e-30 before the repair. Anchor selection now follows
+the largest basis coefficient (the product of the largest axis coefficients
+on surfaces), consistently for positions and derivatives. This preserves exact
+endpoint interpolation and constant-coordinate derivatives without special
+endpoint branches or relaxed convergence tolerances. Both new regressions and
+`cargo test --workspace` pass; all eight strict checkpoint files pass.
+The Würth WL-SMCW-0603dome, previously failing surface inversion, now passes
+the strict harness. Evidence: `local/repair-anchor-led`,
+`local/repair-anchor-check`; frozen worker `local/repair-anchor-worker`.
+The complete pass-6 non-ok cohort is being rerun, Würth first then KiCad;
+this repair is not yet certified against every previously passing file.
