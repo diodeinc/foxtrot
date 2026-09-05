@@ -906,6 +906,11 @@ fn advanced_face(
         || surf.lower_verts(&mut mesh.verts[v_start..], &edges, same_sense))?;
     crate::timing::time("face:unwrap_periodic",
         || surf.unwrap_periodic(&mut pts, &edges, &unwrap_ranges));
+    let had_boundary = !edges.is_empty();
+    cancel_retraced_edges(&pts, &mut edges);
+    if had_boundary && edges.is_empty() {
+        return Err(Error::InvalidGeometry("face boundary cancels completely"));
+    }
     crate::timing::time("face:resolve_crossing_edges",
         || resolve_crossing_edges(&mut pts, &mut edges, &mut mesh.verts, v_start));
     let bonus_points = pts.len();
@@ -1440,6 +1445,33 @@ fn vertex_point(s: &StepFile, v: Vertex) -> Result<DVec3, Error> {
     cartesian_point(s, v.vertex_geometry.cast())
 }
 
+/// A seam traversed twice is not a boundary of the planar region. Cancel
+/// identical segments before intersection construction, not afterward: rounded
+/// intersections can otherwise turn a retraced seam into spurious slivers.
+/// Work in the chosen chart so distinct representatives of a cut stay distinct.
+fn cancel_retraced_edges(pts: &[(f64, f64)], edges: &mut Vec<(usize, usize)>) {
+    let mut vertices = HashMap::new();
+    let canonical: Vec<_> = pts.iter().enumerate().map(|(i, &(x, y))| {
+        let bits = |v: f64| if v == 0.0 { 0 } else { v.to_bits() };
+        *vertices.entry((bits(x), bits(y))).or_insert(i)
+    }).collect();
+    let mut segments = HashMap::new();
+    let mut boundary = Vec::new();
+    let mut odd = Vec::new();
+    for &(a, b) in edges.iter() {
+        let (a, b) = (canonical[a], canonical[b]);
+        if a == b { continue; }
+        let index = *segments.entry((a.min(b), a.max(b))).or_insert_with(|| {
+            boundary.push((a, b));
+            odd.push(false);
+            boundary.len() - 1
+        });
+        odd[index] ^= true;
+    }
+    *edges = boundary.into_iter().zip(odd)
+        .filter_map(|(edge, odd)| if odd { Some(edge) } else { None }).collect();
+}
+
 /// Compute intersection parameters (t, s) for segments A-B and C-D.
 /// Returns Some((t, s)) if the segments cross at interior points (not
 /// at endpoints), where the intersection is at A + t*(B-A) = C + s*(D-C).
@@ -1568,6 +1600,18 @@ fn resolve_crossing_edges(
 mod tests {
     use super::*;
     use nurbs::AbstractSurface;
+
+    #[test]
+    fn retraced_seams_cancel_without_snapping_distinct_chart_points() {
+        let pts = [(0., 0.), (1., 0.), (0., 1.), (0.5, 0.5),
+                   (-0., 0.), (0.5, 0.5), (0.5, 0.5 + f64::EPSILON)];
+        let mut edges = vec![(0, 1), (1, 2), (2, 0), (0, 3), (5, 4), (3, 6)];
+        cancel_retraced_edges(&pts, &mut edges);
+        assert_eq!(edges, vec![(0, 1), (1, 2), (2, 0), (3, 6)]);
+        let mut edges = vec![(0, 3), (5, 4)];
+        cancel_retraced_edges(&pts, &mut edges);
+        assert!(edges.is_empty());
+    }
 
     #[test]
     fn oriented_edges_share_exactly_the_same_curve_discretization() {

@@ -775,3 +775,46 @@ the strict harness. Evidence: `local/repair-anchor-led`,
 `local/repair-anchor-check`; frozen worker `local/repair-anchor-worker`.
 The complete pass-6 non-ok cohort is being rerun, Würth first then KiCad;
 this repair is not yet certified against every previously passing file.
+
+The anchor-cohort rerun completed: of 328 formerly non-ok Würth files, 6 now
+pass (188 tessellation errors, 131 invalid meshes, 3 source crashes remain).
+Of 350 KiCad files, 6 now pass (228 tessellation errors, 116 invalid meshes).
+These selected counts must not be extrapolated into full-corpus totals.
+
+### Cancel retraced chart boundaries before intersection construction
+
+KiCad Texas DSBGA-8 0.9x1.9 face #238 has one circular trim plus EDGE_CURVE
+#242 traversed forward and backward. The seam contributes no region boundary.
+However, splitting its projected crossings before parity cancellation creates
+slivers: exact rational predicates on the dumped coordinates confirm interior
+crossings at parameters 4.28e-17 and 1.85e-15, which the epsilon-based splitter
+then ignores. The CDT sees a genuinely inconsistent polygon manufactured by
+the preprocessing stage, despite identical forward/backward samples.
+
+Canonicalize exact chart-coordinate identities and cancel even segment
+multiplicities before intersection construction. This implements the existing
+even-odd region semantics earlier, with no tolerance, retry, or model-specific
+path; distinct periodic cut representatives remain distinct. Retain all samples
+as vertices. Reject a nonempty boundary that cancels completely rather than
+accidentally filling its convex hull. Unit coverage includes signed zero,
+duplicate identities, complete cancellation, and one-ulp-separated coordinates.
+Workspace tests and eight checkpoints pass. The 1,295-ball BGA now passes with
+all 1,295 former CrossingFixedEdge faces resolved, as do both tested Texas
+DSBGA-8 variants. Evidence: `local/repair-seam-parity-{check,bga}`.
+
+OCCT comparison for Texas 0.9x1.9 is **not an oracle pass**: OCCT itself exports
+eight degenerate triangles. Foxtrot exports 1,204 finite nondegenerate triangles;
+bounds match exactly, area 5.937683 versus OCCT 6.038595 (1.67% difference),
+signed volume 0.592487 versus 0.600214 (1.29%). These are diagnostic geometric
+checks, not a proof of topology. Evidence: `local/seam-parity-bga-occt`.
+
+Separate source evidence: Würth WE-KI-0603 face #1739 references closed spline
+#32 whose five controls alternate between only two positions. It retraces a
+straight segment; it must not be repaired as though it were a regular hole.
+This finding does not by itself establish whole-file conformance or explain
+the independent failing cylindrical face #79.
+
+Freed disk by deleting only superseded generated mesh files from pass 5
+(1,253 files, 493,630,272 bytes) and old `final`/pass-1 outputs (4,578 files,
+5,409,207,138 bytes). Source corpora, manifests, reports, metrics, logs and
+frozen workers remain; current pass-6 and repair-check evidence is retained.
