@@ -603,3 +603,15 @@ The binary mesh has zero directed-edge imbalance, down from 2,704 unbalanced
 edges; its summed area normal is within 6e-13 of zero. This verifies winding
 closure independently of the unchanged mesh-validity harness. The fix is not
 in the frozen pass-5 worker. WR-MJ's large area discrepancy remains unresolved.
+
+Curve #5447 in WR-TBL 691337500008 exposes a separate representability limit:
+its parameter interval is approximately [-41.36699,-41.31699], so adjacent
+parameters differ by 7.1054e-15. After one valid step the remaining tangential
+residual is 2.8935e-15, and the full proposed step rounds back to the current
+parameter. The solver now recognizes that discrete limit before line search.
+It deliberately does NOT accept a backtracked no-op as convergence. A regression
+fails before the fix and verifies that the returned parameter is better than
+both adjacent representable parameters. Of the 20 selected Würth curve-failure
+files, 17 now strictly pass, one has only mesh degeneracy, and two retain other
+projection nonconvergence. Both selected KiCad files remain nonconvergent and
+require a separate RCA. Reports: `local/{wurth,kicad}-quantization-check`.

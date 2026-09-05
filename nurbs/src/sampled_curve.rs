@@ -61,6 +61,11 @@ impl<const N: usize> SampledCurve<N>
             // Derivative-scaled Gauss--Newton is a descent direction even
             // where the squared-distance Hessian is negative.
             let step = -gradient / speed * range;
+            // Test the full step, not a backtracked step: line-search failure
+            // must not become success merely by halving until nothing moves.
+            if u + step == u {
+                return Some(u);
+            }
             let mut alpha = 1.0;
             let mut accepted = None;
             for _ in 0..40 {
@@ -139,6 +144,22 @@ impl<const N: usize> SampledCurve<N>
 mod tests {
     use super::*;
     use crate::KnotVector;
+
+    #[test]
+    fn projection_stops_at_the_nearest_representable_parameter() {
+        let curve = SampledCurve::new(NDBSplineCurve::new(true,
+            KnotVector::from_multiplicities(1, &[-41.36699254603, -41.31699254603], &[2, 2]),
+            vec![DVec3::new(0.5, 5.89, 0.05000000000001),
+                 DVec3::new(0.5, 5.89, 3.552713678801e-15)]));
+        let point = DVec3::new(0.5, 5.89, 0.05);
+        let u = curve.u_from_point(point).unwrap();
+        let error = (curve.curve.point(u) - point).norm_squared();
+        assert!(u > curve.min_u(), "a resolvable first step must still be taken");
+        assert!(error < 25e-30);
+        for bits in [u.to_bits() - 1, u.to_bits() + 1] {
+            assert!(error <= (curve.curve.point(f64::from_bits(bits)) - point).norm_squared());
+        }
+    }
 
     #[test]
     fn linear_spans_keep_corners_without_redundant_samples() {
