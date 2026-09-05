@@ -629,3 +629,17 @@ Workspace tests and all eight strict checkpoints pass (`local/repair-partition-c
 FLYLT now processes all 518 faces with zero errors/panics/f64 degenerates;
 `local/flylt-partition.log` has no projection nonconvergence. Other remaining
 curves still need separate positive-curvature/knot-side treatment.
+
+The remaining positive-curvature cases require the actual squared-distance
+Hessian: in the BMS 74942302 cubic and two KiCad Bourns degree-five curves it
+is 87–600 times the Gauss–Newton approximation. Scalar inversion now uses
+positive finite distance curvature, retaining Gauss–Newton only when curvature
+does not define descent. Steps remain line-searched and are bounded to one
+parameter domain. The BMS regression fails before this change and passes after;
+all 930 BMS faces process without errors, panics or f64 degenerates. Neither
+KiCad regression retains curve-projection diagnostics (the L34.3 model still
+has invalid triangles; L19.3 has independent face triangulation errors).
+Thus no knot-side special case is currently justified by these files.
+`cargo test -p nurbs -p triangulate` and all eight strict checkpoint files pass.
+Evidence: `local/repair-newton-check`, `local/kicad-newton-check`, and
+`local/bms-newton-metrics.json`; frozen worker `local/repair-newton-worker`.

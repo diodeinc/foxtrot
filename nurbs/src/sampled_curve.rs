@@ -44,7 +44,7 @@ impl<const N: usize> SampledCurve<N>
         };
         let mut u = constrain(u_0);
         for _ in 0..256 {
-            let derivs = self.curve.derivs::<1>(u);
+            let derivs = self.curve.derivs::<2>(u);
             let r = derivs[0] - P;
             let tangent = derivs[1] * range;
             let speed = tangent.norm();
@@ -58,9 +58,13 @@ impl<const N: usize> SampledCurve<N>
                     && ((u == min && gradient >= 0.0) || (u == max && gradient <= 0.0))) {
                 return Some(u);
             }
-            // Derivative-scaled Gauss--Newton is a descent direction even
-            // where the squared-distance Hessian is negative.
-            let step = -gradient / speed * range;
+            // Use distance curvature when it defines a descent direction;
+            // otherwise retain Gauss--Newton. Work in derivative-normalized
+            // coordinates and bound travel to one parameter domain.
+            let inverse_speed = range / speed;
+            let hessian = 1.0 + dot(&(derivs[2] * inverse_speed), &r) * inverse_speed;
+            let metric = if hessian.is_finite() && hessian > 0.0 { hessian } else { 1.0 };
+            let step = (-gradient / speed / metric).clamp(-1.0, 1.0) * range;
             // Test the full step, not a backtracked step: line-search failure
             // must not become success merely by halving until nothing moves.
             if u + step == u {
@@ -144,6 +148,24 @@ impl<const N: usize> SampledCurve<N>
 mod tests {
     use super::*;
     use crate::KnotVector;
+
+    #[test]
+    fn projection_uses_positive_distance_curvature_near_a_short_endpoint() {
+        let curve = SampledCurve::new(NDBSplineCurve::new(true,
+            KnotVector::from_multiplicities(3, &[0., 0.5, 1.], &[4, 1, 4]),
+            vec![DVec3::new(5.48692594933471, 6.82772962686143, 2.32441744759478),
+                 DVec3::new(5.47868936050619, 6.83705199546656, 2.33273309729622),
+                 DVec3::new(5.46639462225168, 6.85150880217835, 2.3478102560178),
+                 DVec3::new(5.4701140466715, 6.87809457408748, 2.38851300959099),
+                 DVec3::new(5.47009428407746, 6.87803967799293, 2.38856983421543)]));
+        let p = DVec3::new(5.47010288700796, 6.8780635750221, 2.3885957227281);
+        let u = curve.u_from_point(p).unwrap();
+        let d = curve.curve.derivs::<2>(u);
+        let r = d[0] - p;
+        assert!(u > 0.99 && u < 1.);
+        assert!(dot(&r, &d[1]).abs() / d[1].norm() < 1e-12);
+        assert!(d[1].norm_squared() + dot(&r, &d[2]) > 0.);
+    }
 
     #[test]
     fn projection_stops_at_the_nearest_representable_parameter() {
