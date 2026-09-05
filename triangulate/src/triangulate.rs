@@ -838,14 +838,13 @@ fn advanced_face(
     let mut edges = Vec::new();
     let mut unwrap_ranges = Vec::new();
     let mut boundary_points = Vec::new();
-    let mut has_seam = false;
+    let mut edge_uses = HashMap::new();
     let v_start = mesh.verts.len();
     let mut num_pts = 0;
     for b in bounds {
-        let (bound_contours, edge_loop_len, bound_has_seam) =
-            crate::timing::time("face:face_bound", || face_bound(s, *b))?;
+        let (bound_contours, edge_loop_len) =
+            crate::timing::time("face:face_bound", || face_bound(s, *b, &mut edge_uses))?;
         boundary_points.extend_from_slice(&bound_contours);
-        has_seam |= bound_has_seam;
 
         match bound_contours.len() {
             // We should always have non-zero items in the contour
@@ -899,8 +898,19 @@ fn advanced_face(
     }
 
     // Swept surfaces use the actual trims to choose a finite NURBS domain.
+    let has_seam = edge_uses.values().any(|&(forward, reverse)| forward > 0 && reverse > 0);
     let mut surf = crate::timing::time("face:get_surface",
         || get_surface(s, face_geometry, &boundary_points, uncertainty, has_seam))?;
+
+    // Opposite uses of the same topological edge are seams, not trims.
+    // A compact surface with no remaining boundary covers its entire domain.
+    if edge_uses.values().all(|&(forward, reverse)| forward == reverse) {
+        if let Some(full) = surf.untrimmed_mesh(face_color, same_sense) {
+            mesh.verts.truncate(v_start);
+            *mesh = Mesh::combine(std::mem::take(mesh), full);
+            return Ok(());
+        }
+    }
 
     // Add curvature samples before constraint insertion. The CDT subdivides
     // constraints at existing vertices, including samples exactly on an edge.
@@ -1283,7 +1293,9 @@ fn control_points_2d(s: &StepFile, rows: &Vec<Vec<CartesianPoint>>) -> Result<Ve
         .collect()
 }
 
-fn face_bound(s: &StepFile, b: FaceBound) -> Result<(Vec<DVec3>, usize, bool), Error> {
+fn face_bound(s: &StepFile, b: FaceBound, edge_uses: &mut HashMap<usize, (usize, usize)>)
+    -> Result<(Vec<DVec3>, usize), Error>
+{
     let (bound, orientation) = match &s[b] {
         Entity::FaceBound(b) => (b.bound, b.orientation),
         Entity::FaceOuterBound(b) => (b.bound, b.orientation),
@@ -1291,24 +1303,23 @@ fn face_bound(s: &StepFile, b: FaceBound) -> Result<(Vec<DVec3>, usize, bool), E
     };
     match &s[bound] {
         Entity::EdgeLoop(e) => {
-            let mut orientations = HashMap::new();
-            let mut has_seam = false;
             for id in &e.edge_list {
                 let edge = s.entity(*id).ok_or(Error::InvalidStepEntity("OrientedEdge"))?;
-                if let Some(previous) = orientations.insert(edge.edge_element, edge.orientation) {
-                    has_seam |= previous != edge.orientation;
+                let uses = edge_uses.entry(edge.edge_element.0).or_default();
+                if edge.orientation == orientation {
+                    uses.0 += 1;
+                } else {
+                    uses.1 += 1;
                 }
             }
             let mut d = edge_loop(s, &e.edge_list)?;
             if !orientation {
                 d.reverse()
             }
-            Ok((d, e.edge_list.len(), has_seam))
+            Ok((d, e.edge_list.len()))
         },
         Entity::VertexLoop(v) => {
-            // This is an "edge loop" with a single vertex, which is
-            // used for cones and not really anything else.
-            Ok((vec![vertex_point(s, v.loop_vertex)?], 0, false))
+            Ok((vec![vertex_point(s, v.loop_vertex)?], 0))
         }
         _ => Err(Error::InvalidStepEntity("FaceBound.bound")),
     }
@@ -1631,6 +1642,40 @@ fn resolve_crossing_edges(
 mod tests {
     use super::*;
     use nurbs::AbstractSurface;
+
+    #[test]
+    fn seam_only_and_vertex_loop_faces_cover_a_complete_torus() {
+        for bounds in ["#15", "#16", "#17,#18"] {
+            let text = format!("ISO-10303-21;HEADER;ENDSEC;DATA;
+                #1=CARTESIAN_POINT('',(0.,0.,0.));
+                #2=DIRECTION('',(0.,0.,1.));
+                #3=DIRECTION('',(1.,0.,0.));
+                #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+                #5=TOROIDAL_SURFACE('',#4,4.,1.);
+                #6=CARTESIAN_POINT('',(5.,0.,0.));
+                #7=VERTEX_POINT('',#6);
+                #8=VERTEX_LOOP('',#7);
+                #9=CIRCLE('',#4,5.);
+                #10=EDGE_CURVE('',#7,#7,#9,.T.);
+                #11=ORIENTED_EDGE('',*,*,#10,.T.);
+                #12=ORIENTED_EDGE('',*,*,#10,.F.);
+                #13=EDGE_LOOP('',(#11,#12));
+                #14=EDGE_LOOP('',(#11));
+                #15=FACE_OUTER_BOUND('',#8,.T.);
+                #16=FACE_OUTER_BOUND('',#13,.T.);
+                #17=FACE_BOUND('',#14,.T.);
+                #18=FACE_BOUND('',#14,.F.);
+                #19=ADVANCED_FACE('',({bounds}),#5,.T.);
+                ENDSEC;END-ISO-10303-21;");
+            let flat = StepFile::strip_flatten(text.as_bytes()).unwrap();
+            let step = StepFile::parse(&flat).unwrap();
+            let mut mesh = Mesh::default();
+            advanced_face(&step, Id::new(19), &mut mesh, &mut Stats::default(),
+                &HashMap::new(), DVec3::zeros(), 0.).unwrap();
+            assert_eq!(mesh.verts.len(), 1024);
+            assert_eq!(mesh.triangles.len(), 2048);
+        }
+    }
 
     #[test]
     fn crossing_predicates_preserve_small_scales_and_endpoint_intersections() {

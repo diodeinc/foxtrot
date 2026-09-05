@@ -4,7 +4,7 @@ use nalgebra_glm as glm;
 use glm::{DVec2, DVec3, DVec4, DMat4};
 
 use nurbs::{AbstractSurface, SampledSurface};
-use crate::{Error, mesh::Vertex};
+use crate::{Error, mesh::{Mesh, Triangle, Vertex}};
 
 #[derive(Debug, Clone)]
 pub enum SplineChart {
@@ -215,6 +215,38 @@ impl Surface {
             mat, mat_i, location, axis, major_radius, minor_radius,
             polar_major: true, radial_start: 0.0,
         })
+    }
+
+    /// Tessellate a compact surface with no physical trim. Identify seam
+    /// vertices by wrapped grid indices instead of cutting a planar polygon.
+    pub fn untrimmed_mesh(&self, color: DVec3, same_sense: bool) -> Option<Mesh> {
+        let Self::Torus { mat, major_radius, minor_radius, .. } = self else { return None; };
+        if !(major_radius > minor_radius && *minor_radius > 0.) {
+            return None;
+        }
+        const N: u32 = 32;
+        let mut mesh = Mesh::default();
+        let sense = if same_sense { 1. } else { -1. };
+        for u in 0..N {
+            let (su, cu) = (2. * PI * u as f64 / N as f64).sin_cos();
+            for v in 0..N {
+                let (sv, cv) = (2. * PI * v as f64 / N as f64).sin_cos();
+                let radius = major_radius + minor_radius * cv;
+                let pos = mat * DVec4::new(minor_radius * sv, radius * su, radius * cu, 1.);
+                let norm = mat * DVec4::new(sv, cv * su, cv * cu, 0.);
+                mesh.verts.push(Vertex { pos: pos.xyz(), norm: norm.xyz() * sense, color });
+                let a = u * N + v;
+                let b = ((u + 1) % N) * N + v;
+                let c = ((u + 1) % N) * N + (v + 1) % N;
+                let d = u * N + (v + 1) % N;
+                // Su × Sv points inward for this parameterization.
+                for [i, j, k] in [[a, c, b], [a, d, c]] {
+                    let verts = if same_sense { [i, j, k] } else { [i, k, j] };
+                    mesh.triangles.push(Triangle { verts: verts.into() });
+                }
+            }
+        }
+        Some(mesh)
     }
 
     pub fn new_plane(axis: DVec3, _ref_direction: DVec3, _location: DVec3) -> Result<Self, Error> {
@@ -1100,6 +1132,32 @@ impl Surface {
 mod tests {
     use super::*;
     use nurbs::{KnotVector, NURBSSurface};
+
+    #[test]
+    fn untrimmed_torus_is_closed_oriented_and_covers_the_surface_once() {
+        for same_sense in [true, false] {
+            let surface = Surface::new_torus_with_ref_direction(
+                DVec3::new(7., -2., 3.), DVec3::y(), DVec3::z(), 4., 1.).unwrap();
+            let mesh = surface.untrimmed_mesh(DVec3::zeros(), same_sense).unwrap();
+            let mut edges = std::collections::HashMap::<_, (usize, i32)>::new();
+            let mut area = 0.;
+            for triangle in &mesh.triangles {
+                let t = triangle.verts;
+                let [a, b, c] = [t.x, t.y, t.z].map(|i| mesh.verts[i as usize]);
+                let cross = (b.pos - a.pos).cross(&(c.pos - a.pos));
+                assert!(cross.dot(&a.norm) > 0.);
+                area += cross.norm() / 2.;
+                for (u, v) in [(t.x, t.y), (t.y, t.z), (t.z, t.x)] {
+                    let entry = edges.entry((u.min(v), u.max(v))).or_default();
+                    entry.0 += 1;
+                    entry.1 += if u < v { 1 } else { -1 };
+                }
+            }
+            assert!(edges.values().all(|&count| count == (2, 0)));
+            assert_eq!(mesh.verts.len() + mesh.triangles.len(), edges.len());
+            assert!((area / (16. * PI * PI) - 1.).abs() < 0.01);
+        }
+    }
 
     #[test]
     fn geometrically_closed_bounded_spline_uses_a_continuous_chart() {

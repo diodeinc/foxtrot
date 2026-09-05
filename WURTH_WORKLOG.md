@@ -1134,3 +1134,22 @@ eight checkpoints pass. All 33 files clear their face errors: 32 pass; WE-TPC
 8012 retains invalid mesh facets. All eleven KiCad crossing-cohort models still
 reach mesh validation but remain invalid meshes, not complete repairs. Evidence:
 `local/repair-line-{offsets,check,kicad}` and `/tmp/line-tests.log`.
+
+### Complete torus topology
+
+CIRCM12 models encode complete ring tori using either a VERTEX_LOOP or opposing
+uses of the same EDGE_CURVEs. These are seams, not physical trims. Planar contour
+cancellation cannot represent a compact surface without boundary. Accumulate
+oriented source edge uses across all face bounds, respecting bound orientation;
+when no physical boundary remains, tessellate the complete ring torus on a
+periodic grid with shared wrapped indices. This decision precedes projection
+and is not a fallback after a triangulation failure. Other surface domains keep
+their existing trimmed path; spindle/lemon radius validation is unchanged.
+
+Regressions exercise vertex-only bounds, opposite seam uses within one loop and
+across two bounds, both face senses, outward winding, two oppositely directed
+uses of every mesh edge, Euler characteristic zero, and area within 1% of the
+analytic torus. Workspace tests, the new STEP integration test, and eight
+checkpoints pass. All eleven previously failing CIRCM12 models clear face
+errors: three pass and eight still have invalid mesh facets elsewhere.
+Evidence: `local/repair-complete-torus-{models,check}`.
