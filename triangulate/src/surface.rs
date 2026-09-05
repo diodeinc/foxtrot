@@ -1191,10 +1191,21 @@ mod tests {
                 DVec3::new(center_x + 0.12, 0.0, 0.8),
                 DVec3::new(center_x, -0.12, 0.8),
             ] { vertices.push(Vertex { pos: p.normalize(), norm: DVec3::zeros(), color: DVec3::zeros() }); }
-            for i in 0..4 { edges.push((start + (i + 1) % 4, start + i)); }
+            for i in 0..4 { edges.push((start + i, start + (i + 1) % 4)); }
+            let points: Vec<_> = vertices.iter().map(|v| v.pos).collect();
+            let (area, error) = Surface::spherical_winding_sum(
+                DVec3::new(0.0, 0.0, 1.0), &points, &edges[edges.len() - 4..],
+            ).unwrap();
+            assert!(area < -error, "holes must have clockwise signed area");
         }
         let (_, _, _, q) = lower_sphere(vertices, &edges, true);
-        assert!((-q).z < -0.2_f64.sin());
+        let pole = -q;
+        let in_hole = pole.z > 0.0 && [-0.45_f64, 0.45].iter().any(|center_x| {
+            // Central projection back onto the diamonds' construction plane.
+            (0.8 * pole.x / pole.z - center_x).abs()
+                + (0.8 * pole.y / pole.z).abs() < 0.12
+        });
+        assert!(pole.z < -0.2_f64.sin() || in_hole);
     }
 
     #[test]
