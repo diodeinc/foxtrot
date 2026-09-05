@@ -44,7 +44,8 @@ impl<const D: usize> NDBSplineCurve<D> {
         }
         let period = self.max_u() - self.min_u();
         let shift = n - p;
-        (0..self.knots.len() - shift).all(|i| {
+        // The two outermost knots never enter an active basis function.
+        (1..self.knots.len() - shift - 1).all(|i| {
             let (a, b) = (self.knots[i], self.knots[i + shift]);
             // Only uncertainty from representing/subtracting knot values;
             // no world-space or source-geometry tolerance is used.
@@ -161,11 +162,21 @@ mod tests {
         let make = |knots: &[f64], controls: &[DVec3]| NDBSplineCurve::new(false,
             KnotVector::from_multiplicities(2, knots, &[1; 9]), controls.to_vec());
         assert!(make(&knots, &controls).has_smooth_periodic_seam());
+        let mut exterior = knots;
+        exterior[0] = exterior[1];
+        exterior[8] = exterior[7];
+        let trimmed_exterior = make(&exterior, &controls);
+        assert!(trimmed_exterior.has_smooth_periodic_seam());
+        for i in 0..=16 {
+            let u = i as f64 / 4.;
+            assert_eq!(trimmed_exterior.curve_derivs::<2>(u),
+                make(&knots, &controls).curve_derivs::<2>(u));
+        }
         let mut different = controls;
         different[5].x += 1e-12;
         assert!(!make(&knots, &different).has_smooth_periodic_seam());
         let mut different = knots;
-        different[8] += 1e-10;
+        different[7] += 1e-10;
         assert!(!make(&different, &controls).has_smooth_periodic_seam());
         let corner = NDBSplineCurve::new(false,
             KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),

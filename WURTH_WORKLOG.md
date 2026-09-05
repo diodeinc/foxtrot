@@ -1262,3 +1262,19 @@ interpret the initial f64-only analyzer as a proof of smoothness or a complete
 RCA. Corrected evidence: `.amp/in/artifacts/knot-projection-rca/`, including two
 80-digit evaluations, and `local/olrm-iterations.log`. No projection repair is
 claimed for these four remaining files.
+
+### Active knots define a periodic seam
+
+Exclude the two exterior knots from the translated-knot test: neither enters
+an active basis function. Some exporters repeat the adjacent exterior knot
+instead of extending the periodic sequence there. The regression changes those
+two values and verifies identical points and first/second derivatives throughout
+the active domain, while still rejecting a changed active knot. The targeted
+test and `cargo test --workspace` pass (`/tmp/active-knots-workspace.log`).
+This is a structural correction, not a relaxed geometric tolerance.
+
+The separate query-relative surface-evaluation experiment does not yet repair
+the remaining four lowering models. A like-for-like six-model comparison keeps
+UMRF 111001/112001 passing only with mixed per-axis convergence; OLRM, WPCC-RX/TX
+and SMB remain failures (`local/repair-{seam,relative-mixed}-remaining`). These
+experimental changes are not yet committed or counted as recovered files.
