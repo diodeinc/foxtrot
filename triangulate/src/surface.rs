@@ -86,7 +86,7 @@ pub enum Surface {
         mat_i: DMat4,
         angle: f64,
     },
-    NURBS { surf: SampledSurface<4>, chart: SplineChart, pole: Option<(DVec3, f64)> },
+    NURBS { surf: SampledSurface<4>, chart: SplineChart },
     Sphere {
         location: DVec3,
         mat: DMat4,     // uv to world
@@ -149,17 +149,7 @@ impl Surface {
         } else {
             SplineChart::Cartesian { v_scale: surf.surf.aspect_ratio() }
         };
-        let pole = match chart {
-            SplineChart::Polar { periodic, periodic_min, radial_origin, radial_min, radial_max, .. }
-                if radial_origin == radial_min || radial_origin == radial_max => {
-                    let mut raw = DVec2::zeros();
-                    raw[periodic] = periodic_min;
-                    raw[1 - periodic] = radial_origin;
-                    Some((surf.surf.point(raw), uncertainty))
-                },
-            _ => None,
-        };
-        Surface::NURBS { surf, chart, pole }
+        Surface::NURBS { surf, chart }
     }
 
     fn fallback_perpendicular(axis: DVec3) -> DVec3 {
@@ -405,16 +395,9 @@ impl Surface {
                     radius * sin,
                 ))
             },
-            Surface::NURBS { surf, chart, pole } => {
-                // A collapsed iso-boundary has no unique angular inverse.
-                // Use the same declared equivalence that selected this chart,
-                // rather than asking Newton to resolve its arbitrary angle.
-                if let Some((point, uncertainty)) = pole {
-                    let d = p - point;
-                    if d.x.hypot(d.y).hypot(d.z) <= *uncertainty {
-                        return Ok(DVec2::zeros());
-                    }
-                }
+            Surface::NURBS { surf, chart } => {
+                // Project before applying the chart. Source uncertainty does
+                // not make nearby regular points part of a collapsed pole.
                 Ok(chart.lower(Self::surf_lower(p, surf)?))
             },
             Surface::Sphere { mat_i, radius, .. } => {
@@ -1175,7 +1158,7 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_pole_maps_to_one_chart_point_without_inverting_its_angle() {
+    fn pole_chart_preserves_regular_points_inside_source_uncertainty() {
         let knots = || KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]);
         let controls = vec![
             vec![DVec4::new(1e-16, 0., 1., 1.), DVec4::new(1., 0., 1., 1.), DVec4::new(1., 0., 0., 1.)],
@@ -1183,10 +1166,16 @@ mod tests {
             vec![DVec4::new(1e-16, 0., 1., 1.), DVec4::new(1., 0., 1., 1.), DVec4::new(1., 0., 0., 1.)],
         ];
         let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
-            false, true, knots(), knots(), controls)), 1e-9, false);
-        assert_eq!(surface.lower(DVec3::new(1e-11, 0., 1. + 1e-11)).unwrap(), DVec2::zeros());
-        let away = surface.raise(DVec2::new(0.1, 0.1)).unwrap();
-        assert!(surface.lower(away).unwrap().norm() > 0.1);
+            false, true, knots(), knots(), controls)), 0.5, false);
+        let pole = surface.raise(DVec2::zeros()).unwrap();
+        assert!(surface.lower(pole).unwrap().norm() < 1e-14);
+        for radius in [1e-4, 0.01, 0.1] {
+            let point = surface.raise(DVec2::new(radius, 0.)).unwrap();
+            assert!((point - pole).norm() < 0.5);
+            let lowered = surface.lower(point).unwrap();
+            assert!((lowered.norm() - radius).abs() < 1e-12);
+            assert!((surface.raise(lowered).unwrap() - point).norm() < 1e-12);
+        }
     }
 
     #[test]

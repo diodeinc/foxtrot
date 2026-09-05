@@ -1419,3 +1419,36 @@ classification. Do not adopt that API here. Keep vertex-free `try_add_constraint
 and explicitly split tagged input constraints; internal constraints must not
 toggle boundary parity. Do not skip a rejected internal edge to manufacture a
 passing face. This design is not implemented yet.
+
+### Remove uncertainty-radius pole snapping
+
+Direct tracing disproves the earlier hypothesis that SMA 60312202114511 loses
+its caps through a two-pole chart or missing degenerate edges. Surface #1229
+already selects the correct single-pole polar chart. Its declared uncertainty
+is 0.5 mm; the special pole-lowering branch maps every one of its 82 boundary
+samples to (0,0), including real points more than 0.4 mm from the pole.
+The same branch destroys caps #1268, #1307 and #1347.
+
+Remove the separate pole position/uncertainty state and proximity branch.
+All points now use the distance projection followed by the chart map. This
+reduces code and does not introduce another snapping threshold. The revised
+pole regression checks actual on-surface points inside the source uncertainty
+and fails before the fix. Workspace tests pass afterward; all eight corpus
+checkpoints pass. In the 36-file Würth investigation cohort, only SMA changes
+status: all four face errors disappear, with zero f64 degenerate triangles.
+It still has eight f32-degenerate exported triangles, so remains invalid_mesh.
+Evidence: `local/wurth-repair-pass12/sma-pre-cancel.log`,
+`local/repair-project-pole-{investigate,check}`, `/tmp/pole-before.log`,
+`/tmp/pole-tests.log`; frozen worker `local/repair-project-pole-worker`.
+
+TBL 691404910001B is not proven invalid by the earlier endpoint comparison.
+Enumerating stationary points of each cubic's squared-distance polynomial
+places both declared vertices #7509/#7510 within 1.99e-8 mm of both curves
+#827/#828, versus source uncertainty 0.005 mm. EDGE_CURVE may trim an interior
+portion of its underlying curve. OCCT face #13017 (imported face 216) reports
+UnorientableShape and its wire reports NotClosed in the face, but both edges
+report NoError. OCCT uses the full spline ranges and inflates vertex tolerance
+to approximately 0.00655 mm. This is evidence of an ill-conditioned imported
+wire, not proof that the source incidence violates its tolerance. Keep its
+canceled-boundary implementation limitation open. Reproducible incidence and
+BRepCheck evidence: `local/wurth-repair-pass12/tbl691404910001b-*`.
