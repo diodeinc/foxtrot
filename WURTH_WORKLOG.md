@@ -1491,3 +1491,50 @@ invalid_mesh status. Evidence: `local/repair-cross-batch-{investigate,check,kica
 The remaining genuine face-processing investigation is TBL 691404910001B;
 the other six face-error inputs violate the degenerate-torus formal rule.
 Output degeneracy and the independent WR-MJ surface-area defect remain open.
+
+### Complete pass 13 and disk cleanup
+
+Run all 7,328 Würth inputs, followed by all 7,251 KiCad inputs with frozen
+`repair-cross-batch-worker`, source 7ae3e88, SHA-256
+`236ad84eb3b30404c93ddd5708a00384d9d24066a96fed37746ae3f9a19d624f`.
+Exact manifest path/hash coverage and eight disjoint shards are verified.
+
+| Corpus | Pass | Invalid mesh | Face errors | Source worker errors |
+| --- | ---: | ---: | ---: | ---: |
+| Würth | 6,963 | 352 | 10 | 3 |
+| KiCad | 7,096 | 155 | 0 | 0 |
+
+There are 16 Würth and 15 KiCad files with f64 degenerates. All KiCad statuses
+are unchanged. Three previously passing Würth files now fail: RCIS 7847225100
+has an invalid mesh, and both WL-SMRW-1206dome variants fail inverse projection
+on surface #3310. WL-SIQW-3535 changes from invalid_mesh to a projection error
+on #2796. These new pole-projection failures must be repaired; the broad
+uncertainty-radius snapping must not be restored. Thus the focused-cohort
+statement above is superseded: TBL is not the only open processing defect.
+Current per-file observations, qualified diagnoses and reproductions for all
+520 failures are in `.amp/in/artifacts/repair-pass13/`; generation script:
+`local/export_repair_rca.py`. Full evidence: `local/{wurth,kicad}-repair-pass13`.
+
+At the user's request, remove only rebuildable `target/debug/examples` and
+`target/debug/incremental`, and losslessly compress 73,042 historical run logs
+in both corpora's passes 7–11. Every compressed log passes `gzip -t`; their
+paths now end in `.log.gz`. Manifests, case JSON, RCA reports, corpora, frozen
+workers, current probes and passes 12–13 remain intact. Free space increases
+from 1.5 GiB to about 16 GiB despite the new completed sweep. Use
+`CARGO_INCREMENTAL=0` for subsequent diagnostic builds to limit cache growth.
+
+A knot-grid prototype is saved separately as `local/knot-grid-prototype.patch`,
+not installed or committed. Internal cell constraints reduce WR-MJ surface
+#171 area from 983.719 to 62.285528 versus OCCT 62.408166, but introduce seven
+f64 degenerate triangles in the model and fail the existing periodic-band
+test. The test exposes identical XYZ with different UV: inverse-projected
+boundary coordinates differ by about 1e-14 from exact grid coordinates.
+Evidence: `local/wrmj-knot-grid-probe.log`, frozen
+`local/repair-knot-grid-probe-worker`, `/tmp/knot-grid-disk.log`.
+Do not discard these triangles or waive the test. Reconcile boundary/grid
+representatives before CDT while preserving intentional periodic cuts and
+exact knot barriers. An oracle proposes projection-error bands in raw parameter
+space; its global-position-norm estimate is not yet accepted because it could
+erase thin directions. Any such bound must respect the existing componentwise
+projection error model and singularities. Prioritize the pass-13 regressions
+before resuming this prototype.
