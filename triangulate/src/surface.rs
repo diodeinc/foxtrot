@@ -39,19 +39,21 @@ impl SplineChart {
             Self::Polar { angular, origin, scale, bounds } => {
                 let radial = 1 - angular;
                 let radius = mapped.norm();
-                let coordinate = origin[radial] + scale[radial] * radius;
-                // Account only for arithmetic error in a chart roundtrip.
-                // Sampling outside the represented radial domain is rejected.
-                let roundoff = 8.0 * EPSILON
-                    * (origin[radial].abs() + (scale[radial] * radius).abs());
-                if coordinate < bounds[0][radial] - roundoff || coordinate > bounds[1][radial] + roundoff {
-                    return None;
-                }
                 let sin = -scale[radial].signum() * mapped[radial];
                 let angle = sin.atan2(mapped[angular]).rem_euclid(2.0 * PI);
-                let mut raw = DVec2::zeros();
-                raw[angular] = origin[angular] + scale[angular] * angle / (2.0 * PI);
-                raw[radial] = coordinate.clamp(bounds[0][radial], bounds[1][radial]);
+                let mut offset = DVec2::zeros();
+                offset[angular] = scale[angular] * angle / (2.0 * PI);
+                offset[radial] = scale[radial] * radius;
+                let mut raw = origin + offset;
+                // Reject sampling outside either represented parameter domain,
+                // allowing only arithmetic error in the chart roundtrip.
+                for i in 0..2 {
+                    let roundoff = 8.0 * EPSILON * (origin[i].abs() + offset[i].abs());
+                    if raw[i] < bounds[0][i] - roundoff || raw[i] > bounds[1][i] + roundoff {
+                        return None;
+                    }
+                    raw[i] = raw[i].clamp(bounds[0][i], bounds[1][i]);
+                }
                 Some(raw)
             },
         }
@@ -110,31 +112,33 @@ impl Surface {
         // Bounded, nonperiodic splines can still have matching endpoint
         // iso-curves. Identify the seam geometrically for the chart without
         // changing their knots, endpoint derivatives or bounded inverse domain.
-        let u_periodic = !surf.surf.u_open || (has_seam && surf.surf.rational_boundaries_coincide(0, uncertainty));
-        let v_periodic = !surf.surf.v_open || (has_seam && surf.surf.rational_boundaries_coincide(1, uncertainty));
-        let chart = if u_periodic ^ v_periodic {
-            let angular = if u_periodic { 0 } else { 1 };
+        let periodic = [
+            !surf.surf.u_open || (has_seam && surf.surf.rational_boundaries_coincide(0, uncertainty)),
+            !surf.surf.v_open || (has_seam && surf.surf.rational_boundaries_coincide(1, uncertainty)),
+        ];
+        let bounds = [DVec2::new(surf.surf.min_u(), surf.surf.min_v()),
+                      DVec2::new(surf.surf.max_u(), surf.surf.max_v())];
+        let chart = (0..2).find_map(|angular| {
             let radial = 1 - angular;
-            let bounds = [DVec2::new(surf.surf.min_u(), surf.surf.min_v()),
-                          DVec2::new(surf.surf.max_u(), surf.surf.max_v())];
+            if periodic[radial] { return None; }
             let min_point = surf.surf.rational_boundary_is_point(radial, bounds[0][radial], uncertainty);
             let max_point = surf.surf.rational_boundary_is_point(radial, bounds[1][radial], uncertainty);
-            if min_point && max_point {
-                SplineChart::Cartesian { v_scale: surf.surf.aspect_ratio() }
-            } else {
-                let mut origin = bounds[0];
-                let mut scale = bounds[1] - bounds[0];
-                if max_point {
-                    origin[radial] = bounds[1][radial];
-                    scale[radial] = -scale[radial];
-                } else if !min_point {
-                    origin[radial] -= scale[radial];
-                }
-                SplineChart::Polar { angular, origin, scale, bounds }
+            if (min_point && max_point) || (!periodic[angular] && !min_point && !max_point) {
+                return None;
             }
-        } else {
-            SplineChart::Cartesian { v_scale: surf.surf.aspect_ratio() }
-        };
+            let mut origin = bounds[0];
+            let mut scale = bounds[1] - bounds[0];
+            if max_point {
+                origin[radial] = bounds[1][radial];
+                scale[radial] = -scale[radial];
+            } else if !min_point {
+                origin[radial] -= scale[radial];
+            }
+            // A bounded sector occupies a half disk: its angular ends stay
+            // distinct, but every parameter at the collapsed edge is the pole.
+            if !periodic[angular] { scale[angular] *= 2.0; }
+            Some(SplineChart::Polar { angular, origin, scale, bounds })
+        }).unwrap_or_else(|| SplineChart::Cartesian { v_scale: surf.surf.aspect_ratio() });
         Surface::NURBS { surf, chart }
     }
 
@@ -1410,6 +1414,61 @@ mod tests {
                 let a = (chart.lower(du) - mapped) / h;
                 let b = (chart.lower(dv) - mapped) / h;
                 assert!(a.x * b.y - a.y * b.x > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_spline_poles_preserve_sectors_without_collinear_facets() {
+        for angular in [0, 1] {
+            for upper_pole in [false, true] {
+                let mut controls: Vec<Vec<DVec4>> = [(1., 0., 1.), (1., 1., 0.5_f64.sqrt()), (0., 1., 1.)]
+                    .iter().map(|&(x, y, w)| [0., 1.].iter().map(|&v| {
+                        let r = if upper_pole { 1. - v } else { v };
+                        DVec4::new(x * r * w, y * r * w, r * w, w)
+                    }).collect()).collect();
+                let a = KnotVector::from_multiplicities(2, &[2., 5.], &[3, 3]);
+                let r = KnotVector::from_multiplicities(1, &[-1., 2.], &[2, 2]);
+                let (u, v) = if angular == 0 { (a, r) } else {
+                    controls = (0..2).map(|v| controls.iter().map(|row| row[v]).collect()).collect();
+                    (r, a)
+                };
+                let mut surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
+                    true, true, u, v, controls)), 0., false);
+                let Surface::NURBS { surf, chart: chart @ SplineChart::Polar { scale, .. } } = &surface
+                    else { panic!("a bounded collapsed edge needs a pole chart") };
+                let radial = 1 - angular;
+                let mut raw = DVec2::zeros();
+                raw[radial] = if upper_pole { 2. } else { -1. };
+                for a in [2., 3., 5.] {
+                    raw[angular] = a;
+                    assert_eq!(chart.lower(raw), DVec2::zeros());
+                }
+                let mut outside = DVec2::zeros();
+                outside[radial] = 0.5 * scale[radial].signum();
+                assert!(chart.raw(outside).is_none(), "the other half disk is outside this surface");
+
+                let mut vertices = vec![Vertex { pos: DVec3::zeros(),
+                    norm: DVec3::zeros(), color: DVec3::zeros() }];
+                raw[radial] = if upper_pole { -1. } else { 2. };
+                for i in 0..=64 {
+                    raw[angular] = 2. + 3. * i as f64 / 64.;
+                    assert!((chart.raw(chart.lower(raw)).unwrap() - raw).norm() < 1e-14);
+                    vertices.push(Vertex { pos: surf.surf.point(raw),
+                        norm: DVec3::zeros(), color: DVec3::zeros() });
+                }
+                let edges: Vec<_> = (0..vertices.len()).map(|i| (i, (i + 1) % vertices.len())).collect();
+                let mut points = surface.lower_verts(&mut vertices, &edges, true).unwrap();
+                surface.add_steiner_points(&mut points, &mut vertices);
+                let mut t = cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
+                t.run().unwrap();
+                let mut area = 0.;
+                for (a, b, c) in t.triangles() {
+                    let cross = (vertices[b].pos - vertices[a].pos).cross(&(vertices[c].pos - vertices[a].pos));
+                    assert!(cross.norm() > 0.);
+                    area += 0.5 * cross.norm();
+                }
+                assert!((area / (PI * 2.0_f64.sqrt() / 4.) - 1.).abs() < 0.01);
             }
         }
     }

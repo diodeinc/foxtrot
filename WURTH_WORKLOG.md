@@ -1967,3 +1967,21 @@ sectors with the same chart as periodic disks. All 47 triangulate library
 tests pass; the capacitor's exported STL is byte-identical to the previous
 worker. Evidence: `/tmp/chart-data-tests.log`, `local/chart-data-check`, frozen
 `local/repair-chart-data-worker`.
+
+### Use the pole chart for bounded spline sectors
+
+WR-USB 632723130112 face #19963/surface #19973 and WR-USB 692221030100
+face #5642/surface #5659 have exact collapsed boundaries on bounded rational
+conical patches. The rectangular chart represents the pole at different UVs,
+allowing noncollinear UV facets whose raised vertices lie on one generator.
+Choose the existing polar chart for a single collapsed boundary even without
+a periodic axis. A bounded angular interval occupies a half disk, keeping its
+ends distinct; inverse mapping enforces both parameter bounds. No triangle
+deletion, proximity welding or change to source knots/control geometry.
+
+All 132 workspace tests pass, including both angular axes and both pole ends,
+out-of-domain rejection, pole identification and a triangulated quarter-cone
+area check. Both USB models now have zero f64 and f32 degenerate facets and
+pass the strengthened gate. The other four flagged Würth models remain
+invalid. Evidence: `/tmp/bounded-pole-workspace-tests.log`,
+`local/repair-bounded-pole-wurth`, frozen `local/repair-bounded-pole-worker`.
