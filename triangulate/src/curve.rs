@@ -131,20 +131,17 @@ impl Curve {
         // Full loops start at the actual vertex, not the first knot.
         let wraps = is_loop || (curve.is_closed()
             && if dir { t_end < t_start } else { t_end > t_start });
-        let ranges = if wraps {
+        let mut ranges = if wraps {
             let (exit, entry) = if dir { (curve.max_u(), curve.min_u()) }
                                 else { (curve.min_u(), curve.max_u()) };
             vec![(t_start, exit), (entry, t_end)]
         } else {
             vec![(t_start, t_end)]
         };
-        let mut c = Vec::new();
-        for (a, b) in ranges {
-            if wraps && a == b { continue; }
-            let segment = curve.as_polyline(a, b, BSPLINE_POINTS_PER_KNOT);
-            let skip = usize::from(!c.is_empty());
-            c.extend(segment.into_iter().skip(skip));
+        if wraps {
+            ranges.retain(|&(a, b)| a != b);
         }
+        let mut c = curve.as_polyline(&ranges, BSPLINE_POINTS_PER_KNOT);
         if c.is_empty() {
             return Err(Error::InvalidGeometry("curve polyline is empty"));
         }

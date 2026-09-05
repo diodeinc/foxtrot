@@ -1204,3 +1204,9 @@ endpoint-induced bend must not be discarded with those redundant samples.
 Evidence: `.amp/in/artifacts/closed-trim-regressions/`. This sampling defect is
 not yet fixed. Uncertainty-based LINE snapping is rejected: 25/33 known lens
 models have real resolved offsets smaller than their declared uncertainty.
+
+Move directed-interval sampling and concatenation into SampledCurve so the
+sampler owns the complete trim, not isolated fragments. This is a behavior-only
+preserving refactor before changing sample allocation. Workspace tests pass;
+CNSA-1210's STL is byte-identical before/after with one worker thread. Updated
+full pass-11 per-file diagnostic exports: `.amp/in/artifacts/repair-pass11/`.

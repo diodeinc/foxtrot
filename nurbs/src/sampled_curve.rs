@@ -110,39 +110,38 @@ impl<const N: usize> SampledCurve<N>
             .min_by_key(|&u| OrderedFloat((self.curve.point(u) - p).norm_squared()))
     }
 
-    pub fn as_polyline(&self, u_start: f64, u_end: f64, num_points_per_knot: usize) -> Vec<DVec3> {
+    pub fn as_polyline(&self, ranges: &[(f64, f64)], num_points_per_knot: usize) -> Vec<DVec3> {
         assert!(num_points_per_knot > 0);
-        let (u_min, u_max) = if u_start < u_end {
-            (u_start, u_end)
-        } else {
-            (u_end, u_start)
-        };
-
-        let mut result = vec![self.curve.point(u_min)];
-
-        // TODO this could be faster if we skip to the right start/end sections
-
-        for i in 0..self.curve.knots.len() - 1 {
-            // Sample the trimmed span itself. Filtering a whole-span grid
-            // can leave a short, curved trim with only its two endpoints.
-            let a = self.curve.knots[i].max(u_min);
-            let b = self.curve.knots[i + 1].min(u_max);
-            if a >= b {
-                continue;
-            }
-            // Iterate over a grid within this region
-            for u in 0..num_points_per_knot {
-                let frac = (u as f64) / (num_points_per_knot as f64);
-                let u = a * (1.0 - frac) + b * frac;
-                if u > u_min && u < u_max {
-                    result.push(self.curve.point(u));
+        let mut result = Vec::new();
+        for &(u_start, u_end) in ranges {
+            let (u_min, u_max) = if u_start < u_end {
+                (u_start, u_end)
+            } else {
+                (u_end, u_start)
+            };
+            let mut segment = vec![self.curve.point(u_min)];
+            for i in 0..self.curve.knots.len() - 1 {
+                // Sample the trimmed span itself. Filtering a whole-span grid
+                // can leave a short, curved trim with only its two endpoints.
+                let a = self.curve.knots[i].max(u_min);
+                let b = self.curve.knots[i + 1].min(u_max);
+                if a >= b {
+                    continue;
+                }
+                for u in 0..num_points_per_knot {
+                    let frac = (u as f64) / (num_points_per_knot as f64);
+                    let u = a * (1.0 - frac) + b * frac;
+                    if u > u_min && u < u_max {
+                        segment.push(self.curve.point(u));
+                    }
                 }
             }
-        }
-        result.push(self.curve.point(u_max));
-
-        if u_start > u_end {
-            result.reverse();
+            segment.push(self.curve.point(u_max));
+            if u_start > u_end {
+                segment.reverse();
+            }
+            let skip = usize::from(!result.is_empty());
+            result.extend(segment.into_iter().skip(skip));
         }
         result
     }
@@ -177,10 +176,10 @@ mod tests {
         let curve = SampledCurve::new(NDBSplineCurve::new(true,
             KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
             vec![DVec3::new(0., 0., 0.), DVec3::new(0.5, 0., 0.), DVec3::new(1., 1., 0.)]));
-        let points = curve.as_polyline(0.01, 0.02, 8);
+        let points = curve.as_polyline(&[(0.01, 0.02)], 8);
         assert_eq!(points.len(), 9);
         assert!((points[4] - DVec3::new(0.015, 0.015 * 0.015, 0.)).norm() < 1e-15);
-        assert_eq!(curve.as_polyline(0.02, 0.01, 8), points.into_iter().rev().collect::<Vec<_>>());
+        assert_eq!(curve.as_polyline(&[(0.02, 0.01)], 8), points.into_iter().rev().collect::<Vec<_>>());
     }
 
     #[test]
@@ -222,9 +221,9 @@ mod tests {
         let curve = SampledCurve::new(NDBSplineCurve::new(true,
             KnotVector::from_multiplicities(1, &[0., 0.5, 1.], &[2, 1, 2]),
             vec![DVec3::new(0., 0., 0.), DVec3::new(1., 0., 0.), DVec3::new(1., 1., 0.)]));
-        let points = curve.as_polyline(0.25, 0.75, 1);
+        let points = curve.as_polyline(&[(0.25, 0.75)], 1);
         assert_eq!(points, vec![DVec3::new(0.5, 0., 0.), DVec3::new(1., 0., 0.), DVec3::new(1., 0.5, 0.)]);
-        assert_eq!(curve.as_polyline(0.75, 0.25, 1), points.into_iter().rev().collect::<Vec<_>>());
+        assert_eq!(curve.as_polyline(&[(0.75, 0.25)], 1), points.into_iter().rev().collect::<Vec<_>>());
     }
 
     #[test]
