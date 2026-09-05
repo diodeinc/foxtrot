@@ -140,7 +140,6 @@ impl Curve {
              curve.u_from_point(v).ok_or(Error::InvalidGeometry("curve end projection did not converge"))?)
         };
         let mut c = curve.as_polyline(t_start, t_end, BSPLINE_POINTS_PER_KNOT);
-        simplify_polyline(&mut c);
         if c.is_empty() {
             return Err(Error::InvalidGeometry("curve polyline is empty"));
         }
@@ -148,6 +147,10 @@ impl Curve {
         if let Some(last) = c.last_mut() {
             *last = v;
         }
+        // Shared STEP vertices may differ from the curve within source
+        // tolerance. Their replacement introduces bends which must participate
+        // in reduction, even when the underlying spline is exactly straight.
+        simplify_polyline(&mut c);
         Ok(c)
     }
 
@@ -284,6 +287,21 @@ mod tests {
         let points = Curve::curve_points(endpoints[0], endpoints[1],
             &SampledCurve::new(curve), false, true).unwrap();
         assert_eq!(points, endpoints);
+    }
+
+    #[test]
+    fn reduction_preserves_bends_at_topological_endpoints() {
+        for degree in [1, 3] {
+            let curve = SampledCurve::new(NDBSplineCurve::new(true,
+                nurbs::KnotVector::from_multiplicities(degree, &[0., 1.], &[degree + 1, degree + 1]),
+                (0..=degree).map(|i| DVec3::new(3. * i as f64 / degree as f64, 0., 0.)).collect()));
+            let a = DVec3::new(0., 0.01, 0.);
+            let b = DVec3::new(3., 0.01, 0.);
+            let points = Curve::curve_points(a, b, &curve, false, true).unwrap();
+            assert_eq!(points, vec![a, DVec3::new(0.375, 0., 0.), DVec3::new(2.625, 0., 0.), b]);
+            assert_eq!(Curve::curve_points(b, a, &curve, false, true).unwrap(),
+                points.into_iter().rev().collect::<Vec<_>>());
+        }
     }
 
     fn assert_near(a: DVec3, b: DVec3) {

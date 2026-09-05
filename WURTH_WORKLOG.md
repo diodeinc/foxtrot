@@ -1012,3 +1012,24 @@ vertex/triangle/error counts. WR-MJ's complete STL facet multiset is byte-identi
 between frozen workers (digest `ba285c587e894f0118b64ee0118bd1107d578ccd165af774825e86712e6be4b9`).
 Tiny area-sum changes in three checkpoint reports arise from ordering, not new
 geometry. Evidence: `local/repair-polyline-owner-check`.
+
+The 63 residual tessellation regressions all resolve to planar two-edge faces
+(120 failed faces), not spline-chart construction. WCAP-FTXH plane #406 is a
+concrete example: its cubic #46 is a straight line at y=-5.995, while its shared
+topological endpoints lie at y=-5.9975. Reducing the sampled spline before
+installing these endpoints discards the interior curve. Endpoint replacement
+then turns it into the same segment as the other bound edge, cancelling the
+whole boundary. Distinct control sequences alone are not proof of a valid lens;
+the source offsets plus the actual operation order establish this defect.
+
+Install topological endpoints before exact reduction. Remove the degree-one
+sampling bypass so all spline degrees follow the same sample/endpoint/reduce
+pipeline. The regression fails before and passes after for degrees one and
+three, in both directions. Straight on-curve trims still reduce to endpoints;
+no coordinate tolerance or model-specific branch is added. Workspace tests and
+eight checkpoints pass. The 164-file regression cohort is now 163 ok, one invalid
+mesh: all 63 planar tessellation failures clear. DSUB 61803729321 still has one
+f64 and ten f32 degenerate facets; its upstream cause is not established here.
+Evidence: `local/wurth-endpoint-regressions`, `local/repair-endpoint-check`, and
+`.amp/in/artifacts/topological-seam-remaining/` (per-file source observations and
+before/after results; the two original invalid meshes remain RCA-unresolved).
