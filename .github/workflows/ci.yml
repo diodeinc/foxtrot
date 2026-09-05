@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Native tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # GUI diagnostic examples use old APIs; test the supported targets.
+      - name: Test workspace libraries, binaries, and integration tests
+        run: cargo test --workspace --all-features --lib --bins --tests
+      - name: Test documentation
+        run: cargo test --workspace --all-features --doc
+
+  wasm:
+    name: WebAssembly check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wasm -> target
+      - name: Check browser library
+        run: cargo check --manifest-path wasm/Cargo.toml --target wasm32-unknown-unknown
