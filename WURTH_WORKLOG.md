@@ -863,3 +863,25 @@ homogeneous difference without copying knot/basis logic. Workspace tests and
 eight checkpoints pass. WR-MJ's 50,254 binary STL facets are byte-identical as
 a multiset before/after; aggregate summation order alone differs between runs.
 Evidence: `local/repair-relative-refactor-check` and frozen worker.
+
+Rational positions and derivatives now accumulate homogeneous controls relative
+to the Cartesian anchor and restore translation only after quotient evaluation.
+This prevents large constant Cartesian coordinates from leaking through weight
+derivatives into tiny tangents. Both new constant-coordinate regressions fail
+before the change (surface derivative z=1.45e-16 instead of zero) and pass after;
+workspace tests and eight checkpoints pass. Both WL-SMRW-1206 dome variants
+now pass. Evidence: `local/repair-rational-relative-{check,dome}`.
+
+Rerunning all pass-7 regressions with this worker resolves one Würth and one
+KiCad file; 100 Würth invalid meshes and 13 tessellation errors remain, as do
+one KiCad invalid mesh and four tessellation errors. The crystal IQXC-26 has
+zero measured f64 degenerates but 28 f32 STL degenerates. This is not resolved
+by rational arithmetic. Do not blindly delete exported facets to declare the
+models fixed: exact coordinate quantization can collapse a closed tetrahedron
+into opposite coincident triangles that pass the current strict STL gate while
+losing its volume. Source correctness, output representability and topology
+must remain separate findings. Oracle consultation confirmed that an export-only
+quotient would require an explicitly lossy triangle-soup contract, not a claim
+of STEP-solid preservation. No filtering or relaxed harness gate was added.
+Removed generated `target/debug/incremental` caches to free about 3 GiB;
+retained source and corpus evidence.
