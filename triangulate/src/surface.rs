@@ -121,8 +121,11 @@ impl Surface {
         let chart = (0..2).find_map(|angular| {
             let radial = 1 - angular;
             if periodic[radial] { return None; }
-            let min_point = surf.surf.rational_boundary_is_point(radial, bounds[0][radial], uncertainty);
-            let max_point = surf.surf.rational_boundary_is_point(radial, bounds[1][radial], uncertainty);
+            // Without a closed angular direction, a short boundary is not a
+            // collapsed edge. Source uncertainty must not erase its extent.
+            let pole_tolerance = if periodic[angular] { uncertainty } else { 0. };
+            let min_point = surf.surf.rational_boundary_is_point(radial, bounds[0][radial], pole_tolerance);
+            let max_point = surf.surf.rational_boundary_is_point(radial, bounds[1][radial], pole_tolerance);
             if (min_point && max_point) || (!periodic[angular] && !min_point && !max_point) {
                 return None;
             }
@@ -1416,6 +1419,19 @@ mod tests {
                 assert!(a.x * b.y - a.y * b.x > 0.0);
             }
         }
+    }
+
+    #[test]
+    fn bounded_short_edges_do_not_collapse_under_source_uncertainty() {
+        let controls = [(1., 0., 1.), (1., 1., 0.5_f64.sqrt()), (0., 1., 1.)]
+            .iter().map(|&(x, y, w)| [1e-8, 1.].iter().map(|&r|
+                DVec4::new(x * r * w, y * r * w, r * w, w)).collect()).collect();
+        let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(true, true,
+            KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]), controls)), 1e-6, false);
+        let a = surface.lower(DVec3::new(1e-8, 0., 1e-8)).unwrap();
+        let b = surface.lower(DVec3::new(0., 1e-8, 1e-8)).unwrap();
+        assert!((a - b).norm() > 0.5, "a short edge must retain distinct chart ends");
     }
 
     #[test]

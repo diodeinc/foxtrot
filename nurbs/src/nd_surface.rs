@@ -95,7 +95,10 @@ impl<const D: usize> NDBSplineSurface<D> {
         if D < 2 || reference[D - 1] <= 0.0 { return false; }
         controls.iter().all(|point| {
             point[D - 1] > 0.0 && (0..D - 1).fold(0.0_f64, |distance, i| {
-                distance.hypot(point[i] / point[D - 1] - reference[i] / reference[D - 1])
+                // Use the evaluator's homogeneous translation before division:
+                // multiplying a shared Cartesian point by different weights
+                // need not produce equal rounded Cartesian quotients.
+                distance.hypot((point[i] - (reference[i] / reference[D - 1]) * point[D - 1]) / point[D - 1])
             }) <= uncertainty
         })
     }
@@ -372,6 +375,21 @@ mod tests {
         let surface = NDBSplineSurface::new(true, true, nonclamped(), clamped(), transposed);
         assert!(surface.rational_boundary_is_point(0, surface.min_u(), 0.));
         assert!(!surface.rational_boundary_is_point(0, surface.max_u(), 0.));
+    }
+
+    #[test]
+    fn collapsed_boundary_preserves_weighted_cartesian_constants() {
+        let knots = || KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
+        let pole = DVec4::new(-13.91, 4.325, -15.57, 1.);
+        let weighted = pole * 0.707106781187;
+        assert_ne!(weighted.z / weighted.w, pole.z);
+        let mut surface = NDBSplineSurface::new(true, true, knots(), knots(), vec![
+            vec![pole, pole + DVec4::new(1., 0., 0., 0.)],
+            vec![weighted, weighted + DVec4::new(0., 1., 0., 0.)],
+        ]);
+        assert!(surface.rational_boundary_is_point(1, 0., 0.));
+        surface.control_points[1][0].z = f64::from_bits(weighted.z.to_bits() + 1);
+        assert!(!surface.rational_boundary_is_point(1, 0., 0.), "a resolved weighted displacement is not a pole");
     }
 
     #[test]

@@ -2008,3 +2008,49 @@ f32 export remains invalid. Evidence: `local/bourns-cavity-projection` (with
 the mistaken research explicitly corrected), `/tmp/curve-cells-workspace-tests.log`,
 frozen `local/repair-curve-cells-worker`. The diagnostic example is removed
 from the source tree after preserving its reproduction under `local/`.
+
+### Complete pass 19 and bound disk use
+
+All 7,328 Würth inputs complete before all 7,251 KiCad inputs, with frozen
+worker/hash-set verification. This run includes cavity shells, bounded pole
+charts and the f64 acceptance gate, but predates the curve-junction repair.
+Würth: 6,984 ok / 334 invalid_mesh / 7 tessellation_error / 3 parser rejections.
+KiCad: 7,217 ok / 33 invalid_mesh / 1 tessellation_error. Exports:
+`.amp/in/artifacts/repair-pass19/`. Three previously passing Würth capacitors
+regress because nonzero short boundaries were classified as bounded poles
+using source uncertainty; those regressions are not acceptable and are being
+repaired. The newly rejected CMB-XS has a pre-existing f64 degenerate that the
+old f32-only gate missed.
+
+The subsequent curve-junction worker processes the 452-file Würth and 156-file
+KiCad cohorts. No status regressions versus pass 19; Bourns L34.3/W20.3 loses
+its two curve errors and reaches mesh validation. Cohort totals: Würth
+111 ok / 331 invalid / 7 face errors / 3 parser rejections; KiCad 122 ok /
+34 invalid. Evidence: `local/repair-curve-cells-{wurth,kicad}`.
+
+Removed 5,873 superseded generated mesh exports from passes 1–17, recovering
+5,093,604,499 bytes. Their reports, metrics, diagnostic logs, manifests and
+frozen workers remain, as do current failure meshes and all corpus inputs.
+Deletion inventory: `local/superseded-mesh-cleanup.json`. Compressed all
+pass-18 per-case logs and verified their gzip streams; those paths now end
+in `.log.gz`. Removed stale temporary probe STLs from `/tmp/`. Approximately
+14 GB is free after the new sweep. No source or input data is removed.
+
+### Distinguish bounded poles from short nonzero edges
+
+The three capacitor regressions select boundary curves shorter than the
+declared 5e-6 uncertainty, not actual collapsed boundaries. Require coincidence
+for bounded pole charts instead of using source uncertainty to erase an edge.
+Keep the existing periodic-pole convention. Measure rational control offsets
+with the evaluator's homogeneous translation before division: weighting one
+Cartesian point and dividing it back can otherwise create unequal rounded
+quotients (WR-USB 692221030100's shared z=-15.57 is an example).
+
+All 135 workspace tests pass, including preservation of a 1e-8 nonzero edge
+under 1e-6 source uncertainty, recognition of weighted Cartesian constants,
+and rejection of a one-ULP weighted displacement. All three capacitor models
+recover and both USB models keep zero f64/f32 degenerates. The other four
+flagged models remain invalid. Evidence: `/tmp/pole-identity-workspace-tests.log`,
+`local/repair-pole-identity-wurth`, `local/bounded-pole-regressions`, frozen
+`local/repair-pole-identity-worker`. The intermediate exact-quotient worker
+misses one USB pole and is retained only as diagnostic evidence.
