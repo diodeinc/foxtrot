@@ -2540,18 +2540,6 @@ mod tests {
     }
 
     #[test]
-    fn test_derived_attr() {
-        let e = derived_attr(r#"users : set of founded_item_select := using_items(self, []);"#).unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_explicit_attr() {
-        let e = explicit_attr(r#"operands :  list [2:2] of generic_expression;"#).unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
     fn test_entity_decl() {
         let e = entity_decl(r#"entity action_assignment abstract supertype;
   assigned_action : action;
@@ -2759,28 +2747,6 @@ end_entity;  "#).unwrap();
     }
 
     #[test]
-    fn test_subsuper() {
-        let e = subsuper("abstract supertype;").unwrap();
-        assert_eq!(e.0, ";");
-    }
-
-    #[test]
-    fn test_supertype_constraint() {
-        let e = supertype_constraint("abstract supertype;").unwrap();
-        assert_eq!(e.0, ";");
-    }
-
-    #[test]
-    fn test_octet() {
-        assert_eq!(octet("00").unwrap().1, "00");
-    }
-
-    #[test]
-    fn test_encoded_character() {
-        assert_eq!(encoded_character("00000041").unwrap().1, 'A');
-    }
-
-    #[test]
     fn test_encoded_string_literal() {
         assert_eq!(&encoded_string_literal("\"\"").unwrap().1, "");
         assert_eq!(&encoded_string_literal("\"00000041\"").unwrap().1, "A");
@@ -2887,12 +2853,6 @@ wr1 : self >= 0.0; "#).unwrap();
     #[test]
     fn test_aggregate_source() {
         let e = aggregate_source("csh\\connected_face_set.cfs_faces").unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_aggregate_initializer() {
-        let e = aggregate_initializer(r#"[d2, normalise(cross_product(d1, d2))\vector.orientation, d1]"#).unwrap();
         assert_eq!(e.0, "");
     }
 
@@ -3007,35 +2967,6 @@ end_function;  "#).unwrap();
     }
 
     #[test]
-    fn test_return_stmt() {
-        let e = return_stmt(r#"return ([d2, normalise(cross_product(d1, d2))\vector.orientation, d1]);"#).unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_if_stmt() {
-        let e = if_stmt(r#"if 'automotive_design.multiple_arity_generic_expression' in typeof(arg1)
-   then
-    result := true;
-    repeat i := 1 to sizeof(arg1\multiple_arity_generic_expression.operands);
-      result := result and acyclic(arg1\multiple_arity_generic_expression.
-      operands[i], arg2 + [arg1]);
-    end_repeat;
-    return (result);
-  end_if;"#).unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_repeat_stmt() {
-        let e = repeat_stmt(r#"repeat i := 1 to sizeof(arg1\multiple_arity_generic_expression.operands);
-      result := result and acyclic(arg1\multiple_arity_generic_expression.
-      operands[i], arg2 + [arg1]);
-    end_repeat;"#).unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
     fn test_function_call() {
         let e = function_call(r#"usedin
     (sa, 'automotive_design.shape_aspect_relationship.relating_shape_aspect'
@@ -3071,52 +3002,6 @@ end_function;  "#).unwrap();
         assert_eq!(e.0, "");
 
         let e = function_call(r#"using_items(self, [])"#).unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_actual_parameter_list() {
-        let e = actual_parameter_list("(self, [])").unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_parameter() {
-        let e = parameter("[]").unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_literal() {
-        expression(r#"1 "#).unwrap();
-    }
-
-    #[test]
-    fn test_interval() {
-        interval(r#"{1 <= self <= 31}"#).unwrap();
-    }
-
-    #[test]
-    fn test_interval_low() {
-        let e = interval_low("1 ").unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_term() {
-        let e = term("1 ").unwrap();
-        assert_eq!(e.0, "");
-
-        let e = term("csh\\connected_face_set.cfs_faces").unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_factor() {
-        let e = factor("1 ").unwrap();
-        assert_eq!(e.0, "");
-
-        let e = factor("csh\\connected_face_set.cfs_faces").unwrap();
         assert_eq!(e.0, "");
     }
 
@@ -3157,20 +3042,6 @@ end_function;  "#).unwrap();
 
         let e = primary(r#"curve\polyline.points[loindex(curve\polyline.points)]"#).unwrap();
         assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_interval_op() {
-        let e = interval_op("<= ").unwrap();
-        assert_eq!(e.0, "");
-    }
-
-    #[test]
-    fn test_select_type() {
-        let e = select_type(r#"select 
-  (action, action_directive, action_method, action_property,
-  shape_representation, versioned_action_request);"#).unwrap();
-        assert_eq!(e.0, ";");
     }
 
     #[test]

@@ -22,7 +22,6 @@ pub struct App {
     camera: Camera,
 
     depth: (wgpu::Texture, wgpu::TextureView),
-    size: PhysicalSize<u32>,
 
     modifiers: ModifiersState,
 
@@ -61,7 +60,6 @@ impl App {
             camera: Camera::new(size.width as f32, size.height as f32),
             surface,
             device,
-            size,
 
             modifiers: ModifiersState::empty(),
 
@@ -122,7 +120,6 @@ impl App {
     }
 
     fn resize(&mut self, size: PhysicalSize<u32>) {
-        self.size = size;
         self.swapchain = Self::rebuild_swapchain_(
             size, self.swapchain_format,
             &self.surface, &self.device);

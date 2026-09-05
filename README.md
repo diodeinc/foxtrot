@@ -39,7 +39,6 @@ and select a sample file from the list.
 - `cdt`: Constrained Delaunay triangulation (standalone)
 - `express`: Parser for EXPRESS schemas files and a matching code generation
   system
-- `experiments`: Experiments with trait systems (unused)
 - `step`: Auto-generated STEP file parser.  This take a _very_ long time to
   compile, so it is isolated into this crate.
 - `triangulate`: Converts a file loaded by `step` into a triangle mesh, using
