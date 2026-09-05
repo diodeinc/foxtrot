@@ -658,78 +658,6 @@ impl Surface {
         true
     }
 
-    fn straighten_periodic_runs(pts: &mut [(f64, f64)],
-                                edges: &[(usize, usize)],
-                                start_edge: usize,
-                                end_edge: usize,
-                                coord: usize,
-                                other: usize) {
-        let n = end_edge - start_edge;
-        if n < 3 {
-            return;
-        }
-        if edges[start_edge..end_edge].iter()
-            .any(|&(a, b)| a >= pts.len() || b >= pts.len())
-        {
-            return;
-        }
-
-        let mut other_min = f64::INFINITY;
-        let mut other_max = -f64::INFINITY;
-        for edge in &edges[start_edge..end_edge] {
-            let p = Self::uv_coord(pts[edge.0], other);
-            other_min = other_min.min(p);
-            other_max = other_max.max(p);
-        }
-        let other_tol = ((other_max - other_min).abs()).max(1.0) * 1e-7;
-
-        let mut breaks = Vec::new();
-        for i in 0..n {
-            let (a, b) = edges[start_edge + i];
-            let da = Self::uv_coord(pts[a], other);
-            let db = Self::uv_coord(pts[b], other);
-            if (db - da).abs() > other_tol {
-                breaks.push(i);
-            }
-        }
-        if breaks.len() < 2 {
-            return;
-        }
-
-        for i in 0..breaks.len() {
-            let prev_break = breaks[i];
-            let next_break = breaks[(i + 1) % breaks.len()];
-            let mut run = Vec::new();
-            let mut edge = (prev_break + 1) % n;
-            loop {
-                run.push(edges[start_edge + edge].0);
-                if edge == next_break {
-                    break;
-                }
-                edge = (edge + 1) % n;
-                if run.len() > n {
-                    break;
-                }
-            }
-            if run.len() < 3 || run.len() > n {
-                continue;
-            }
-
-            let first = run[0];
-            let last = *run.last().expect("run is non-empty");
-            let a = Self::uv_coord(pts[first], coord);
-            let b = Self::uv_coord(pts[last], coord);
-            if (b - a).abs() <= EPSILON {
-                continue;
-            }
-            let denom = (run.len() - 1) as f64;
-            for (j, &idx) in run[1..(run.len() - 1)].iter().enumerate() {
-                let t = (j + 1) as f64 / denom;
-                Self::set_uv_coord(&mut pts[idx], coord, a * (1.0 - t) + b * t);
-            }
-        }
-    }
-
     /// Unwrap periodic UV coordinates along each boundary loop.
     ///
     /// STEP files often describe periodic NURBS surfaces (for example,
@@ -755,19 +683,11 @@ impl Surface {
             if start_edge >= end_edge || end_edge > edges.len() {
                 continue;
             }
-            let unwrapped_u = u_period
-                .map(|period| Self::unwrap_periodic_coord(
-                    pts, edges, start_edge, end_edge, 0, period, single_edge_bound))
-                .unwrap_or(false);
-            let unwrapped_v = v_period
-                .map(|period| Self::unwrap_periodic_coord(
-                    pts, edges, start_edge, end_edge, 1, period, single_edge_bound))
-                .unwrap_or(false);
-            if unwrapped_u {
-                Self::straighten_periodic_runs(pts, edges, start_edge, end_edge, 0, 1);
-            }
-            if unwrapped_v {
-                Self::straighten_periodic_runs(pts, edges, start_edge, end_edge, 1, 0);
+            for (coord, period) in [u_period, v_period].iter().enumerate() {
+                if let Some(period) = period {
+                    Self::unwrap_periodic_coord(
+                        pts, edges, start_edge, end_edge, coord, *period, single_edge_bound);
+                }
             }
         }
     }
@@ -1206,6 +1126,28 @@ mod tests {
                 + (0.8 * pole.y / pole.z).abs() < 0.12
         });
         assert!(pole.z < -0.2_f64.sin() || in_hole);
+    }
+
+    #[test]
+    fn periodic_unwrapping_preserves_nonuniform_boundary_parameters() {
+        let surface = Surface::BSpline(SampledSurface::new(BSplineSurface::new(
+            false, true,
+            KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [(1., 0.), (0., 1.), (-1., 0.), (0., -1.), (1., 0.)].iter()
+                .map(|&(x, y)| vec![DVec3::new(x, y, 0.), DVec3::new(x, y, 1.)])
+                .collect(),
+        )));
+        let original = vec![(0., 1.), (0.1, 1.), (0.6, 1.), (1., 1.),
+                            (1., 0.), (0.6, 0.), (0.1, 0.), (0., 0.)];
+        let mut points = original.clone();
+        let edges: Vec<_> = (0..points.len()).map(|i| (i, (i + 1) % points.len())).collect();
+        surface.unwrap_periodic(&mut points, &edges, &[(0, edges.len(), false)]);
+        for (&before, &after) in original.iter().zip(&points) {
+            let a = surface.raise(DVec2::new(before.0, before.1)).unwrap();
+            let b = surface.raise(DVec2::new(after.0.rem_euclid(4.), after.1)).unwrap();
+            assert!((a - b).norm() < 1e-14, "unwrapping must not relocate boundary geometry");
+        }
     }
 
     #[test]
