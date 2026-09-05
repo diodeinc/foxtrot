@@ -120,7 +120,7 @@ impl<const N: usize> SampledCurve<N>
             } else {
                 (u_end, u_start)
             };
-            let mut segment = vec![self.curve.point(u_min)];
+            let mut segment = vec![u_min];
             for i in 0..self.curve.knots.len() - 1 {
                 let a = self.curve.knots[i].max(u_min);
                 let b = self.curve.knots[i + 1].min(u_max);
@@ -137,18 +137,18 @@ impl<const N: usize> SampledCurve<N>
                     let frac = (u as f64) / (count as f64);
                     let u = a * (1.0 - frac) + b * frac;
                     if u > u_min && u < u_max {
-                        segment.push(self.curve.point(u));
+                        segment.push(u);
                     }
                 }
             }
-            segment.push(self.curve.point(u_max));
+            segment.push(u_max);
             if u_start > u_end {
                 segment.reverse();
             }
             let skip = usize::from(!result.is_empty());
             result.extend(segment.into_iter().skip(skip));
         }
-        result
+        result.into_iter().map(|u| self.curve.point(u)).collect()
     }
 }
 
