@@ -69,9 +69,11 @@ def discover(root, includes, excludes, seed, sample):
 
 def load_manifest(path, root):
     manifest = json.loads(path.read_text())
-    if manifest.get("schema") != SCHEMA:
+    if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
         raise ValueError("unsupported manifest schema")
     entries = manifest["files"]
+    if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
+        raise ValueError("manifest files must be a list of objects")
     seen = set()
     for entry in entries:
         name = entry["path"]
@@ -82,6 +84,57 @@ def load_manifest(path, root):
         if digest(target) != entry["sha256"]:
             raise ValueError(f"input changed since manifest was recorded: {name}")
     return entries
+
+
+def load_report(path):
+    report = json.loads(path.read_text())
+    if not isinstance(report, dict) or report.get("schema") != SCHEMA:
+        raise ValueError("unsupported report schema; record a new baseline")
+    if not isinstance(report.get("config"), dict) or not isinstance(
+        report.get("results"), list
+    ):
+        raise ValueError("report must contain config and results")
+    for key in (
+        "occt",
+        "relative_tolerance",
+        "absolute_tolerance",
+        "threads",
+        "jobs",
+        "repeat",
+        "warmup",
+        "rust_log",
+    ):
+        if key not in report["config"]:
+            raise ValueError(f"report configuration missing {key}")
+    seen = set()
+    for result in report["results"]:
+        if not isinstance(result, dict) or any(
+            not isinstance(result.get(k), str) for k in ("path", "sha256", "status")
+        ):
+            raise ValueError("report results require path, sha256, and status strings")
+        if result["path"] in seen:
+            raise ValueError(f"duplicate report path: {result['path']}")
+        seen.add(result["path"])
+        metrics = result.get("metrics", {})
+        if not isinstance(metrics, dict) or any(
+            type(v) not in (int, float) or not math.isfinite(v) or v < 0
+            for v in metrics.values()
+        ):
+            raise ValueError(f"invalid metrics for {result['path']}")
+        if result["status"] == "ok":
+            timing = result.get("timing")
+            if not isinstance(timing, dict) or not isinstance(
+                timing.get("process_ms"), dict
+            ):
+                raise ValueError(f"missing processing timing for {result['path']}")
+            median = timing["process_ms"].get("median")
+            if (
+                not isinstance(median, (int, float))
+                or not math.isfinite(median)
+                or median < 0
+            ):
+                raise ValueError(f"invalid processing timing for {result['path']}")
+    return report
 
 
 def execute(command, log, timeout, env, cancel=None):
@@ -146,6 +199,7 @@ def run_file(entry, args):
         for index in range(args.warmup + args.repeat):
             metrics_path = directory / "metrics.json"
             metrics_path.unlink(missing_ok=True)
+            (directory / "mesh.stl").unlink(missing_ok=True)
             sample = execute(
                 command, directory / f"run-{index}.log", args.timeout, env, args.cancel
             )
@@ -176,6 +230,8 @@ def run_file(entry, args):
             ):
                 raise ValueError("invalid worker metrics")
             geometry = mesh_metrics(directory / "mesh.stl")
+            if geometry["triangle_count"] != metrics["triangles"]:
+                raise ValueError("worker triangle count does not match exported mesh")
             sample.update(metrics)
             sample["process_ms"] = metrics["parse_ms"] + metrics["triangulate_ms"]
             if "metrics" in result and any(
@@ -426,9 +482,7 @@ def main(argv=None):
         if args.manifest:
             entries = load_manifest(args.manifest, args.root)
         elif args.rerun:
-            previous = json.loads(args.rerun.read_text())
-            if previous.get("schema") != SCHEMA:
-                raise ValueError("unsupported rerun report schema")
+            previous = load_report(args.rerun)
             names = {r["path"] for r in previous["results"] if r["status"] != "ok"}
             entries = [
                 e
@@ -441,9 +495,7 @@ def main(argv=None):
             )
         if not entries:
             raise ValueError("no STEP files selected")
-        baseline = json.loads(args.compare.read_text()) if args.compare else None
-        if baseline is not None and baseline.get("schema") != SCHEMA:
-            raise ValueError("unsupported baseline schema; record a new baseline")
+        baseline = load_report(args.compare) if args.compare else None
         args.output.mkdir(parents=True, exist_ok=False)
         write_json(
             args.output / "manifest.json",
