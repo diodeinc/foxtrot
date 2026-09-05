@@ -902,11 +902,8 @@ fn advanced_face(
     let mut surf = crate::timing::time("face:get_surface",
         || get_surface(s, face_geometry, &boundary_points))?;
 
-    // We inject Stiner points based on the surface type to improve curvature,
-    // e.g. for spherical sections.  However, we don't want triagulation to
-    // _fail_ due to these points, so if that happens, we nuke the point (by
-    // assigning it to the first point in the list, which causes it to get
-    // deduplicated), then retry.
+    // Add curvature samples before constraint insertion. The CDT subdivides
+    // constraints at existing vertices, including samples exactly on an edge.
     let mut pts = crate::timing::time("face:lower_verts",
         || surf.lower_verts(&mut mesh.verts[v_start..]))?;
     crate::timing::time("face:unwrap_periodic",
@@ -924,55 +921,20 @@ fn advanced_face(
         eprintln!("DUMP_FACE {}: pts={:?}", face_id, pts);
         eprintln!("DUMP_FACE {}: edges={:?}", face_id, edges);
     }
-    // Isolate CDT panics (degenerate inputs can trip index bugs in the
-    // half-edge structure): one bad face should cost that face, not the
-    // whole model. The only mesh mutation inside is the bounded steiner
-    // truncate, which is safe to abandon mid-way.
+    // Preserve per-face panic diagnostics without mutating the input on error.
     let result = crate::timing::time("face:cdt", ||
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut pts = pts.clone();
-        let mut retried_without_steiner = false;
-        loop {
-            let mut t = match cdt::Triangulation::new_with_edges(&pts, &edges) {
-                Err(e) => break Err(e),
-                Ok(t) => t,
-            };
-            match t.run() {
-                Ok(()) => break Ok(t),
-                Err(cdt::Error::PointOnFixedEdge(p)) if p >= bonus_points => {
-                    if retried_without_steiner || n_steiner == 0 {
-                        warn!(
-                            "face {}: PointOnFixedEdge({}) after dropping steiner points",
-                            face_id,
-                            p
-                        );
-                        break Err(cdt::Error::PointOnFixedEdge(p));
-                    }
-                    info!(
-                        "face {}: PointOnFixedEdge({}), retrying without {} steiner points \
-                         ({} pts, {} edges)",
-                        face_id,
-                        p,
-                        n_steiner,
-                        pts.len(),
-                        edges.len()
-                    );
-                    pts.truncate(bonus_points);
-                    mesh.verts.truncate(v_start + bonus_points);
-                    retried_without_steiner = true;
-                    continue;
-                },
-                Err(e) => {
-                    if let Some(dir) = save_debug_svg_dir() {
-                        let filename = format!("{}/err{}.svg", dir, face_id);
-                        if let Err(err) = t.save_debug_svg(&filename) {
-                            warn!("Could not save debug SVG {}: {}", filename, err);
-                        }
-                    }
-                    break Err(e)
-                },
+        let mut t = cdt::Triangulation::new_with_edges(&pts, &edges)?;
+        if let Err(e) = t.run() {
+            if let Some(dir) = save_debug_svg_dir() {
+                let filename = format!("{}/err{}.svg", dir, face_id);
+                if let Err(err) = t.save_debug_svg(&filename) {
+                    warn!("Could not save debug SVG {}: {}", filename, err);
+                }
             }
+            return Err(e);
         }
+        Ok(t)
     })));
     match result {
         Err(_panic) => {
