@@ -14,6 +14,7 @@ pub struct SampledSurface<const N: usize> {
 const PROJECTION_TOL: f64 = 64. * f64::EPSILON;
 
 struct DistanceModel {
+    spans: [usize; 2],
     residual: DVec3,
     position_scale: DVec3,
     gradient: DVec2,
@@ -171,10 +172,10 @@ where
                    uv.y.clamp(self.surf.min_v(), self.surf.max_v()))
     }
 
-    fn distance_model(&self, P: DVec3, uv: DVec2, ranges: DVec2) -> DistanceModel {
+    fn distance_model(&self, P: DVec3, uv: DVec2, ranges: DVec2, spans: [usize; 2]) -> DistanceModel {
         // Fixed unit-domain coordinates preserve the surface differential's
         // rank and scale continuously, including at collapsed boundaries.
-        let derivs = self.surf.derivs_relative_to::<2>(uv, P);
+        let derivs = self.surf.derivs_in_span::<2>(uv, spans, P);
         let r = derivs[0][0];
         let columns = [derivs[1][0] * ranges.x, derivs[0][1] * ranges.y];
         let norms = DVec2::new(columns[0].norm(), columns[1].norm());
@@ -182,8 +183,8 @@ where
         let gradient = DVec2::new(dot(&r, &unit[0]), dot(&r, &unit[1]));
         let mut projected = gradient;
         let domains = [
-            (self.surf.min_u(), self.surf.max_u()),
-            (self.surf.min_v(), self.surf.max_v()),
+            (self.surf.u_knots[spans[0]], self.surf.u_knots[spans[0] + 1]),
+            (self.surf.v_knots[spans[1]], self.surf.v_knots[spans[1] + 1]),
         ];
         for i in 0..2 {
             let (min, max) = domains[i];
@@ -207,10 +208,10 @@ where
         let lo = DVec2::new(domains[0].0 - uv.x, domains[1].0 - uv.y).component_div(&ranges);
         let hi = DVec2::new(domains[0].1 - uv.x, domains[1].1 - uv.y).component_div(&ranges);
         let uv_step = quadratic_step(g, h, lo, hi).component_mul(&ranges);
-        // Only the full-domain model step may establish representability
+        // Only the full-cell model step may establish representability
         // convergence, never a step shortened by the trust region.
         let converged = (0..2).all(|i| stationary[i] || uv[i] + uv_step[i] == uv[i]);
-        DistanceModel { residual: r, position_scale, gradient: g, hessian: h, lo, hi, converged }
+        DistanceModel { spans, residual: r, position_scale, gradient: g, hessian: h, lo, hi, converged }
     }
 
     fn newtons_method_inner(&self, P: DVec3, uv_0: DVec2, max_iter: usize) -> Option<DVec2> {
@@ -218,32 +219,52 @@ where
         let mut uv_i = self.constrain_uv(uv_0);
         let mut radius: f64 = 1.;
         for _ in 0..max_iter {
-            let m = self.distance_model(P, uv_i, ranges);
-            if m.converged { return Some(uv_i); }
-            let mut accepted = None;
+            // Smooth interiors and knot junctions use the same bounded model.
+            // At a junction, every incident cell must satisfy its one-sided
+            // conditions before the point is a constrained minimum.
+            let mut models = smallvec::SmallVec::<[DistanceModel; 4]>::new();
+            for u in self.surf.u_knots.spans_at(uv_i.x) {
+                for v in self.surf.v_knots.spans_at(uv_i.y) {
+                    models.push(self.distance_model(P, uv_i, ranges, [u, v]));
+                }
+            }
+            if models.iter().all(|m| m.converged) { return Some(uv_i); }
+            let mut accepted: Option<(DVec2, DVec3, bool)> = None;
             for _ in 0..40 {
-                let step = quadratic_step(m.gradient, m.hessian, m.lo.sup(&DVec2::repeat(-radius)), m.hi.inf(&DVec2::repeat(radius)));
-                let candidate = self.constrain_uv(uv_i + step.component_mul(&ranges));
-                let candidate_r = self.surf.derivs_relative_to::<0>(candidate, P)[0][0];
-                let q = (candidate - uv_i).component_div(&ranges);
-                let h = m.hessian;
-                let predicted = dot(&q, &(m.gradient + 0.5 * DVec2::new(h[0] * q.x + h[1] * q.y,
-                    h[1] * q.x + h[2] * q.y)));
-                // Subtract squared distances in factored form. Near a normal
-                // projection their difference is below the rounding error of
-                // either squared norm; account for position evaluation error
-                // rather than stalling before first-order convergence.
-                let change = 0.5 * dot(&(candidate_r - m.residual), &(candidate_r + m.residual));
-                let roundoff = PROJECTION_TOL
-                    * dot(&(candidate_r.abs() + m.residual.abs()), &m.position_scale);
-                if predicted < 0. && change <= 0.1 * predicted + roundoff {
-                    accepted = Some(candidate);
-                    if change <= 0.75 * predicted { radius = (2. * radius).min(1.); }
+                for m in models.iter().filter(|m| !m.converged) {
+                    let step = quadratic_step(m.gradient, m.hessian, m.lo.sup(&DVec2::repeat(-radius)), m.hi.inf(&DVec2::repeat(radius)));
+                    let mut candidate = uv_i + step.component_mul(&ranges);
+                    for (i, knots) in [&self.surf.u_knots, &self.surf.v_knots].iter().enumerate() {
+                        let (min, max) = (knots[m.spans[i]], knots[m.spans[i] + 1]);
+                        // Preserve the exact knot when the model hits a bound;
+                        // normalization and restoration need not roundtrip it.
+                        candidate[i] = if step[i] == m.lo[i] { min }
+                            else if step[i] == m.hi[i] { max }
+                            else { candidate[i].clamp(min, max) };
+                    }
+                    let candidate_r = self.surf.derivs_in_span::<0>(candidate, m.spans, P)[0][0];
+                    let q = (candidate - uv_i).component_div(&ranges);
+                    let h = m.hessian;
+                    let predicted = dot(&q, &(m.gradient + 0.5 * DVec2::new(h[0] * q.x + h[1] * q.y,
+                        h[1] * q.x + h[2] * q.y)));
+                    // Compare residual distances in factored form to retain
+                    // small improvements near a nonzero normal offset.
+                    let change = 0.5 * dot(&(candidate_r - m.residual), &(candidate_r + m.residual));
+                    let roundoff = PROJECTION_TOL
+                        * dot(&(candidate_r.abs() + m.residual.abs()), &m.position_scale);
+                    if predicted < 0. && change <= 0.1 * predicted + roundoff
+                        && accepted.as_ref().map_or(true, |(_, best, _)|
+                            dot(&(candidate_r - best), &(candidate_r + best)) < 0.) {
+                        accepted = Some((candidate, candidate_r, change <= 0.75 * predicted));
+                    }
+                }
+                if let Some((_, _, expand)) = accepted {
+                    if expand { radius = (2. * radius).min(1.); }
                     break;
                 }
                 radius *= 0.25;
             }
-            uv_i = accepted?;
+            uv_i = accepted?.0;
         }
         None
     }
@@ -319,6 +340,23 @@ mod tests {
 
     fn close(a: f64, b: f64, tolerance: f64) {
         assert!((a - b).abs() <= tolerance, "{} != {}", a, b);
+    }
+
+    #[test]
+    fn projection_tests_both_sides_of_interior_knots() {
+        let sampled = SampledSurface::new(NDBSplineSurface::new(true, true,
+            KnotVector::from_multiplicities(1, &[0., 0.5, 1.], &[2, 1, 2]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [(0., 0.5), (0.5, 0.), (1., 0.5)].iter().map(|&(x, z)|
+                vec![DVec3::new(x, 0., z), DVec3::new(x, 1., z)]).collect()));
+        for (p, expected) in [(DVec3::new(0.5, 0.37, -0.1), DVec2::new(0.5, 0.37)),
+            (DVec3::new(0.7, 0.37, 0.2), DVec2::new(0.7, 0.37))] {
+            for start in [0.25, 0.5, 0.75] {
+                let uv = sampled.uv_from_point_newtons_method(p, DVec2::new(start, 0.5)).unwrap();
+                close(uv.x, expected.x, 1e-12);
+                close(uv.y, expected.y, 1e-12);
+            }
+        }
     }
 
     #[test]

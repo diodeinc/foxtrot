@@ -52,6 +52,16 @@ impl KnotVector {
         mid
     }
 
+    /// Nonempty active spans incident to a parameter, including both sides
+    /// of an interior knot but not the inactive exterior knot intervals.
+    pub fn spans_at(&self, u: f64) -> impl Iterator<Item = usize> {
+        let right = self.find_span(u);
+        let left = if self[right] == u {
+            (self.p..right).rev().find(|&i| self[i] < u)
+        } else { None };
+        std::iter::once(right).chain(left)
+    }
+
     pub fn degree(&self) -> usize {
         self.p
     }
@@ -180,5 +190,22 @@ impl std::ops::Index<usize> for KnotVector {
     type Output = f64;
     fn index(&self, i: usize) -> &Self::Output {
         &self.U[i]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incident_spans_skip_repetitions_and_inactive_exterior_intervals() {
+        let knots = KnotVector::from_multiplicities(3, &[0., 0.5, 1.], &[4, 3, 4]);
+        assert_eq!(knots.spans_at(0.).collect::<Vec<_>>(), [3]);
+        assert_eq!(knots.spans_at(0.25).collect::<Vec<_>>(), [3]);
+        assert_eq!(knots.spans_at(0.5).collect::<Vec<_>>(), [6, 3]);
+        assert_eq!(knots.spans_at(1.).collect::<Vec<_>>(), [6]);
+        let knots = KnotVector::from_multiplicities(3, &[-3., -2., -1., 0., 0.5, 1., 2., 3., 4.], &[1; 9]);
+        assert_eq!(knots.spans_at(0.).collect::<Vec<_>>(), [3]);
+        assert_eq!(knots.spans_at(1.).collect::<Vec<_>>(), [4]);
     }
 }

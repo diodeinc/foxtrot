@@ -1346,3 +1346,26 @@ added. OLRM's STL triangle-record multiset is exactly identical to the trust
 worker (only ordering differs); all six focused model statuses are unchanged.
 Evidence: `local/repair-distance-model-remaining`, `/tmp/distance-model-tests.log`.
 KiCad's six regression cases remain two ok / four invalid with the trust worker.
+
+### Surface projection respects knot cells
+
+Bound each distance model to its actual knot cell. At an interior knot, build
+the same model for every incident nonempty cell and require all one-sided
+stationarity conditions before convergence. Preserve an exact knot when a
+trial reaches its bound instead of relying on a normalization roundtrip.
+This replaces the invalid smooth-across-all-knots assumption; there is no
+WPCC-specific tolerance, snapping or fallback.
+
+The two-plane-crease projection test fails before this change and passes after.
+It checks both a minimum on the crease and travel through the crease, starting
+on either side and directly at the knot. Additional coverage excludes repeated
+zero-width and inactive exterior intervals. Workspace tests and eight corpus
+checkpoints pass. All 54 lowering cases now have zero face errors: 43 pass and
+11 retain invalid exported meshes. Both WPCC-RX 760308102210 and WPCC-TX
+760308101103 pass. The 347 Würth and six KiCad regression statuses are exactly
+unchanged from the trust worker (205/142 and 2/4 ok/invalid respectively).
+Evidence: `local/repair-knot-cell-{lowering,check,regressions,kicad}` and
+`/tmp/knot-projection-before.log`. All 142 invalid meshes in this Würth
+regression cohort have zero measured f64 degenerates; their failures occur
+after f32 export. This does not yet establish whether each is avoidable
+sampling or an intrinsic output-representation limit.
