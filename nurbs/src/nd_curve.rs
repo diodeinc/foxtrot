@@ -35,6 +35,13 @@ impl<const D: usize> NDBSplineCurve<D> {
     ///
     /// ALGORITHM A3.1
     pub fn curve_point(&self, u: f64) -> TVec<f64, D> {
+        let (origin, point) = self.curve_point_relative(u, |p, origin| p - origin);
+        point + origin
+    }
+
+    pub(crate) fn curve_point_relative(&self, u: f64,
+        difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
+    ) -> (TVec<f64, D>, TVec<f64, D>) {
         let p = self.knots.degree();
 
         let span = self.knots.find_span(u);
@@ -46,9 +53,9 @@ impl<const D: usize> NDBSplineCurve<D> {
         let origin = self.control_points[span - p + anchor];
         let mut C = TVec::zeros();
         for i in 0..=p {
-            C += N[i] * (self.control_points[span - p + i] - origin)
+            C += N[i] * difference(self.control_points[span - p + i], origin)
         }
-        C + origin
+        (origin, C)
     }
 
     /// Computes the derivatives of the curve of order up to and including `d` at location `t`,
@@ -56,6 +63,14 @@ impl<const D: usize> NDBSplineCurve<D> {
     ///
     /// ALGORITHM A3.2
     pub fn curve_derivs<const E: usize>(&self, u: f64) -> Vec<TVec<f64, D>> {
+        let (origin, mut derivatives) = self.curve_derivs_relative::<E>(u, |p, origin| p - origin);
+        derivatives[0] += origin;
+        derivatives
+    }
+
+    pub(crate) fn curve_derivs_relative<const E: usize>(&self, u: f64,
+        difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
+    ) -> (TVec<f64, D>, Vec<TVec<f64, D>>) {
         let p = self.knots.degree();
 
         let du = min(E, p);
@@ -71,11 +86,10 @@ impl<const D: usize> NDBSplineCurve<D> {
         let mut CK = vec![TVec::zeros(); E + 1];
         for k in 0..=du {
             for j in 0..=p {
-                CK[k] += N_derivs[k][j] * (self.control_points[span - p + j] - origin)
+                CK[k] += N_derivs[k][j] * difference(self.control_points[span - p + j], origin)
             }
         }
-        CK[0] += origin;
-        CK
+        (origin, CK)
     }
 
     pub fn as_polyline(&self, u_start: f64, u_end: f64, num_points_per_knot: usize) -> Vec<TVec<f64, D>> {

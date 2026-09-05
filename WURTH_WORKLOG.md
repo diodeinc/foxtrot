@@ -854,3 +854,12 @@ bridges the narrow bend cluster near 0.66. The five largest triangles contribute
 triangle indices and XYZ positions: `local/wrmj-triangle-probe.log`; quantified
 triangles: `local/wrmj-triangle-quantification.json` (angular coordinate is in
 radians; divide by 2π for this surface's raw u). This defect remains unfixed.
+
+Preparatory evaluator refactor separates basis accumulation of local control
+differences from restoring the origin. The same four accumulation kernels
+continue to own curve/surface position/derivative evaluation; no numerical
+behavior changes yet. This lets rational callers provide a Cartesian-relative
+homogeneous difference without copying knot/basis logic. Workspace tests and
+eight checkpoints pass. WR-MJ's 50,254 binary STL facets are byte-identical as
+a multiset before/after; aggregate summation order alone differs between runs.
+Evidence: `local/repair-relative-refactor-check` and frozen worker.

@@ -140,6 +140,14 @@ impl<const D: usize> NDBSplineSurface<D> {
         uspan: usize, Nu: &VecF,
         vspan: usize, Nv: &VecF) -> TVec<f64, D>
     {
+        let (origin, point) = self.surface_point_relative(uspan, Nu, vspan, Nv, |p, origin| p - origin);
+        point + origin
+    }
+
+    pub(crate) fn surface_point_relative(&self,
+        uspan: usize, Nu: &VecF, vspan: usize, Nv: &VecF,
+        difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
+    ) -> (TVec<f64, D>, TVec<f64, D>) {
         let p = self.u_knots.degree();
         let q = self.v_knots.degree();
 
@@ -154,11 +162,11 @@ impl<const D: usize> NDBSplineSurface<D> {
             let mut temp = TVec::zeros();
             let vind = vspan - q + l;
             for k in 0..=p {
-                temp += Nu[k] * (self.control_points[uind + k][vind] - origin);
+                temp += Nu[k] * difference(self.control_points[uind + k][vind], origin);
             }
             S += Nv[l] * temp;
         }
-        S + origin
+        (origin, S)
     }
 
     /// Returns all derivatives of the surface.  If `D = surface_derivs()`,
@@ -169,6 +177,14 @@ impl<const D: usize> NDBSplineSurface<D> {
     ///
     /// ALGORITHM A3.6
     pub fn surface_derivs<const E: usize>(&self, uv: DVec2) -> Vec<Vec<TVec<f64, D>>> {
+        let (origin, mut derivatives) = self.surface_derivs_relative::<E>(uv, |p, origin| p - origin);
+        derivatives[0][0] += origin;
+        derivatives
+    }
+
+    pub(crate) fn surface_derivs_relative<const E: usize>(&self, uv: DVec2,
+        difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
+    ) -> (TVec<f64, D>, Vec<Vec<TVec<f64, D>>>) {
         let p = self.u_knots.degree();
         let q = self.v_knots.degree();
 
@@ -196,7 +212,7 @@ impl<const D: usize> NDBSplineSurface<D> {
             for s in 0..=q {
                 temp[s] = TVec::zeros();
                 for r in 0..=p {
-                    temp[s] += Nu_deriv[k][r] * (self.control_points[uspan - p + r][vspan - q + s] - origin);
+                    temp[s] += Nu_deriv[k][r] * difference(self.control_points[uspan - p + r][vspan - q + s], origin);
                 }
             }
             let dd = min(E - k, dv);
@@ -206,8 +222,7 @@ impl<const D: usize> NDBSplineSurface<D> {
                 }
             }
         }
-        SKL[0][0] += origin;
-        SKL
+        (origin, SKL)
     }
 
     // Computes the relative scale of U and V, based on average distance between
