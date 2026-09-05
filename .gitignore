@@ -8,3 +8,13 @@ Cargo.lock
 .vscode
 wasm/target
 wasm/pkg
+
+# Corpus clones, reports, and virtual environments belong under /local above.
+# Keep generated Python and orb artifacts out of source control on every machine.
+__pycache__/
+*.py[cod]
+/.venv/
+/.ruff_cache/
+/.amp/in/
+/.amp/out/
+/.amp/portals/

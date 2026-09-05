@@ -30,6 +30,19 @@ jobs:
         run: cargo test --workspace --all-features --lib --bins --tests
       - name: Test documentation
         run: cargo test --workspace --all-features --doc
+      - name: Test corpus harness
+        run: python3 -m unittest discover -s scripts -p 'test_corpus*.py'
+      - name: Build corpus worker and exercise checked-in models
+        run: |
+          cargo build -p triangulate --example corpus_worker
+          python3 scripts/corpus.py examples --worker target/debug/examples/corpus_worker --include abstract_pca.step --include cube_hole.step --include cuboid.step --meshes all --output local/corpus-ci
+      - name: Upload corpus diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-report
+          path: local/corpus-ci
+          if-no-files-found: ignore
 
   wasm:
     name: WebAssembly check
