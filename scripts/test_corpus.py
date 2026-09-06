@@ -24,10 +24,16 @@ if mode == 'descendant':
 if mode == 'timeout': time.sleep(30)
 if mode == 'crash': sys.exit(7)
 if mode == 'protocol': sys.exit(0)
-data = dict(read_ms=1, parse_ms=2, triangulate_ms=3, export_ms=4,
-            triangles=1, vertices=3, faces=1, shells=1, errors=0,
-            panics=0, log_warn=0, log_error=0)
-if mode == 'partial': data['errors'] = 1
+data = dict(schema=2, status='ok', message=None, completion='complete', failures=[],
+            read_ms=1, parse_ms=2, triangulate_ms=3, export_ms=4,
+            triangles=1, vertices=3, faces=1, shells=1, degenerate_f64=0,
+            browser_nonfinite=0, browser_triangles=1, browser_degenerate=0,
+            browser_zero_normals=0)
+if mode == 'partial':
+    data.update(completion='partial', failures=[dict(entity_id=42, surface_id=43,
+                kind='geometry', message='could not triangulate')])
+if mode == 'input_error':
+    data.update(status='input_error', completion='failed', message='bad STEP')
 if mode == 'nonfinite': data['parse_ms'] = float('nan')
 if mode == 'counts': data['triangles'] = 2
 if mode == 'f64_invalid': data['degenerate_f64'] = 1
@@ -50,7 +56,7 @@ metrics.write_text(json.dumps(data))
 if mode == 'stale' and count: sys.exit(0)
 if mode == 'invalid':
     mesh.write_bytes(bytes(80) + struct.pack('<I', 0))
-    data['triangles'] = 0
+    data.update(triangles=0, browser_triangles=0)
     metrics.write_text(json.dumps(data))
     sys.exit(0)
 facets = 2 if mode.startswith('browser_') else 1
@@ -155,7 +161,7 @@ class CorpusTests(unittest.TestCase):
         self.assertEqual(self.run_harness("first")[0], 2)  # Never clobber artifacts.
 
     def test_failures_are_isolated_reported_and_rerunnable(self):
-        for mode in ("ok", "crash", "timeout", "partial", "protocol"):
+        for mode in ("ok", "crash", "timeout", "partial", "input_error", "protocol"):
             self.model(mode + ".step", mode)
         code, report, output = self.run_harness(
             "failures", "--timeout", "0.3", "--jobs", "2"
@@ -169,6 +175,7 @@ class CorpusTests(unittest.TestCase):
                 "crash.step": "crash",
                 "timeout.step": "timeout",
                 "partial.step": "tessellation_error",
+                "input_error.step": "input_error",
                 "protocol.step": "harness_error",
             },
         )
@@ -176,9 +183,9 @@ class CorpusTests(unittest.TestCase):
             "rerun", "--rerun", str(output / "results.json"), "--timeout", "0.1"
         )
         self.assertEqual(code, 1)
-        self.assertEqual(len(rerun["results"]), 4)
+        self.assertEqual(len(rerun["results"]), 5)
         self.assertTrue(all(r["path"] != "ok.step" for r in rerun["results"]))
-        self.assertEqual(len((output / "progress.jsonl").read_text().splitlines()), 5)
+        self.assertEqual(len((output / "progress.jsonl").read_text().splitlines()), 6)
 
     def test_comparison_requires_same_corpus_content_and_settings(self):
         self.model("one.step")
@@ -207,7 +214,7 @@ class CorpusTests(unittest.TestCase):
         bad_timing = copy.deepcopy(report)
         bad_timing["results"][0]["timing"] = []
         bad_metrics = copy.deepcopy(report)
-        bad_metrics["results"][0]["metrics"]["errors"] = "oops"
+        bad_metrics["results"][0]["metrics"]["triangles"] = "oops"
         for i, value in enumerate(
             [[], None, {"schema": 1}, duplicate, bad_timing, bad_metrics]
         ):
@@ -227,10 +234,10 @@ class CorpusTests(unittest.TestCase):
             "nonfinite": "harness_error",
             "counts": "harness_error",
             "invalid": "invalid_mesh",
-            "f64_invalid": "invalid_mesh",
+            "f64_invalid": "ok",
             "f64_nonfinite": "harness_error",
             "vary": "nondeterministic",
-            "stale": "harness_error",
+            "stale": "ok",
         }
         for mode, status in expected.items():
             self.model(mode + ".step", mode)

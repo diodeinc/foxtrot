@@ -117,10 +117,13 @@ def load_report(path):
         seen.add(result["path"])
         metrics = result.get("metrics", {})
         if not isinstance(metrics, dict) or any(
-            type(v) not in (int, float) or not math.isfinite(v) or v < 0
+            type(v) in (int, float) and (not math.isfinite(v) or v < 0)
             for v in metrics.values()
         ):
             raise ValueError(f"invalid metrics for {result['path']}")
+        for key in ("triangles", "vertices", "faces", "shells"):
+            if key in metrics and not isinstance(metrics[key], int):
+                raise ValueError(f"invalid metrics for {result['path']}")
         if result["status"] == "ok":
             timing = result.get("timing")
             if not isinstance(timing, dict) or not isinstance(
@@ -208,6 +211,25 @@ def run_file(entry, args):
                 result["failure"] = sample
                 break
             metrics = json.loads(metrics_path.read_text())
+            if metrics.get("schema") != 2:
+                raise ValueError("unsupported worker schema")
+            if metrics.get("status") == "input_error":
+                result["status"] = "input_error"
+                result["diagnostics"] = metrics
+                break
+            if metrics.get("status") != "ok":
+                raise ValueError("invalid worker status")
+            failures = metrics.get("failures")
+            completion = metrics.get("completion")
+            if completion not in ("complete", "partial") or not isinstance(failures, list):
+                raise ValueError("invalid tessellation diagnostics")
+            if (completion == "complete") != (not failures):
+                raise ValueError("completion disagrees with failures")
+            for failure in failures:
+                if not isinstance(failure, dict) or not isinstance(failure.get("entity_id"), int) \
+                        or failure.get("kind") not in ("geometry", "unsupported", "panic", "invalid_entity") \
+                        or not isinstance(failure.get("message"), str):
+                    raise ValueError("invalid tessellation failure")
             required = (
                 "read_ms",
                 "parse_ms",
@@ -217,10 +239,6 @@ def run_file(entry, args):
                 "vertices",
                 "faces",
                 "shells",
-                "errors",
-                "panics",
-                "log_warn",
-                "log_error",
             )
             browser_required = (
                 "browser_nonfinite",
@@ -233,8 +251,6 @@ def run_file(entry, args):
                 browser_required
             ):
                 raise ValueError("incomplete browser worker metrics")
-            # Older workers do not report this diagnostic. It remains review
-            # evidence rather than an acceptance gate when present.
             degenerate_f64 = metrics.get("degenerate_f64", 0)
             if any(
                 not isinstance(value, (int, float))
@@ -254,8 +270,8 @@ def run_file(entry, args):
                 raise ValueError("inconsistent browser worker counts")
             mesh_path = directory / "mesh.stl"
             geometry = mesh_metrics(mesh_path) if mesh_path.exists() else None
-            if not browser_metrics and geometry is None:
-                raise ValueError("legacy worker did not export a mesh")
+            if not browser_metrics:
+                raise ValueError("worker omitted browser diagnostics")
             if geometry is not None and geometry["triangle_count"] != metrics["triangles"]:
                 raise ValueError("worker triangle count does not match exported mesh")
             sample.update(metrics)
@@ -263,10 +279,8 @@ def run_file(entry, args):
             deterministic = [
                 "triangles",
                 "faces",
-                "errors",
-                "panics",
-                "log_warn",
-                "log_error",
+                "completion",
+                "failures",
                 "degenerate_f64",
             ]
             if browser_metrics:
@@ -285,9 +299,7 @@ def run_file(entry, args):
             if geometry is not None:
                 result["geometry"] = geometry
             result["classification"] = {
-                "basis": (
-                    "browser_f32_triangle_buffer" if browser_metrics else "legacy_stl"
-                ),
+                "basis": "browser_f32_triangle_buffer",
                 "visual_verification": False,
             }
             result["quality_diagnostics"] = {
@@ -295,16 +307,13 @@ def run_file(entry, args):
                 "browser_zero_normal_vertices": metrics.get("browser_zero_normals", 0),
                 "degenerate_f64_review": degenerate_f64,
             }
-            if metrics["errors"] or metrics["panics"] or metrics["log_error"]:
+            result["diagnostics"] = {"completion": completion, "failures": failures}
+            if failures:
                 result["status"] = "tessellation_error"
             elif browser_metrics and (
                 metrics["browser_nonfinite"]
                 or not metrics["browser_triangles"]
                 or metrics["browser_degenerate"] >= metrics["browser_triangles"]
-            ):
-                result["status"] = "invalid_mesh"
-            elif not browser_metrics and (
-                degenerate_f64 or not geometry["validation"]["valid"]
             ):
                 result["status"] = "invalid_mesh"
             if index >= args.warmup:
@@ -396,11 +405,10 @@ def compare(results, baseline, config, threshold):
             continue
         if before["status"] == "ok" and after["status"] != "ok":
             changes.append(f"{name}: ok -> {after['status']}")
-        for key in ("errors", "panics", "log_warn", "log_error"):
-            if after.get("metrics", {}).get(key, 0) > before.get("metrics", {}).get(
-                key, 0
-            ):
-                changes.append(f"{name}: {key} increased")
+        if len(after.get("diagnostics", {}).get("failures", [])) > len(
+            before.get("diagnostics", {}).get("failures", [])
+        ):
+            changes.append(f"{name}: tessellation failures increased")
         for key in ("triangles", "faces"):
             if before.get("metrics", {}).get(key) != after.get("metrics", {}).get(key):
                 changes.append(f"{name}: {key} changed (inspect mesh)")

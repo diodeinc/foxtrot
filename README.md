@@ -93,8 +93,8 @@ Review flagged models at useful viewing scales for holes, silhouette errors,
 and shading defects. No triangles are deleted or vertices merged to pass checks.
 STL remains a world-coordinate diagnostic for coarse measurements and optional
 OCCT comparison; its f32 precision does not gate browser output. Reports identify
-their classification basis. Older workers retain the legacy strict STL gate;
-changes between these methodologies are reclassifications, not repaired models.
+their classification basis. Worker protocol schema 2 is required; old aggregate
+counter and STL-fallback workers are intentionally unsupported.
 
 For fast browser-only iteration, use `--meshes none`: the worker computes the
 same browser diagnostics but skips STL serialization, disk writes and Python

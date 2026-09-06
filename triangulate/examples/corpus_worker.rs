@@ -1,33 +1,31 @@
 //! One process per model. The Python harness owns timeouts and repetition.
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use serde::Serialize;
 use step::step_file::StepFile;
 use triangulate::triangulate::triangulate;
+use triangulate::stats::TessellationFailure;
 
-static WARNINGS: AtomicUsize = AtomicUsize::new(0);
-static ERRORS: AtomicUsize = AtomicUsize::new(0);
+#[derive(Serialize)]
+struct WorkerReport {
+    schema: u32,
+    status: &'static str,
+    message: Option<String>,
+    read_ms: f64, parse_ms: f64, triangulate_ms: f64, export_ms: f64,
+    triangles: usize, vertices: usize, faces: usize, shells: usize,
+    completion: &'static str,
+    failures: Vec<TessellationFailure>,
+    degenerate_f64: usize, browser_nonfinite: usize, browser_triangles: usize,
+    browser_degenerate: usize, browser_zero_normals: usize,
+}
 
-struct Logger(env_logger::Logger);
-impl log::Log for Logger {
-    fn enabled(&self, metadata: &log::Metadata) -> bool {
-        self.0.enabled(metadata)
-    }
-    fn log(&self, record: &log::Record) {
-        match record.level() {
-            log::Level::Warn => {
-                WARNINGS.fetch_add(1, Ordering::Relaxed);
-            }
-            log::Level::Error => {
-                ERRORS.fetch_add(1, Ordering::Relaxed);
-            }
-            _ => {}
-        }
-        self.0.log(record);
-    }
-    fn flush(&self) {
-        self.0.flush();
-    }
+fn write_input_error(path: &str, read_ms: f64, message: String) -> Result<(), Box<dyn std::error::Error>> {
+    let report = WorkerReport { schema: 2, status: "input_error", message: Some(message), read_ms,
+        parse_ms: 0., triangulate_ms: 0., export_ms: 0., triangles: 0, vertices: 0,
+        faces: 0, shells: 0, completion: "failed", failures: vec![], degenerate_f64: 0,
+        browser_nonfinite: 0, browser_triangles: 0, browser_degenerate: 0, browser_zero_normals: 0 };
+    std::fs::write(path, serde_json::to_vec_pretty(&report)?)?;
+    Ok(())
 }
 
 fn collinear(points: [nalgebra_glm::DVec3; 3]) -> bool {
@@ -44,19 +42,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() != 4 && args.len() != 5 {
         return Err("usage: corpus_worker INPUT.step METRICS.json OUTPUT.stl|- [BROWSER.bin]".into());
     }
-    let logger =
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).build();
-    let max_level = logger.filter().max(log::LevelFilter::Warn);
-    log::set_boxed_logger(Box::new(Logger(logger)))?;
-    // Always count warnings/errors, even when RUST_LOG suppresses their display.
-    log::set_max_level(max_level);
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     let start = Instant::now();
-    let data = std::fs::read(&args[1])?;
+    let data = match std::fs::read(&args[1]) {
+        Ok(data) => data,
+        Err(e) => return write_input_error(&args[2], 0., e.to_string()),
+    };
     let read_ms = start.elapsed().as_secs_f64() * 1000.0;
     let start = Instant::now();
-    let flat = StepFile::strip_flatten(&data)?;
-    let step = StepFile::parse(&flat)?;
+    let flat = match StepFile::strip_flatten(&data) {
+        Ok(flat) => flat,
+        Err(e) => return write_input_error(&args[2], read_ms, e.to_string()),
+    };
+    let step = match StepFile::parse(&flat) {
+        Ok(step) => step,
+        Err(e) => return write_input_error(&args[2], read_ms, e.to_string()),
+    };
     let parse_ms = start.elapsed().as_secs_f64() * 1000.0;
     let start = Instant::now();
     let (mesh, stats) = triangulate(&step);
@@ -89,15 +91,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::write(path, browser.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>())?;
     }
     let export_ms = start.elapsed().as_secs_f64() * 1000.0;
-    // Only numeric fields: strings and report serialization belong to the harness.
-    std::fs::write(&args[2], format!(
-        "{{\"read_ms\":{},\"parse_ms\":{},\"triangulate_ms\":{},\"export_ms\":{},\"triangles\":{},\"vertices\":{},\"faces\":{},\"shells\":{},\"errors\":{},\"panics\":{},\"log_warn\":{},\"log_error\":{},\"degenerate_f64\":{},\"browser_nonfinite\":{},\"browser_triangles\":{},\"browser_degenerate\":{},\"browser_zero_normals\":{}}}",
-        read_ms, parse_ms, triangulate_ms, export_ms, mesh.triangles.len(),
-        mesh.verts.len(), stats.num_faces, stats.num_shells, stats.num_errors,
-        stats.num_panics, WARNINGS.load(Ordering::Relaxed), ERRORS.load(Ordering::Relaxed),
-        degenerate_f64, browser_nonfinite, browser.len() / 27, browser_degenerate,
-        browser_zero_normals,
-    ))?;
+    let report = WorkerReport { schema: 2, status: "ok", message: None, read_ms, parse_ms,
+        triangulate_ms, export_ms, triangles: mesh.triangles.len(), vertices: mesh.verts.len(),
+        faces: stats.num_faces, shells: stats.num_shells,
+        completion: if stats.is_complete() { "complete" } else { "partial" },
+        failures: stats.failures, degenerate_f64, browser_nonfinite,
+        browser_triangles: browser.len() / 27, browser_degenerate, browser_zero_normals };
+    std::fs::write(&args[2], serde_json::to_vec_pretty(&report)?)?;
     Ok(())
 }
 
