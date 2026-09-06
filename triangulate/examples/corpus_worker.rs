@@ -41,8 +41,8 @@ fn collinear(points: [nalgebra_glm::DVec3; 3]) -> bool {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
-    if args.len() != 4 {
-        return Err("usage: corpus_worker INPUT.step METRICS.json OUTPUT.stl".into());
+    if args.len() != 4 && args.len() != 5 {
+        return Err("usage: corpus_worker INPUT.step METRICS.json OUTPUT.stl|- [BROWSER.bin]".into());
     }
     let logger =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).build();
@@ -84,7 +84,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             browser_area += (b - a).cross(&(c - a)).norm() * 0.5;
         }
     }
-    mesh.save_stl(&args[3])?;
+    if args[3] != "-" {
+        mesh.save_stl(&args[3])?;
+    }
+    if let Some(path) = args.get(4) {
+        std::fs::write(path, browser.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>())?;
+    }
     let export_ms = start.elapsed().as_secs_f64() * 1000.0;
     // Only numeric fields: strings and report serialization belong to the harness.
     std::fs::write(&args[2], format!(

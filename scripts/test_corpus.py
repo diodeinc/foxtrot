@@ -56,7 +56,7 @@ if mode == 'invalid':
 facets = 2 if mode.startswith('browser_') else 1
 mesh.write_bytes(bytes(80) + struct.pack('<I', facets) +
                  struct.pack('<12fH', 0,0,0, 0,0,0, 1,0,0, 0,1,0, 0) * facets)
-if mode == 'browser_no_stl': mesh.unlink()
+if mode == 'browser_no_stl' or str(mesh) == '-': mesh.unlink()
 print('worker diagnostic')
 """
 
@@ -278,6 +278,19 @@ class CorpusTests(unittest.TestCase):
             (self.base / "case-browser_f64_invalid" / "results.json").read_text()
         )["results"][0]
         self.assertEqual(f64["quality_diagnostics"]["degenerate_f64_review"], 1)
+
+    def test_no_stl_scan_keeps_browser_diagnostics(self):
+        self.model("one.step", "browser_some_collapsed")
+        code, report, output = self.run_harness("fast", "--meshes", "none")
+        self.assertEqual(code, 0)
+        result = report["results"][0]
+        self.assertNotIn("geometry", result)
+        self.assertEqual(result["quality_diagnostics"]["browser_degenerate_triangles"], 1)
+        self.assertFalse(list(output.rglob("*.stl")))
+        self.assertIn("browser_degenerate_triangles: 1", (output / "report.md").read_text())
+        review = json.loads((output / "review-manifest.json").read_text())
+        self.assertEqual([e["path"] for e in review["files"]], ["one.step"])
+        self.assertEqual(review["files"][0]["sha256"], result["sha256"])
 
     def test_timing_gate_and_retained_comparison_meshes(self):
         self.model("one.step")

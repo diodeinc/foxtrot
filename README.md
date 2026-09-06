@@ -96,6 +96,22 @@ OCCT comparison; its f32 precision does not gate browser output. Reports identif
 their classification basis. Older workers retain the legacy strict STL gate;
 changes between these methodologies are reclassifications, not repaired models.
 
+For fast browser-only iteration, use `--meshes none`: the worker computes the
+same browser diagnostics but skips STL serialization, disk writes and Python
+geometry validation. Use `--meshes all` on a focused selection when you need
+world-coordinate geometry or `--occt`. Reports list failures and quality-review
+cases before unflagged successes. `review-manifest.json` selects failures and
+quality-flagged models with their source hashes; replay it with `--manifest`
+to investigate only that set, without another full scan.
+
+To capture the exact browser buffer for a Three.js reproduction:
+```sh
+target/release/examples/corpus_worker model.step metrics.json - browser.bin
+```
+`browser.bin` contains little-endian f32 values with stride nine: position,
+normal, color, expanded three vertices per triangle. No STEP reparsing or
+alternate mesh conversion is required on the JavaScript side.
+
 ### Select, benchmark, compare
 
 ```sh

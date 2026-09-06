@@ -190,7 +190,7 @@ def run_file(entry, args):
         str(args.worker),
         str(source),
         str(directory / "metrics.json"),
-        str(directory / "mesh.stl"),
+        "-" if args.meshes == "none" else str(directory / "mesh.stl"),
     ]
     result["reproduce"] = shlex.join(
         ["env", f"RAYON_NUM_THREADS={args.threads}", "RUST_BACKTRACE=1"] + command
@@ -419,20 +419,22 @@ def markdown(report):
         "",
         f"Status counts: {dict(Counter(r['status'] for r in report['results']))}",
         "",
-        "| Model | Status | Median parse + mesh (ms) | Triangles | Diagnostics |",
-        "| --- | --- | ---: | ---: | --- |",
+        "| Model | Status | Median parse + mesh (ms) | Triangles | Quality review | Diagnostics |",
+        "| --- | --- | ---: | ---: | --- | --- |",
     ]
     for r in sorted(
         report["results"],
         key=lambda r: (
             r["status"] == "ok",
+            not any(r.get("quality_diagnostics", {}).values()),
             -r.get("timing", {}).get("process_ms", {}).get("median", 0),
         ),
     ):
         name = r["path"].replace("|", "\\|").replace("\n", " ")
         median = r.get("timing", {}).get("process_ms", {}).get("median", 0)
+        quality = ", ".join(f"{k}: {v}" for k, v in r.get("quality_diagnostics", {}).items() if v)
         lines.append(
-            f"| {name} | {r['status']} | {median:.3f} | {r.get('metrics', {}).get('triangles', '—')} | [artifacts]({r['artifacts']}/result.json) |"
+            f"| {name} | {r['status']} | {median:.3f} | {r.get('metrics', {}).get('triangles', '—')} | {quality or '—'} | [artifacts]({r['artifacts']}/result.json) |"
         )
     lines += ["", "## Baseline changes", ""] + [f"- {c}" for c in report["changes"]]
     lines += [
@@ -502,7 +504,8 @@ def main(argv=None):
         default=60,
         help="seconds per invocation, including OCCT",
     )
-    parser.add_argument("--meshes", choices=["all", "failures"], default="failures")
+    parser.add_argument("--meshes", choices=["none", "all", "failures"], default="failures",
+                        help="none skips STL export and validation; requires a browser-metric worker")
     parser.add_argument("--occt", action="store_true")
     parser.add_argument("--relative-tolerance", type=nonnegative, default=0.05)
     parser.add_argument("--absolute-tolerance", type=nonnegative, default=0.01)
@@ -525,6 +528,8 @@ def main(argv=None):
         )
     if args.timing_threshold is not None and not args.compare:
         parser.error("--timing-threshold requires --compare")
+    if args.meshes == "none" and args.occt:
+        parser.error("--occt requires STL export; use --meshes failures or all")
     args.root, args.output, args.worker = (
         args.root.resolve(),
         args.output.resolve(),
@@ -614,6 +619,13 @@ def main(argv=None):
                 report["results"], baseline, config, args.timing_threshold
             )
         write_json(args.output / "results.json", report)
+        review = {
+            r["path"] for r in report["results"]
+            if r["status"] != "ok" or any(r.get("quality_diagnostics", {}).values())
+        }
+        write_json(args.output / "review-manifest.json", {
+            "schema": SCHEMA, "files": [e for e in entries if e["path"] in review],
+        })
         (args.output / "report.md").write_text(markdown(report))
         print(f"Report: {args.output / 'report.md'}")
         return int(
