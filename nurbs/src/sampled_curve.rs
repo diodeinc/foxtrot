@@ -71,11 +71,11 @@ impl<const N: usize> SampledCurve<N>
                     let candidate = (u + alpha * step).clamp(min, max);
                     let candidate_r = self.curve.point(candidate) - P;
                     let slope = gradient * speed * ((candidate - u) / range);
-                    let change = 0.5 * dot(&(candidate_r - r), &(candidate_r + r));
+                    let change = 0.5 * crate::squared_norm_difference(candidate_r, r);
                     let roundoff = TOL * dot(&(candidate_r.abs() + r.abs()), &position_scale);
                     if slope < 0.0 && change <= 1e-4 * slope + roundoff {
                         if accepted.map_or(true, |(_, other_r)|
-                            dot(&(candidate_r - other_r), &(candidate_r + other_r)) < 0.) {
+                            crate::squared_norm_difference(candidate_r, other_r) < 0.) {
                             accepted = Some((candidate, candidate_r));
                         }
                         break;

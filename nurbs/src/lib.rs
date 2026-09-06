@@ -25,6 +25,12 @@ fn rational_difference(p: nalgebra_glm::DVec4, origin: nalgebra_glm::DVec4) -> n
     nalgebra_glm::DVec4::new(xyz.x, xyz.y, xyz.z, p.w - origin.w)
 }
 
+/// Compute `a.norm_squared() - b.norm_squared()` in factored form so a small
+/// resolved change is not erased by subtracting two large squared norms.
+fn squared_norm_difference(a: nalgebra_glm::DVec3, b: nalgebra_glm::DVec3) -> f64 {
+    nalgebra_glm::dot(&(a - b), &(a + b))
+}
+
 pub use crate::abstract_curve::AbstractCurve;
 pub use crate::abstract_surface::AbstractSurface;
 pub use crate::bspline_curve::BSplineCurve;

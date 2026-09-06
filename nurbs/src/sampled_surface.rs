@@ -294,7 +294,7 @@ where
                         // has no predicted gain; it cannot prove convergence.
                         if prediction(bound) >= 0. { continue; }
                         let bound_r = self.surf.derivs_in_span::<0>(bound, m.spans, P)[0][0];
-                        if dot(&(bound_r - candidate_r), &(bound_r + candidate_r)) <= 0. {
+                        if crate::squared_norm_difference(bound_r, candidate_r) <= 0. {
                             candidate = bound;
                             candidate_r = bound_r;
                         }
@@ -302,12 +302,12 @@ where
                     let predicted = prediction(candidate);
                     // Compare residual distances in factored form to retain
                     // small improvements near a nonzero normal offset.
-                    let change = 0.5 * dot(&(candidate_r - m.residual), &(candidate_r + m.residual));
+                    let change = 0.5 * crate::squared_norm_difference(candidate_r, m.residual);
                     let roundoff = PROJECTION_TOL
                         * dot(&(candidate_r.abs() + m.residual.abs()), &m.position_scale);
                     if predicted < 0. && change <= 0.1 * predicted + roundoff
                         && accepted.as_ref().map_or(true, |(_, best, _)|
-                            dot(&(candidate_r - best), &(candidate_r + best)) < 0.) {
+                            crate::squared_norm_difference(candidate_r, *best) < 0.) {
                         // Roundoff may permit a step without a resolved gain.
                         // Such acceptance is not evidence that the quadratic
                         // fits: reduce its radius when it overpredicts descent.
