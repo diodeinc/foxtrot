@@ -610,25 +610,6 @@ impl Surface {
         Ok(pts)
     }
 
-    fn periodic_uv_periods(&self) -> (Option<f64>, Option<f64>) {
-        match self {
-            Surface::NURBS { surf, .. } => {
-                let u_period = if surf.surf.u_open {
-                    None
-                } else {
-                    Some(surf.surf.max_u() - surf.surf.min_u())
-                };
-                let v_period = if surf.surf.v_open {
-                    None
-                } else {
-                    Some((surf.surf.max_v() - surf.surf.min_v()) * surf.surf.aspect_ratio())
-                };
-                (u_period, v_period)
-            },
-            _ => (None, None),
-        }
-    }
-
     fn torus_angles(mat_i: DMat4, point: DVec3,
                     major_radius: f64) -> Result<(f64, f64), Error> {
         let p = (mat_i * DVec4::new(
@@ -793,22 +774,17 @@ impl Surface {
                            pts: &mut [(f64, f64)],
                            edges: &[(usize, usize)],
                            ranges: &[(usize, usize, bool)]) {
-        if ranges.is_empty() {
-            return;
-        }
-        if matches!(self, Surface::NURBS { chart: SplineChart::Polar { .. }, .. }) {
-            return;
-        }
-        let (u_period, v_period) = self.periodic_uv_periods();
-        if u_period.is_none() && v_period.is_none() {
-            return;
-        }
+        let Self::NURBS { surf, chart: SplineChart::Cartesian { v_scale } } = self else { return; };
+        let periods = [
+            (!surf.surf.u_open).then(|| surf.surf.max_u() - surf.surf.min_u()),
+            (!surf.surf.v_open).then(|| (surf.surf.max_v() - surf.surf.min_v()) * v_scale),
+        ];
 
         for &(start_edge, end_edge, single_edge_bound) in ranges {
             if start_edge >= end_edge || end_edge > edges.len() {
                 continue;
             }
-            for (coord, period) in [u_period, v_period].iter().enumerate() {
+            for (coord, period) in periods.iter().enumerate() {
                 if let Some(period) = period {
                     Self::unwrap_periodic_coord(
                         pts, edges, start_edge, end_edge, coord, *period, single_edge_bound);
