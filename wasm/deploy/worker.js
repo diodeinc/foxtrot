@@ -1,13 +1,19 @@
 importScripts("wasm.js");
 
-const { step_to_triangle_buf, init_log } = wasm_bindgen;
+const { tessellate_step, init_log } = wasm_bindgen;
 async function run() {
     await wasm_bindgen();
     init_log();
 
     onmessage = function(e) {
-        var triangles = step_to_triangle_buf(e.data);
-        postMessage(triangles);
+        try {
+            const outcome = tessellate_step(e.data);
+            postMessage(outcome, [outcome.triangles.buffer]);
+        } catch (error) {
+            postMessage({schema: 2, completion: "failed", failures: [{
+                kind: "input_error", message: String(error)
+            }]});
+        }
     }
 }
 run();
