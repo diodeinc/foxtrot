@@ -1,14 +1,19 @@
-use std::f64::{EPSILON, consts::PI};
+use std::f64::{consts::PI, EPSILON};
 
+use glm::{DMat4, DVec2, DVec3, DVec4};
 use nalgebra_glm as glm;
-use glm::{DVec2, DVec3, DVec4, DMat4};
 
+use crate::{
+    mesh::{Mesh, Triangle, Vertex},
+    Error,
+};
 use nurbs::{AbstractSurface, SampledSurface};
-use crate::{Error, mesh::{Mesh, Triangle, Vertex}};
 
 #[derive(Debug, Clone)]
 pub enum SplineChart {
-    Cartesian { v_scale: f64 },
+    Cartesian {
+        v_scale: f64,
+    },
     Polar {
         angular: usize,
         origin: DVec2,
@@ -21,22 +26,33 @@ impl SplineChart {
     fn lower(&self, raw: DVec2) -> DVec2 {
         match *self {
             Self::Cartesian { v_scale } => DVec2::new(raw.x, raw.y * v_scale),
-            Self::Polar { angular, origin, scale, .. } => {
+            Self::Polar {
+                angular,
+                origin,
+                scale,
+                ..
+            } => {
                 let radial = 1 - angular;
                 let radius = (raw[radial] - origin[radial]) / scale[radial];
-                let angle = 2.0 * PI * (raw[angular] - origin[angular]).rem_euclid(scale[angular]) / scale[angular];
+                let angle = 2.0 * PI * (raw[angular] - origin[angular]).rem_euclid(scale[angular])
+                    / scale[angular];
                 let mut mapped = DVec2::zeros();
                 mapped[angular] = radius * angle.cos();
                 mapped[radial] = -scale[radial].signum() * radius * angle.sin();
                 mapped
-            },
+            }
         }
     }
 
     fn raw(&self, mapped: DVec2) -> Option<DVec2> {
         match *self {
             Self::Cartesian { v_scale } => Some(DVec2::new(mapped.x, mapped.y / v_scale)),
-            Self::Polar { angular, origin, scale, bounds } => {
+            Self::Polar {
+                angular,
+                origin,
+                scale,
+                bounds,
+            } => {
                 let radial = 1 - angular;
                 let radius = mapped.norm();
                 let sin = -scale[radial].signum() * mapped[radial];
@@ -55,10 +71,9 @@ impl SplineChart {
                     raw[i] = raw[i].clamp(bounds[0][i], bounds[1][i]);
                 }
                 Some(raw)
-            },
+            }
         }
     }
-
 }
 
 // Represents a surface in 3D space, with a function to project a 3D point
@@ -71,8 +86,6 @@ pub enum Surface {
         mat: DMat4,
         mat_i: DMat4,
         radius: f64,
-        z_min: f64,
-        z_max: f64,
     },
     Plane {
         normal: DVec3,
@@ -84,11 +97,13 @@ pub enum Surface {
         mat_i: DMat4,
         angle: f64,
     },
-    NURBS { surf: SampledSurface<4>, chart: SplineChart },
+    NURBS {
+        surf: SampledSurface<4>,
+        uncertainty: f64,
+        has_seam: bool,
+    },
     Sphere {
         location: DVec3,
-        mat: DMat4,     // uv to world
-        mat_i: DMat4,   // world to uv
         radius: f64,
     },
     Torus {
@@ -98,51 +113,100 @@ pub enum Surface {
         mat_i: DMat4,
         major_radius: f64,
         minor_radius: f64,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum FaceChart {
+    Direct,
+    Cylinder {
+        z_min: f64,
+        z_max: f64,
+    },
+    Sphere {
+        mat: DMat4,
+        mat_i: DMat4,
+    },
+    Torus {
         polar_major: bool,
         radial_start: f64,
     },
+    Spline(SplineChart),
+}
+
+/// A face-specific chart over immutable surface geometry.  It can only be
+/// created by `Surface::prepare`, so chart and geometry cannot be mismatched.
+#[derive(Debug)]
+pub struct PreparedSurface<'a> {
+    surface: &'a Surface,
+    chart: FaceChart,
 }
 
 impl Surface {
     pub fn new_nurbs(surf: SampledSurface<4>, uncertainty: f64, has_seam: bool) -> Self {
         if let Some(normal) = surf.surf.bilinear_plane_normal() {
-            return Self::new_plane(normal, DVec3::zeros(), DVec3::zeros())
+            return Self::new_plane(normal)
                 .expect("regular planar patch has a nonzero finite normal");
         }
-        // Bounded, nonperiodic splines can still have matching endpoint
-        // iso-curves. Identify the seam geometrically for the chart without
-        // changing their knots, endpoint derivatives or bounded inverse domain.
+        Surface::NURBS {
+            surf,
+            uncertainty,
+            has_seam,
+        }
+    }
+
+    fn spline_chart(surf: &SampledSurface<4>, uncertainty: f64, has_seam: bool) -> SplineChart {
         let periodic = [
-            !surf.surf.u_open || (has_seam && surf.surf.rational_boundaries_coincide(0, uncertainty)),
-            !surf.surf.v_open || (has_seam && surf.surf.rational_boundaries_coincide(1, uncertainty)),
+            !surf.surf.u_open
+                || (has_seam && surf.surf.rational_boundaries_coincide(0, uncertainty)),
+            !surf.surf.v_open
+                || (has_seam && surf.surf.rational_boundaries_coincide(1, uncertainty)),
         ];
-        let bounds = [DVec2::new(surf.surf.min_u(), surf.surf.min_v()),
-                      DVec2::new(surf.surf.max_u(), surf.surf.max_v())];
-        let chart = (0..2).find_map(|angular| {
-            let radial = 1 - angular;
-            if periodic[radial] { return None; }
-            // Without a closed angular direction, a short boundary is not a
-            // collapsed edge. Source uncertainty must not erase its extent.
-            let pole_tolerance = if periodic[angular] { uncertainty } else { 0. };
-            let min_point = surf.surf.rational_boundary_is_point(radial, bounds[0][radial], pole_tolerance);
-            let max_point = surf.surf.rational_boundary_is_point(radial, bounds[1][radial], pole_tolerance);
-            if (min_point && max_point) || (!periodic[angular] && !min_point && !max_point) {
-                return None;
-            }
-            let mut origin = bounds[0];
-            let mut scale = bounds[1] - bounds[0];
-            if max_point {
-                origin[radial] = bounds[1][radial];
-                scale[radial] = -scale[radial];
-            } else if !min_point {
-                origin[radial] -= scale[radial];
-            }
-            // A bounded sector occupies a half disk: its angular ends stay
-            // distinct, but every parameter at the collapsed edge is the pole.
-            if !periodic[angular] { scale[angular] *= 2.0; }
-            Some(SplineChart::Polar { angular, origin, scale, bounds })
-        }).unwrap_or_else(|| SplineChart::Cartesian { v_scale: surf.surf.aspect_ratio() });
-        Surface::NURBS { surf, chart }
+        let bounds = [
+            DVec2::new(surf.surf.min_u(), surf.surf.min_v()),
+            DVec2::new(surf.surf.max_u(), surf.surf.max_v()),
+        ];
+        (0..2)
+            .find_map(|angular| {
+                let radial = 1 - angular;
+                if periodic[radial] {
+                    return None;
+                }
+                // Without a closed angular direction, a short boundary is not a
+                // collapsed edge. Source uncertainty must not erase its extent.
+                let pole_tolerance = if periodic[angular] { uncertainty } else { 0. };
+                let min_point =
+                    surf.surf
+                        .rational_boundary_is_point(radial, bounds[0][radial], pole_tolerance);
+                let max_point =
+                    surf.surf
+                        .rational_boundary_is_point(radial, bounds[1][radial], pole_tolerance);
+                if (min_point && max_point) || (!periodic[angular] && !min_point && !max_point) {
+                    return None;
+                }
+                let mut origin = bounds[0];
+                let mut scale = bounds[1] - bounds[0];
+                if max_point {
+                    origin[radial] = bounds[1][radial];
+                    scale[radial] = -scale[radial];
+                } else if !min_point {
+                    origin[radial] -= scale[radial];
+                }
+                // A bounded sector occupies a half disk: its angular ends stay
+                // distinct, but every parameter at the collapsed edge is the pole.
+                if !periodic[angular] {
+                    scale[angular] *= 2.0;
+                }
+                Some(SplineChart::Polar {
+                    angular,
+                    origin,
+                    scale,
+                    bounds,
+                })
+            })
+            .unwrap_or_else(|| SplineChart::Cartesian {
+                v_scale: surf.surf.aspect_ratio(),
+            })
     }
 
     fn fallback_perpendicular(axis: DVec3) -> DVec3 {
@@ -155,55 +219,78 @@ impl Surface {
     }
 
     pub fn new_sphere(location: DVec3, radius: f64) -> Result<Self, Error> {
-        Ok(Surface::Sphere {
-            // mat and mat_i are built in prepare()
-            mat: DMat4::identity(),
-            mat_i: DMat4::identity(),
-            location, radius,
-        })
+        Ok(Surface::Sphere { location, radius })
     }
-    pub fn new_cylinder(axis: DVec3, ref_direction: DVec3, location: DVec3, radius: f64)
-        -> Result<Self, Error>
-    {
+    pub fn new_cylinder(
+        axis: DVec3,
+        ref_direction: DVec3,
+        location: DVec3,
+        radius: f64,
+    ) -> Result<Self, Error> {
         let mat = Self::make_rigid_transform(axis, ref_direction, location);
-        let mat_i = mat.try_inverse()
+        let mat_i = mat
+            .try_inverse()
             .ok_or(Error::SingularTransform("cylinder transform"))?;
         Ok(Surface::Cylinder {
             mat,
             mat_i,
-            axis, radius, location,
-            z_min: 0.0,
-            z_max: 0.0,
+            axis,
+            radius,
+            location,
         })
     }
 
-    pub fn new_torus(location: DVec3, axis: DVec3,
-                     major_radius: f64, minor_radius: f64) -> Result<Self, Error>
-    {
+    pub fn new_torus(
+        location: DVec3,
+        axis: DVec3,
+        major_radius: f64,
+        minor_radius: f64,
+    ) -> Result<Self, Error> {
         let ref_direction = Self::fallback_perpendicular(axis);
         Self::new_torus_with_ref_direction(
-            location, axis, ref_direction, major_radius, minor_radius)
+            location,
+            axis,
+            ref_direction,
+            major_radius,
+            minor_radius,
+        )
     }
 
-    pub fn new_torus_with_ref_direction(location: DVec3, axis: DVec3,
-                     ref_direction: DVec3,
-                     major_radius: f64, minor_radius: f64) -> Result<Self, Error>
-    {
+    pub fn new_torus_with_ref_direction(
+        location: DVec3,
+        axis: DVec3,
+        ref_direction: DVec3,
+        major_radius: f64,
+        minor_radius: f64,
+    ) -> Result<Self, Error> {
         // Torus parameterization uses local X as the revolution axis and
         // local Z as the zero-angle radial direction.
         let mat = Self::make_rigid_transform(ref_direction, axis, location);
-        let mat_i = mat.try_inverse()
+        let mat_i = mat
+            .try_inverse()
             .ok_or(Error::SingularTransform("torus transform"))?;
         Ok(Surface::Torus {
-            mat, mat_i, location, axis, major_radius, minor_radius,
-            polar_major: true, radial_start: 0.0,
+            mat,
+            mat_i,
+            location,
+            axis,
+            major_radius,
+            minor_radius,
         })
     }
 
     /// Tessellate a compact surface with no physical trim. Identify seam
     /// vertices by wrapped grid indices instead of cutting a planar polygon.
     pub fn untrimmed_mesh(&self, color: DVec3, same_sense: bool) -> Option<Mesh> {
-        let Self::Torus { mat, major_radius, minor_radius, .. } = self else { return None; };
+        let Self::Torus {
+            mat,
+            major_radius,
+            minor_radius,
+            ..
+        } = self
+        else {
+            return None;
+        };
         if !(major_radius > minor_radius && *minor_radius > 0.) {
             return None;
         }
@@ -217,7 +304,11 @@ impl Surface {
                 let radius = major_radius + minor_radius * cv;
                 let pos = mat * DVec4::new(minor_radius * sv, radius * su, radius * cu, 1.);
                 let norm = mat * DVec4::new(sv, cv * su, cv * cu, 0.);
-                mesh.verts.push(Vertex { pos: pos.xyz(), norm: norm.xyz() * sense, color });
+                mesh.verts.push(Vertex {
+                    pos: pos.xyz(),
+                    norm: norm.xyz() * sense,
+                    color,
+                });
                 let a = u * N + v;
                 let b = ((u + 1) % N) * N + v;
                 let c = ((u + 1) % N) * N + (v + 1) % N;
@@ -225,14 +316,16 @@ impl Surface {
                 // Su × Sv points inward for this parameterization.
                 for [i, j, k] in [[a, c, b], [a, d, c]] {
                     let verts = if same_sense { [i, j, k] } else { [i, k, j] };
-                    mesh.triangles.push(Triangle { verts: verts.into() });
+                    mesh.triangles.push(Triangle {
+                        verts: verts.into(),
+                    });
                 }
             }
         }
         Some(mesh)
     }
 
-    pub fn new_plane(axis: DVec3, _ref_direction: DVec3, _location: DVec3) -> Result<Self, Error> {
+    pub fn new_plane(axis: DVec3) -> Result<Self, Error> {
         let dropped = axis.iamax();
         let scale = axis[dropped].abs();
         if scale == 0.0 || !axis.iter().all(|x| x.is_finite()) {
@@ -248,20 +341,25 @@ impl Surface {
         })
     }
 
-    pub fn new_cone(axis: DVec3, ref_direction: DVec3, location: DVec3, angle: f64)
-        -> Result<Self, Error>
-    {
+    pub fn new_cone(
+        axis: DVec3,
+        ref_direction: DVec3,
+        location: DVec3,
+        angle: f64,
+    ) -> Result<Self, Error> {
         let mat = Self::make_rigid_transform(axis, ref_direction, location);
-        let mat_i = mat.try_inverse()
+        let mat_i = mat
+            .try_inverse()
             .ok_or(Error::SingularTransform("cone transform"))?;
-        Ok(Surface::Cone {
-            mat,
-            mat_i,
-            angle,
-        })
+        Ok(Surface::Cone { mat, mat_i, angle })
     }
 
-    pub fn make_affine_transform(z_world: DVec3, x_world: DVec3, y_world: DVec3, origin_world: DVec3) -> DMat4 {
+    pub fn make_affine_transform(
+        z_world: DVec3,
+        x_world: DVec3,
+        y_world: DVec3,
+        origin_world: DVec3,
+    ) -> DMat4 {
         let mut mat = DMat4::identity();
         mat.set_column(0, &glm::vec3_to_vec4(&x_world));
         mat.set_column(1, &glm::vec3_to_vec4(&y_world));
@@ -291,16 +389,113 @@ impl Surface {
         Self::make_affine_transform(z, x, y, origin_world)
     }
 
+    pub fn prepare<'a>(
+        &'a self,
+        verts: &[Vertex],
+        boundary_edges: &[(usize, usize)],
+        same_sense: bool,
+    ) -> Result<PreparedSurface<'a>, Error> {
+        if verts.is_empty() {
+            return Err(Error::InvalidGeometry("surface has no vertices"));
+        }
+        let chart = match self {
+            Surface::Cylinder { mat_i, .. } => {
+                let mut z_min = f64::INFINITY;
+                let mut z_max = f64::NEG_INFINITY;
+                for v in verts {
+                    let p = mat_i * DVec4::new(v.pos.x, v.pos.y, v.pos.z, 1.0);
+                    z_min = z_min.min(p.z);
+                    z_max = z_max.max(p.z);
+                }
+                FaceChart::Cylinder { z_min, z_max }
+            }
+            Surface::Sphere { location, .. } => {
+                let points: Vec<_> = verts
+                    .iter()
+                    .map(|v| {
+                        let offset = v.pos - location;
+                        if offset.norm_squared() == 0.0 {
+                            Err(Error::InvalidGeometry("sphere boundary at center"))
+                        } else {
+                            Ok(offset.normalize())
+                        }
+                    })
+                    .collect::<Result<_, _>>()?;
+                let oriented_edges: Vec<_> = boundary_edges
+                    .iter()
+                    .map(|&(a, b)| if same_sense { (a, b) } else { (b, a) })
+                    .collect();
+                let center = PreparedSurface::sphere_chart(&points, &oriented_edges)?;
+                let axis = Self::fallback_perpendicular(center);
+                let mat = Self::make_rigid_transform(axis, center, *location);
+                let mat_i = mat
+                    .try_inverse()
+                    .ok_or(Error::SingularTransform("sphere transform"))?;
+                FaceChart::Sphere { mat, mat_i }
+            }
+            Surface::Torus {
+                mat_i,
+                major_radius,
+                ..
+            } => {
+                let mut major_angles = Vec::with_capacity(verts.len());
+                let mut minor_angles = Vec::with_capacity(verts.len());
+                for vertex in verts {
+                    let (major, minor) =
+                        PreparedSurface::torus_angles(*mat_i, vertex.pos, *major_radius)?;
+                    major_angles.push(major);
+                    minor_angles.push(minor);
+                }
+                let (major_start, major_span) =
+                    PreparedSurface::smallest_circular_arc(&mut major_angles);
+                let (minor_start, minor_span) =
+                    PreparedSurface::smallest_circular_arc(&mut minor_angles);
+                let polar_major = major_span >= minor_span;
+                FaceChart::Torus {
+                    polar_major,
+                    radial_start: if polar_major {
+                        minor_start
+                    } else {
+                        major_start
+                    },
+                }
+            }
+            Surface::NURBS {
+                surf,
+                uncertainty,
+                has_seam,
+            } => FaceChart::Spline(Self::spline_chart(surf, *uncertainty, *has_seam)),
+            _ => FaceChart::Direct,
+        };
+        Ok(PreparedSurface {
+            surface: self,
+            chart,
+        })
+    }
+}
+
+impl PreparedSurface<'_> {
     fn surf_lower(p: DVec3, surf: &SampledSurface<4>) -> Result<DVec2, Error> {
         surf.uv_from_point(p).ok_or(Error::CouldNotLower)
     }
 
-    fn spline_raw(surf: &SampledSurface<4>, chart: &SplineChart,
-                  mapped: DVec2) -> Option<DVec2> {
-        chart.raw(mapped).map(|raw| DVec2::new(
-            Self::spline_parameter(raw.x, surf.surf.min_u(), surf.surf.max_u(), surf.surf.u_open),
-            Self::spline_parameter(raw.y, surf.surf.min_v(), surf.surf.max_v(), surf.surf.v_open),
-        ))
+    fn spline_raw(surf: &SampledSurface<4>, chart: &SplineChart, mapped: DVec2) -> Option<DVec2> {
+        chart.raw(mapped).map(|raw| {
+            DVec2::new(
+                Self::spline_parameter(
+                    raw.x,
+                    surf.surf.min_u(),
+                    surf.surf.max_u(),
+                    surf.surf.u_open,
+                ),
+                Self::spline_parameter(
+                    raw.y,
+                    surf.surf.min_v(),
+                    surf.surf.max_v(),
+                    surf.surf.v_open,
+                ),
+            )
+        })
     }
 
     /// Lowers a 3D point on a specific surface into a 2D space defined by
@@ -308,16 +503,24 @@ impl Surface {
     /// to ensure that `prepare` is called first.
     fn lower(&self, p: DVec3) -> Result<DVec2, Error> {
         let p_ = DVec4::new(p.x, p.y, p.z, 1.0);
-        match self {
-            Surface::Plane { coordinates, orientation, .. } => {
-                Ok(DVec2::new(p[coordinates[0]], p[coordinates[1]] * orientation))
-            },
-            Surface::Cone { mat_i, .. } => {
+        match (self.surface, &self.chart) {
+            (
+                Surface::Plane {
+                    coordinates,
+                    orientation,
+                    ..
+                },
+                FaceChart::Direct,
+            ) => Ok(DVec2::new(
+                p[coordinates[0]],
+                p[coordinates[1]] * orientation,
+            )),
+            (Surface::Cone { mat_i, .. }, FaceChart::Direct) => {
                 let xy = glm::vec4_to_vec2(&(mat_i * p_));
                 Ok(DVec2::new(-xy.x, xy.y))
-            },
+            }
 
-            Surface::Cylinder { mat_i, z_min, z_max, .. } => {
+            (Surface::Cylinder { mat_i, .. }, FaceChart::Cylinder { z_min, z_max }) => {
                 let p = mat_i * p_;
                 // We convert the Z coordinates to either add or subtract from
                 // the radius, so that we maintain the right topology (instead
@@ -332,9 +535,19 @@ impl Surface {
                 let z = (p.z - z_min) / dz;
                 let scale = 1.0 / (1.0 + z);
                 Ok(DVec2::new(p.x * scale, p.y * scale))
-            },
-            Surface::Torus { mat_i, major_radius, minor_radius,
-                             polar_major, radial_start, .. } => {
+            }
+            (
+                Surface::Torus {
+                    mat_i,
+                    major_radius,
+                    minor_radius,
+                    ..
+                },
+                FaceChart::Torus {
+                    polar_major,
+                    radial_start,
+                },
+            ) => {
                 if major_radius.abs() < EPSILON || minor_radius.abs() < EPSILON {
                     return Err(Error::InvalidGeometry("torus has a zero radius"));
                 }
@@ -357,9 +570,10 @@ impl Surface {
                 // Rotate the point so that it's got Y = 0, so we can calculate
                 // the minor angle
                 let z = DVec3::new(0.0, major_angle.sin(), major_angle.cos());
-                let new_mat = Self::make_rigid_transform(
-                    z, DVec3::new(1.0, 0.0, 0.0), z * *major_radius);
-                let new_mat_i = new_mat.try_inverse()
+                let new_mat =
+                    Surface::make_rigid_transform(z, DVec3::new(1.0, 0.0, 0.0), z * *major_radius);
+                let new_mat_i = new_mat
+                    .try_inverse()
                     .ok_or(Error::SingularTransform("torus lowering transform"))?;
                 let new_p = new_mat_i * DVec4::new(p.x, p.y, p.z, 1.0);
 
@@ -368,32 +582,34 @@ impl Surface {
                 // Keep the boundary's wider periodic direction as the polar
                 // coordinate, so full rings stay closed without an artificial
                 // seam. Unroll the narrower direction radially.
-                let (polar_angle, radial_angle, base_radius, radial_scale) =
-                    if *polar_major {
-                        (major_angle, minor_angle,
-                         major_radius.abs(), minor_radius.abs())
-                    } else {
-                        (minor_angle, major_angle,
-                         minor_radius.abs(), major_radius.abs())
-                    };
-                let radial_angle = Self::unwrap_from_start(
-                    radial_angle, *radial_start);
-                let radius = base_radius +
-                    (radial_angle - *radial_start) * radial_scale;
+                let (polar_angle, radial_angle, base_radius, radial_scale) = if *polar_major {
+                    (
+                        major_angle,
+                        minor_angle,
+                        major_radius.abs(),
+                        minor_radius.abs(),
+                    )
+                } else {
+                    (
+                        minor_angle,
+                        major_angle,
+                        minor_radius.abs(),
+                        major_radius.abs(),
+                    )
+                };
+                let radial_angle = Self::unwrap_from_start(radial_angle, *radial_start);
+                let radius = base_radius + (radial_angle - *radial_start) * radial_scale;
                 // Exchanging major/minor parameter roles reverses the chart
                 // orientation. Reflect one coordinate to keep CCW outward.
                 let sin = polar_angle.sin() * if *polar_major { 1.0 } else { -1.0 };
-                Ok(DVec2::new(
-                    radius * polar_angle.cos(),
-                    radius * sin,
-                ))
-            },
-            Surface::NURBS { surf, chart } => {
+                Ok(DVec2::new(radius * polar_angle.cos(), radius * sin))
+            }
+            (Surface::NURBS { surf, .. }, FaceChart::Spline(chart)) => {
                 // Project before applying the chart. Source uncertainty does
                 // not make nearby regular points part of a collapsed pole.
                 Ok(chart.lower(Self::surf_lower(p, surf)?))
-            },
-            Surface::Sphere { mat_i, radius, .. } => {
+            }
+            (Surface::Sphere { radius, .. }, FaceChart::Sphere { mat_i, .. }) => {
                 // mat_i is constructed in prepare to be a reasonable basis
                 let p = (mat_i * p_).xyz() / *radius;
                 let r = p.yz().norm();
@@ -406,7 +622,8 @@ impl Surface {
                 } else {
                     yz * angle / yz.norm()
                 })
-            },
+            }
+            _ => unreachable!("prepared chart matches its surface geometry"),
         }
     }
 
@@ -426,16 +643,14 @@ impl Surface {
         let n = cross / cross_norm;
         let projected = p - n * p.dot(&n);
         let projected_norm = projected.norm();
-        let endpoint_distance = Self::angular_distance(p, a)
-            .min(Self::angular_distance(p, b));
+        let endpoint_distance = Self::angular_distance(p, a).min(Self::angular_distance(p, b));
         if projected_norm <= 32.0 * EPSILON {
             return Ok(endpoint_distance);
         }
         let projected = projected / projected_norm;
         let arc_angle = cross_norm.atan2(a.dot(&b));
         let on_arc = |x: DVec3| {
-            Self::angular_distance(a, x) <= arc_angle
-                && Self::angular_distance(x, b) <= arc_angle
+            Self::angular_distance(a, x) <= arc_angle && Self::angular_distance(x, b) <= arc_angle
         };
         let mut distance = endpoint_distance;
         if on_arc(projected) {
@@ -447,13 +662,22 @@ impl Surface {
         Ok(distance)
     }
 
-    fn spherical_winding_sum(q: DVec3, points: &[DVec3],
-                             edges: &[(usize, usize)]) -> Result<(f64, f64), Error> {
+    fn spherical_winding_sum(
+        q: DVec3,
+        points: &[DVec3],
+        edges: &[(usize, usize)],
+    ) -> Result<(f64, f64), Error> {
         let mut sum = 0.0;
         let mut magnitude = 0.0;
         for &(i, j) in edges {
-            let (a, b) = (*points.get(i).ok_or(Error::InvalidGeometry("boundary edge index"))?,
-                          *points.get(j).ok_or(Error::InvalidGeometry("boundary edge index"))?);
+            let (a, b) = (
+                *points
+                    .get(i)
+                    .ok_or(Error::InvalidGeometry("boundary edge index"))?,
+                *points
+                    .get(j)
+                    .ok_or(Error::InvalidGeometry("boundary edge index"))?,
+            );
             let numerator = q.dot(&a.cross(&b));
             let denominator = 1.0 + q.dot(&a) + a.dot(&b) + b.dot(&q);
             let term = 2.0 * numerator.atan2(denominator);
@@ -469,8 +693,12 @@ impl Surface {
     fn sphere_chart(points: &[DVec3], edges: &[(usize, usize)]) -> Result<DVec3, Error> {
         let mut candidates = Vec::with_capacity(edges.len());
         for (edge_index, &(i, j)) in edges.iter().enumerate() {
-            let a = *points.get(i).ok_or(Error::InvalidGeometry("boundary edge index"))?;
-            let b = *points.get(j).ok_or(Error::InvalidGeometry("boundary edge index"))?;
+            let a = *points
+                .get(i)
+                .ok_or(Error::InvalidGeometry("boundary edge index"))?;
+            let b = *points
+                .get(j)
+                .ok_or(Error::InvalidGeometry("boundary edge index"))?;
             let sum_norm = (a + b).norm();
             let cross_norm = a.cross(&b).norm();
             if sum_norm <= 32.0 * EPSILON {
@@ -488,12 +716,11 @@ impl Surface {
             let b = points[j];
             let m = (a + b).normalize();
             let n = a.cross(&b).normalize();
-            let mut clearance = Self::angular_distance(m, a)
-                .min(Self::angular_distance(m, b));
+            let mut clearance = Self::angular_distance(m, a).min(Self::angular_distance(m, b));
             for (edge_index, &(u, v)) in edges.iter().enumerate() {
                 if edge_index != selected {
-                    clearance = clearance.min(Self::point_minor_arc_distance(
-                        m, points[u], points[v])?);
+                    clearance =
+                        clearance.min(Self::point_minor_arc_distance(m, points[u], points[v])?);
                 }
             }
             let clearance_error = 64.0 * EPSILON * (edges.len() as f64 + 1.0);
@@ -511,72 +738,8 @@ impl Surface {
         Err(Error::CouldNotLower)
     }
 
-    fn prepare(&mut self, verts: &[Vertex], boundary_edges: &[(usize, usize)],
-               same_sense: bool) -> Result<(), Error> {
-        if verts.is_empty() {
-            return Err(Error::InvalidGeometry("surface has no vertices"));
-        }
-        match self {
-            Surface::Cylinder { mat_i, z_min, z_max, .. } => {
-                *z_min = std::f64::INFINITY;
-                *z_max = -std::f64::INFINITY;
-                for v in verts {
-                    let p = (*mat_i) * DVec4::new(v.pos.x, v.pos.y, v.pos.z, 1.0);
-                    if p.z < *z_min {
-                        *z_min = p.z;
-                    }
-                    if p.z > *z_max {
-                        *z_max = p.z;
-                    }
-                }
-            },
-            Surface::Sphere { mat, mat_i, location, .. } => {
-                let points: Vec<_> = verts.iter().map(|v| {
-                    let offset = v.pos - *location;
-                    if offset.norm_squared() == 0.0 {
-                        Err(Error::InvalidGeometry("sphere boundary at center"))
-                    } else {
-                        Ok(offset.normalize())
-                    }
-                }).collect::<Result<_, _>>()?;
-                let oriented_edges: Vec<_> = boundary_edges.iter().map(|&(a, b)| {
-                    if same_sense { (a, b) } else { (b, a) }
-                }).collect();
-                let chart_center = Self::sphere_chart(&points, &oriented_edges)?;
-                let axis = Self::fallback_perpendicular(chart_center);
-                *mat = Self::make_rigid_transform(axis, chart_center, *location);
-                *mat_i = mat
-                    .try_inverse()
-                    .ok_or(Error::SingularTransform("sphere transform"))?;
-            },
-            Surface::Torus { mat_i, major_radius,
-                             polar_major, radial_start, .. } => {
-                let mut major_angles = Vec::with_capacity(verts.len());
-                let mut minor_angles = Vec::with_capacity(verts.len());
-                for vertex in verts {
-                    let (major, minor) = Self::torus_angles(
-                        *mat_i, vertex.pos, *major_radius)?;
-                    major_angles.push(major);
-                    minor_angles.push(minor);
-                }
-                let (major_start, major_span) =
-                    Self::smallest_circular_arc(&mut major_angles);
-                let (minor_start, minor_span) =
-                    Self::smallest_circular_arc(&mut minor_angles);
-                *polar_major = major_span >= minor_span;
-                *radial_start = if *polar_major {
-                    minor_start
-                } else {
-                    major_start
-                };
-            },
-            _ => (),
-        }
-        Ok(())
-    }
-
     fn type_name(&self) -> &'static str {
-        match self {
+        match self.surface {
             Surface::Cylinder { .. } => "lower:Cylinder",
             Surface::Plane { .. } => "lower:Plane",
             Surface::Cone { .. } => "lower:Cone",
@@ -586,34 +749,23 @@ impl Surface {
         }
     }
 
-    pub fn lower_verts(&mut self, verts: &mut [Vertex], boundary_edges: &[(usize, usize)],
-                       same_sense: bool)
-        -> Result<Vec<(f64, f64)>, Error>
-    {
+    pub fn lower_verts(&self, verts: &[Vertex]) -> Result<Vec<(f64, f64)>, Error> {
         let name = self.type_name();
-        crate::timing::time(name, || self.lower_verts_inner(verts, boundary_edges, same_sense))
+        crate::timing::time(name, || self.lower_verts_inner(verts))
     }
 
-    fn lower_verts_inner(&mut self, verts: &mut [Vertex], boundary_edges: &[(usize, usize)],
-                         same_sense: bool)
-        -> Result<Vec<(f64, f64)>, Error>
-    {
-        self.prepare(verts, boundary_edges, same_sense)?;
+    fn lower_verts_inner(&self, verts: &[Vertex]) -> Result<Vec<(f64, f64)>, Error> {
         let mut pts = Vec::with_capacity(verts.len());
         for v in verts {
             // Project to the 2D subspace for triangulation
             let proj = self.lower(v.pos)?;
-            // Update the surface normal
-            v.norm = self.normal(v.pos, proj);
             pts.push((proj.x, proj.y));
         }
         Ok(pts)
     }
 
-    fn torus_angles(mat_i: DMat4, point: DVec3,
-                    major_radius: f64) -> Result<(f64, f64), Error> {
-        let p = (mat_i * DVec4::new(
-            point.x, point.y, point.z, 1.0)).xyz();
+    fn torus_angles(mat_i: DMat4, point: DVec3, major_radius: f64) -> Result<(f64, f64), Error> {
+        let p = (mat_i * DVec4::new(point.x, point.y, point.z, 1.0)).xyz();
         let major_angle = p.y.atan2(p.z);
         let radial = p.y.hypot(p.z);
         let minor_angle = p.x.atan2(radial - major_radius);
@@ -632,8 +784,7 @@ impl Surface {
         for angle in angles.iter_mut() {
             *angle = angle.rem_euclid(period);
         }
-        angles.sort_by(|a, b| a.partial_cmp(b)
-            .unwrap_or(std::cmp::Ordering::Equal));
+        angles.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut largest_gap = -1.0;
         let mut start = angles[0];
@@ -674,7 +825,11 @@ impl Surface {
     }
 
     fn uv_coord(p: (f64, f64), coord: usize) -> f64 {
-        if coord == 0 { p.0 } else { p.1 }
+        if coord == 0 {
+            p.0
+        } else {
+            p.1
+        }
     }
 
     fn set_uv_coord(p: &mut (f64, f64), coord: usize, value: f64) {
@@ -685,13 +840,15 @@ impl Surface {
         }
     }
 
-    fn unwrap_periodic_coord(pts: &mut [(f64, f64)],
-                             edges: &[(usize, usize)],
-                             start_edge: usize,
-                             end_edge: usize,
-                             coord: usize,
-                             period: f64,
-                             skip_large_closing_jump: bool) -> bool {
+    fn unwrap_periodic_coord(
+        pts: &mut [(f64, f64)],
+        edges: &[(usize, usize)],
+        start_edge: usize,
+        end_edge: usize,
+        coord: usize,
+        period: f64,
+        skip_large_closing_jump: bool,
+    ) -> bool {
         if period.abs() <= EPSILON || !period.is_finite() {
             return false;
         }
@@ -707,7 +864,8 @@ impl Surface {
             return false;
         }
 
-        let raw: Vec<_> = vertices.iter()
+        let raw: Vec<_> = vertices
+            .iter()
             .map(|&idx| Self::uv_coord(pts[idx], coord))
             .collect();
         let mut best = raw.clone();
@@ -770,11 +928,17 @@ impl Surface {
     /// crossing or zero-length constrained edges.  Walk each selected contour
     /// in order and shift periodic coordinates by whole periods so neighboring
     /// vertices stay close in the triangulation domain.
-    pub fn unwrap_periodic(&self,
-                           pts: &mut [(f64, f64)],
-                           edges: &[(usize, usize)],
-                           ranges: &[(usize, usize, bool)]) {
-        let Self::NURBS { surf, chart: SplineChart::Cartesian { v_scale } } = self else { return; };
+    pub fn unwrap_periodic(
+        &self,
+        pts: &mut [(f64, f64)],
+        edges: &[(usize, usize)],
+        ranges: &[(usize, usize, bool)],
+    ) {
+        let (Surface::NURBS { surf, .. }, FaceChart::Spline(SplineChart::Cartesian { v_scale })) =
+            (self.surface, &self.chart)
+        else {
+            return;
+        };
         let periods = [
             (!surf.surf.u_open).then(|| surf.surf.max_u() - surf.surf.min_u()),
             (!surf.surf.v_open).then(|| (surf.surf.max_v() - surf.surf.min_v()) * v_scale),
@@ -787,15 +951,22 @@ impl Surface {
             for (coord, period) in periods.iter().enumerate() {
                 if let Some(period) = period {
                     Self::unwrap_periodic_coord(
-                        pts, edges, start_edge, end_edge, coord, *period, single_edge_bound);
+                        pts,
+                        edges,
+                        start_edge,
+                        end_edge,
+                        coord,
+                        *period,
+                        single_edge_bound,
+                    );
                 }
             }
         }
     }
 
     pub fn raise(&self, uv: DVec2) -> Option<DVec3> {
-        match self {
-            Surface::Sphere { mat, radius, .. } => {
+        match (self.surface, &self.chart) {
+            (Surface::Sphere { radius, .. }, FaceChart::Sphere { mat, .. }) => {
                 let angle = uv.norm();
                 if angle > PI {
                     return None;
@@ -803,44 +974,57 @@ impl Surface {
                 let x = angle.cos();
 
                 // Calculate pre-transformed position
-                let pos = (*radius) * if uv.norm() < EPSILON {
-                    DVec3::new(x, 0.0, 0.0)
-                } else {
-                    let yz = uv.normalize() * angle.sin();
-                    DVec3::new(x, yz.x, yz.y)
-                };
+                let pos = (*radius)
+                    * if uv.norm() < EPSILON {
+                        DVec3::new(x, 0.0, 0.0)
+                    } else {
+                        let yz = uv.normalize() * angle.sin();
+                        DVec3::new(x, yz.x, yz.y)
+                    };
                 // Transform into world space
-                let pos = (mat * DVec4::new(pos.x, pos.y, pos.z, 1.0))
-                    .xyz();
+                let pos = (mat * DVec4::new(pos.x, pos.y, pos.z, 1.0)).xyz();
                 Some(pos)
-            },
-            Surface::NURBS { surf, chart, .. } =>
-                Self::spline_raw(surf, chart, uv).map(|raw| surf.surf.point(raw)),
-            Surface::Torus { mat, minor_radius, major_radius,
-                             polar_major, radial_start, .. } => {
+            }
+            (Surface::NURBS { surf, .. }, FaceChart::Spline(chart)) => {
+                Self::spline_raw(surf, chart, uv).map(|raw| surf.surf.point(raw))
+            }
+            (
+                Surface::Torus {
+                    mat,
+                    minor_radius,
+                    major_radius,
+                    ..
+                },
+                FaceChart::Torus {
+                    polar_major,
+                    radial_start,
+                },
+            ) => {
                 if major_radius.abs() < EPSILON || minor_radius.abs() < EPSILON {
                     return None;
                 }
                 let sin = if *polar_major { uv.y } else { -uv.y };
                 let polar_angle = sin.atan2(uv.x);
                 let (major_angle, minor_angle) = if *polar_major {
-                    (polar_angle,
-                     *radial_start +
-                         (uv.norm() - major_radius.abs()) / minor_radius.abs())
+                    (
+                        polar_angle,
+                        *radial_start + (uv.norm() - major_radius.abs()) / minor_radius.abs(),
+                    )
                 } else {
-                    (*radial_start +
-                         (uv.norm() - minor_radius.abs()) / major_radius.abs(),
-                     polar_angle)
+                    (
+                        *radial_start + (uv.norm() - minor_radius.abs()) / major_radius.abs(),
+                        polar_angle,
+                    )
                 };
                 let new_p = DVec3::new(minor_angle.sin(), 0.0, minor_angle.cos()) * *minor_radius;
 
                 let z = DVec3::new(0.0, major_angle.sin(), major_angle.cos());
-                let new_mat = Self::make_rigid_transform(
-                    z, DVec3::new(1.0, 0.0, 0.0), z * *major_radius);
+                let new_mat =
+                    Surface::make_rigid_transform(z, DVec3::new(1.0, 0.0, 0.0), z * *major_radius);
                 let p = new_mat * DVec4::new(new_p.x, new_p.y, new_p.z, 1.0);
 
                 Some((mat * p).xyz())
-            },
+            }
             _ => None,
         }
     }
@@ -865,9 +1049,12 @@ impl Surface {
         }
     }
 
-    fn add_torus_steiner_points(&self, pts: &mut Vec<(f64, f64)>,
-                                verts: &mut Vec<Vertex>, radial_scale: f64)
-    {
+    fn add_torus_steiner_points(
+        &self,
+        pts: &mut Vec<(f64, f64)>,
+        verts: &mut Vec<Vertex>,
+        radial_scale: f64,
+    ) {
         const ANGULAR_SAMPLES: usize = 32;
 
         let mut radii = Vec::with_capacity(pts.len());
@@ -884,20 +1071,20 @@ impl Surface {
             return;
         }
 
-        let radial_min = radii.iter().copied()
-            .fold(f64::INFINITY, f64::min);
-        let radial_max = radii.iter().copied()
-            .fold(f64::NEG_INFINITY, f64::max);
-        if !radial_min.is_finite() || !radial_max.is_finite() ||
-           radial_max - radial_min <= EPSILON
+        let radial_min = radii.iter().copied().fold(f64::INFINITY, f64::min);
+        let radial_max = radii.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        if !radial_min.is_finite() || !radial_max.is_finite() || radial_max - radial_min <= EPSILON
         {
             return;
         }
 
-        let (angular_start, measured_span) =
-            Self::smallest_circular_arc(&mut angles);
+        let (angular_start, measured_span) = Self::smallest_circular_arc(&mut angles);
         let full_revolution = measured_span > 1.5 * PI;
-        let angular_span = if full_revolution { 2.0 * PI } else { measured_span };
+        let angular_span = if full_revolution {
+            2.0 * PI
+        } else {
+            measured_span
+        };
         if angular_span <= EPSILON {
             return;
         }
@@ -909,8 +1096,7 @@ impl Surface {
         let radial_segments = (radial_angle * ANGULAR_SAMPLES as f64 / (2.0 * PI)).ceil() as usize;
         for radial_index in 1..radial_segments {
             let radial_fraction = radial_index as f64 / radial_segments as f64;
-            let radius = radial_min * (1.0 - radial_fraction) +
-                         radial_max * radial_fraction;
+            let radius = radial_min * (1.0 - radial_fraction) + radial_max * radial_fraction;
             for angular_index in 0..ANGULAR_SAMPLES {
                 let angular_fraction = if full_revolution {
                     (angular_index as f64 + 0.5) / ANGULAR_SAMPLES as f64
@@ -923,8 +1109,8 @@ impl Surface {
                     pts.push((uv.x, uv.y));
                     verts.push(Vertex {
                         pos,
-                        norm: self.normal(pos, uv),
-                        color: DVec3::new(0.0, 0.0, 0.0),
+                        norm: DVec3::zeros(),
+                        color: DVec3::zeros(),
                     });
                 }
             }
@@ -948,38 +1134,50 @@ impl Surface {
                 let y_frac = (y as f64 + 1.0) / (SAMPLES as f64 + 1.0);
                 let projected_v = y_frac * ymax + (1.0 - y_frac) * ymin;
                 let projected = DVec2::new(projected_u, projected_v);
-                let Some(raw_uv) = Self::spline_raw(surf, chart, projected) else { continue; };
+                let Some(raw_uv) = Self::spline_raw(surf, chart, projected) else {
+                    continue;
+                };
                 let pos = surf.surf.point(raw_uv);
                 pts.push((projected_u, projected_v));
                 verts.push(Vertex {
                     pos,
-                    norm: Self::surf_normal(raw_uv, surf),
-                    color: DVec3::new(0.0, 0.0, 0.0),
+                    norm: DVec3::zeros(),
+                    color: DVec3::zeros(),
                 });
             }
         }
     }
 
-    pub fn add_steiner_points(&self, pts: &mut Vec<(f64, f64)>,
-                                     verts: &mut Vec<Vertex>)
-    {
-        if let Surface::Torus { polar_major, major_radius, minor_radius, .. } = self {
-            let radial_scale = if *polar_major { minor_radius.abs() } else { major_radius.abs() };
+    pub fn add_steiner_points(&self, pts: &mut Vec<(f64, f64)>, verts: &mut Vec<Vertex>) {
+        if let (
+            Surface::Torus {
+                major_radius,
+                minor_radius,
+                ..
+            },
+            FaceChart::Torus { polar_major, .. },
+        ) = (self.surface, &self.chart)
+        {
+            let radial_scale = if *polar_major {
+                minor_radius.abs()
+            } else {
+                major_radius.abs()
+            };
             self.add_torus_steiner_points(pts, verts, radial_scale);
             return;
         }
 
-        match self {
-            Surface::NURBS { surf, chart, .. } => {
+        match (self.surface, &self.chart) {
+            (Surface::NURBS { surf, .. }, FaceChart::Spline(chart)) => {
                 self.add_spline_steiner_points(pts, verts, surf, chart);
                 return;
-            },
+            }
             _ => (),
         }
 
         let (xmin, xmax, ymin, ymax) = Self::bbox(&pts);
-        let num_pts = match self {
-            Surface::Sphere { .. }   => 6,
+        let num_pts = match self.surface {
+            Surface::Sphere { .. } => 6,
             _ => 0,
         };
 
@@ -995,8 +1193,8 @@ impl Surface {
                     pts.push((u, v));
                     verts.push(Vertex {
                         pos,
-                        norm: self.normal(pos, uv),
-                        color: DVec3::new(0.0, 0.0, 0.0),
+                        norm: DVec3::zeros(),
+                        color: DVec3::zeros(),
                     });
                 }
             }
@@ -1023,10 +1221,16 @@ impl Surface {
         ] {
             let candidate = DVec2::new(
                 Self::spline_parameter(
-                    candidate.x, surf.surf.min_u(), surf.surf.max_u(), surf.surf.u_open,
+                    candidate.x,
+                    surf.surf.min_u(),
+                    surf.surf.max_u(),
+                    surf.surf.u_open,
                 ),
                 Self::spline_parameter(
-                    candidate.y, surf.surf.min_v(), surf.surf.max_v(), surf.surf.v_open,
+                    candidate.y,
+                    surf.surf.min_v(),
+                    surf.surf.max_v(),
+                    surf.surf.v_open,
                 ),
             );
             let derivs = surf.surf.derivs::<1>(candidate);
@@ -1040,9 +1244,14 @@ impl Surface {
 
     // Calculate the surface normal, using either the 3D or 2D position
     pub fn normal(&self, p: DVec3, uv: DVec2) -> DVec3 {
-        match self {
-            Surface::Plane { normal, .. } => *normal,
-            Surface::Cone { mat, mat_i, angle, .. } => {
+        match (self.surface, &self.chart) {
+            (Surface::Plane { normal, .. }, FaceChart::Direct) => *normal,
+            (
+                Surface::Cone {
+                    mat, mat_i, angle, ..
+                },
+                FaceChart::Direct,
+            ) => {
                 // Project into CONE SPACE
                 let pos = mat_i * DVec4::new(p.x, p.y, p.z, 1.0);
                 let xy = if pos.xy().norm() > std::f64::EPSILON {
@@ -1050,13 +1259,14 @@ impl Surface {
                 } else {
                     return DVec3::zeros();
                 };
-                let normal = DVec4::new(xy.x * angle.cos(),
-                                        xy.y * angle.cos(), -angle.sin(), 0.0);
+                let normal = DVec4::new(xy.x * angle.cos(), xy.y * angle.cos(), -angle.sin(), 0.0);
                 // Deproject back into world space
                 (mat * normal).xyz()
             }
-            Surface::Sphere { location, .. } => (p - location).normalize(),
-            Surface::Cylinder { mat, mat_i, .. } => {
+            (Surface::Sphere { location, .. }, FaceChart::Sphere { .. }) => {
+                (p - location).normalize()
+            }
+            (Surface::Cylinder { mat, mat_i, .. }, FaceChart::Cylinder { .. }) => {
                 // Project the point onto the axis
                 let proj = mat_i * DVec4::new(p.x, p.y, p.z, 1.0);
 
@@ -1064,10 +1274,21 @@ impl Surface {
                 // (same hack as below)
                 let norm = DVec3::new(proj.x, proj.y, 0.0).normalize();
                 (mat * norm.to_homogeneous()).xyz()
-            },
-            Surface::NURBS { surf, chart, .. } => Self::spline_raw(surf, chart, uv)
-                .map(|raw| Self::surf_normal(raw, surf)).unwrap_or_else(DVec3::zeros),
-            Surface::Torus { mat, mat_i, major_radius, .. } => {
+            }
+            (Surface::NURBS { surf, .. }, FaceChart::Spline(chart)) => {
+                Self::spline_raw(surf, chart, uv)
+                    .map(|raw| Self::surf_normal(raw, surf))
+                    .unwrap_or_else(DVec3::zeros)
+            }
+            (
+                Surface::Torus {
+                    mat,
+                    mat_i,
+                    major_radius,
+                    ..
+                },
+                FaceChart::Torus { .. },
+            ) => {
                 let p = (*mat_i * DVec4::new(p.x, p.y, p.z, 1.0)).xyz();
                 let major_angle = p.y.atan2(p.z);
 
@@ -1075,8 +1296,104 @@ impl Surface {
                 let norm = (p - z).normalize();
 
                 (mat * norm.to_homogeneous()).xyz()
-            },
+            }
+            _ => unreachable!("prepared chart matches its surface geometry"),
         }
+    }
+}
+
+#[cfg(test)]
+impl Surface {
+    pub(crate) fn test_chart(&self) -> FaceChart {
+        match self {
+            Surface::NURBS {
+                surf,
+                uncertainty,
+                has_seam,
+            } => FaceChart::Spline(Self::spline_chart(surf, *uncertainty, *has_seam)),
+            _ => FaceChart::Direct,
+        }
+    }
+    fn lower(&self, p: DVec3) -> Result<DVec2, Error> {
+        PreparedSurface {
+            surface: self,
+            chart: self.test_chart(),
+        }
+        .lower(p)
+    }
+    pub(crate) fn raise(&self, uv: DVec2) -> Option<DVec3> {
+        PreparedSurface {
+            surface: self,
+            chart: self.test_chart(),
+        }
+        .raise(uv)
+    }
+    fn normal(&self, p: DVec3, uv: DVec2) -> DVec3 {
+        PreparedSurface {
+            surface: self,
+            chart: self.test_chart(),
+        }
+        .normal(p, uv)
+    }
+    pub(crate) fn lower_verts(
+        &self,
+        verts: &mut [Vertex],
+        edges: &[(usize, usize)],
+        sense: bool,
+    ) -> Result<Vec<(f64, f64)>, Error> {
+        self.prepare(verts, edges, sense)?.lower_verts(verts)
+    }
+    fn unwrap_periodic(
+        &self,
+        pts: &mut [(f64, f64)],
+        edges: &[(usize, usize)],
+        ranges: &[(usize, usize, bool)],
+    ) {
+        PreparedSurface {
+            surface: self,
+            chart: self.test_chart(),
+        }
+        .unwrap_periodic(pts, edges, ranges)
+    }
+    fn add_steiner_points(&self, pts: &mut Vec<(f64, f64)>, verts: &mut Vec<Vertex>) {
+        PreparedSurface {
+            surface: self,
+            chart: self.test_chart(),
+        }
+        .add_steiner_points(pts, verts)
+    }
+    fn smallest_circular_arc(a: &mut [f64]) -> (f64, f64) {
+        PreparedSurface::smallest_circular_arc(a)
+    }
+    fn unwrap_from_start(a: f64, b: f64) -> f64 {
+        PreparedSurface::unwrap_from_start(a, b)
+    }
+    fn point_minor_arc_distance(p: DVec3, a: DVec3, b: DVec3) -> Result<f64, Error> {
+        PreparedSurface::point_minor_arc_distance(p, a, b)
+    }
+    fn angular_distance(a: DVec3, b: DVec3) -> f64 {
+        PreparedSurface::angular_distance(a, b)
+    }
+    fn spherical_winding_sum(
+        q: DVec3,
+        p: &[DVec3],
+        e: &[(usize, usize)],
+    ) -> Result<(f64, f64), Error> {
+        PreparedSurface::spherical_winding_sum(q, p, e)
+    }
+    fn unwrap_periodic_coord(
+        p: &mut [(f64, f64)],
+        e: &[(usize, usize)],
+        a: usize,
+        b: usize,
+        c: usize,
+        d: f64,
+        skip: bool,
+    ) -> bool {
+        PreparedSurface::unwrap_periodic_coord(p, e, a, b, c, d, skip)
+    }
+    fn surf_normal(uv: DVec2, surf: &SampledSurface<4>) -> DVec3 {
+        PreparedSurface::surf_normal(uv, surf)
     }
 }
 
@@ -1089,7 +1406,13 @@ mod tests {
     fn untrimmed_torus_is_closed_oriented_and_covers_the_surface_once() {
         for same_sense in [true, false] {
             let surface = Surface::new_torus_with_ref_direction(
-                DVec3::new(7., -2., 3.), DVec3::y(), DVec3::z(), 4., 1.).unwrap();
+                DVec3::new(7., -2., 3.),
+                DVec3::y(),
+                DVec3::z(),
+                4.,
+                1.,
+            )
+            .unwrap();
             let mesh = surface.untrimmed_mesh(DVec3::zeros(), same_sense).unwrap();
             let mut edges = std::collections::HashMap::<_, (usize, i32)>::new();
             let mut area = 0.;
@@ -1114,28 +1437,58 @@ mod tests {
     #[test]
     fn geometrically_closed_bounded_spline_uses_a_continuous_chart() {
         let controls = [(1., 0.), (0., 1.), (-1., 0.), (0., -1.), (1., 1e-12)]
-            .iter().map(|&(x, y)| vec![DVec4::new(x, y, 0., 1.), DVec4::new(x, y, 1., 1.)]).collect();
-        let surf = SampledSurface::new(NURBSSurface::new(true, true,
+            .iter()
+            .map(|&(x, y)| vec![DVec4::new(x, y, 0., 1.), DVec4::new(x, y, 1., 1.)])
+            .collect();
+        let surf = SampledSurface::new(NURBSSurface::new(
+            true,
+            true,
             KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),
-            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]), controls));
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            controls,
+        ));
         let exact = Surface::new_nurbs(surf.clone(), 0., true);
-        assert!(matches!(exact, Surface::NURBS { chart: SplineChart::Cartesian { .. }, .. }));
+        assert!(matches!(
+            exact.test_chart(),
+            FaceChart::Spline(SplineChart::Cartesian { .. })
+        ));
         let no_seam = Surface::new_nurbs(surf.clone(), 1e-10, false);
-        assert!(matches!(no_seam, Surface::NURBS { chart: SplineChart::Cartesian { .. }, .. }));
+        assert!(matches!(
+            no_seam.test_chart(),
+            FaceChart::Spline(SplineChart::Cartesian { .. })
+        ));
         let closed = Surface::new_nurbs(surf, 1e-10, true);
-        assert!(matches!(closed, Surface::NURBS { chart: SplineChart::Polar { angular: 0, .. }, .. }));
+        assert!(matches!(
+            closed.test_chart(),
+            FaceChart::Spline(SplineChart::Polar { angular: 0, .. })
+        ));
     }
 
     #[test]
     fn pole_chart_preserves_regular_points_inside_source_uncertainty() {
         let knots = || KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]);
         let controls = vec![
-            vec![DVec4::new(1e-16, 0., 1., 1.), DVec4::new(1., 0., 1., 1.), DVec4::new(1., 0., 0., 1.)],
-            vec![DVec4::new(-1e-16, 1e-16, 1., 1.), DVec4::new(0., 1., 1., 1.), DVec4::new(0., 1., 0., 1.)],
-            vec![DVec4::new(1e-16, 0., 1., 1.), DVec4::new(1., 0., 1., 1.), DVec4::new(1., 0., 0., 1.)],
+            vec![
+                DVec4::new(1e-16, 0., 1., 1.),
+                DVec4::new(1., 0., 1., 1.),
+                DVec4::new(1., 0., 0., 1.),
+            ],
+            vec![
+                DVec4::new(-1e-16, 1e-16, 1., 1.),
+                DVec4::new(0., 1., 1., 1.),
+                DVec4::new(0., 1., 0., 1.),
+            ],
+            vec![
+                DVec4::new(1e-16, 0., 1., 1.),
+                DVec4::new(1., 0., 1., 1.),
+                DVec4::new(1., 0., 0., 1.),
+            ],
         ];
-        let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
-            false, true, knots(), knots(), controls)), 0.5, false);
+        let surface = Surface::new_nurbs(
+            SampledSurface::new(NURBSSurface::new(false, true, knots(), knots(), controls)),
+            0.5,
+            false,
+        );
         let pole = surface.raise(DVec2::zeros()).unwrap();
         assert!(surface.lower(pole).unwrap().norm() < 1e-14);
         for radius in [1e-4, 0.01, 0.1] {
@@ -1154,8 +1507,13 @@ mod tests {
             let (start, span) = Surface::smallest_circular_arc(&mut angles);
             for angle in input {
                 let offset = Surface::unwrap_from_start(angle, start) - start;
-                assert!(offset >= -1e-14 && offset <= span + 1e-14,
-                    "{} lies outside [{}, {}]", angle, start, start + span);
+                assert!(
+                    offset >= -1e-14 && offset <= span + 1e-14,
+                    "{} lies outside [{}, {}]",
+                    angle,
+                    start,
+                    start + span
+                );
             }
         }
     }
@@ -1166,7 +1524,7 @@ mod tests {
             for sign in [-1.0, 1.0] {
                 let mut axis = DVec3::new(0.2, 0.3, 0.4);
                 axis[dropped] = sign;
-                let surface = Surface::new_plane(axis, DVec3::zeros(), DVec3::zeros()).unwrap();
+                let surface = Surface::new_plane(axis).unwrap();
                 let a = DVec3::new(3.13, -0.45, 1.75);
                 let mut b = a;
                 let mut c = a;
@@ -1183,18 +1541,29 @@ mod tests {
                 assert!((pb.x * pc.y - pb.y * pc.x) * (b - a).cross(&(c - a)).dot(&axis) > 0.);
             }
         }
-        let tiny = Surface::new_plane(DVec3::new(0., 1e-100, 0.), DVec3::zeros(), DVec3::zeros()).unwrap();
-        assert_eq!(tiny.normal(DVec3::zeros(), DVec2::zeros()), DVec3::new(0., 1., 0.));
+        let tiny = Surface::new_plane(DVec3::new(0., 1e-100, 0.)).unwrap();
+        assert_eq!(
+            tiny.normal(DVec3::zeros(), DVec2::zeros()),
+            DVec3::new(0., 1., 0.)
+        );
     }
 
-    fn latitude_loop(latitude: f64, segments: usize, reverse: bool,
-                     vertices: &mut Vec<Vertex>, edges: &mut Vec<(usize, usize)>) {
+    fn latitude_loop(
+        latitude: f64,
+        segments: usize,
+        reverse: bool,
+        vertices: &mut Vec<Vertex>,
+        edges: &mut Vec<(usize, usize)>,
+    ) {
         let start = vertices.len();
         for i in 0..segments {
             let angle = 2.0 * PI * i as f64 / segments as f64;
             vertices.push(Vertex {
-                pos: DVec3::new(latitude.cos() * angle.cos(),
-                                latitude.cos() * angle.sin(), latitude.sin()),
+                pos: DVec3::new(
+                    latitude.cos() * angle.cos(),
+                    latitude.cos() * angle.sin(),
+                    latitude.sin(),
+                ),
                 norm: DVec3::zeros(),
                 color: DVec3::zeros(),
             });
@@ -1205,19 +1574,29 @@ mod tests {
         }
     }
 
-    fn lower_sphere(mut vertices: Vec<Vertex>, edges: &[(usize, usize)], same_sense: bool)
-        -> (Surface, Vec<Vertex>, Vec<(f64, f64)>, DVec3)
-    {
-        let mut surface = Surface::new_sphere(DVec3::zeros(), 1.0).unwrap();
-        let points = surface.lower_verts(&mut vertices, edges, same_sense).unwrap();
-        let chart_center = match &surface {
-            Surface::Sphere { mat, .. } => mat.column(0).xyz(),
+    fn lower_sphere(
+        mut vertices: Vec<Vertex>,
+        edges: &[(usize, usize)],
+        same_sense: bool,
+    ) -> (Surface, Vec<Vertex>, Vec<(f64, f64)>, DVec3) {
+        let surface = Surface::new_sphere(DVec3::zeros(), 1.0).unwrap();
+        let prepared = surface.prepare(&vertices, edges, same_sense).unwrap();
+        let points = surface
+            .lower_verts(&mut vertices, edges, same_sense)
+            .unwrap();
+        let chart_center = match &prepared.chart {
+            FaceChart::Sphere { mat, .. } => mat.column(0).xyz(),
             _ => unreachable!(),
         };
         for (vertex, &(u, v)) in vertices.iter().zip(&points) {
             assert!(u.is_finite() && v.is_finite());
-            assert!((surface.raise(DVec2::new(u, v)).unwrap() - vertex.pos).norm() < 1e-12);
-            assert!(vertex.norm.dot(&vertex.pos) > 1.0 - 1e-12);
+            assert!((prepared.raise(DVec2::new(u, v)).unwrap() - vertex.pos).norm() < 1e-12);
+            assert!(
+                prepared
+                    .normal(vertex.pos, DVec2::new(u, v))
+                    .dot(&vertex.pos)
+                    > 1.0 - 1e-12
+            );
         }
         (surface, vertices, points, chart_center)
     }
@@ -1232,8 +1611,9 @@ mod tests {
 
         let beyond = DVec3::new(-0.01, 1.0, 0.001).normalize();
         let endpoint = Surface::angular_distance(beyond, b);
-        assert!((Surface::point_minor_arc_distance(beyond, a, b).unwrap() - endpoint).abs()
-            < 1e-14);
+        assert!(
+            (Surface::point_minor_arc_distance(beyond, a, b).unwrap() - endpoint).abs() < 1e-14
+        );
     }
 
     #[test]
@@ -1242,9 +1622,14 @@ mod tests {
         let mut edges = Vec::new();
         latitude_loop(0.0, 32, false, &mut vertices, &mut edges);
         let (_surface, _vertices, points, q) = lower_sphere(vertices, &edges, true);
-        assert!((-q).z < 0.0, "chart antipode must be outside the north hemisphere");
-        let area2: f64 = edges.iter().map(|&(i, j)|
-            points[i].0 * points[j].1 - points[j].0 * points[i].1).sum();
+        assert!(
+            (-q).z < 0.0,
+            "chart antipode must be outside the north hemisphere"
+        );
+        let area2: f64 = edges
+            .iter()
+            .map(|&(i, j)| points[i].0 * points[j].1 - points[j].0 * points[i].1)
+            .sum();
         assert!(area2.abs() > 1.0);
         let mut triangulation = cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
         triangulation.run().unwrap();
@@ -1257,14 +1642,49 @@ mod tests {
             let mut vertices = Vec::new();
             let mut edges = Vec::new();
             latitude_loop(0.0, 32, false, &mut vertices, &mut edges);
-            for vertex in &mut vertices { vertex.pos *= radius; }
-            let mut surface = Surface::new_sphere(DVec3::zeros(), radius).unwrap();
-            let uv = surface.lower_verts(&mut vertices, &edges, true).unwrap();
-            for (vertex, &(u, v)) in vertices.iter().zip(&uv) {
-                let raised = surface.raise(DVec2::new(u, v)).unwrap();
-                assert!((raised - vertex.pos).norm() / radius < 1e-12);
-                assert!(vertex.norm.dot(&(vertex.pos / radius)) > 1.0 - 1e-12);
+            for vertex in &mut vertices {
+                vertex.pos *= radius;
             }
+            let surface = Surface::new_sphere(DVec3::zeros(), radius).unwrap();
+            let prepared = surface.prepare(&vertices, &edges, true).unwrap();
+            let uv = prepared.lower_verts(&vertices).unwrap();
+            for (vertex, &(u, v)) in vertices.iter().zip(&uv) {
+                let chart = DVec2::new(u, v);
+                let raised = prepared.raise(chart).unwrap();
+                assert!((raised - vertex.pos).norm() / radius < 1e-12);
+                assert!(
+                    prepared
+                        .normal(vertex.pos, chart)
+                        .dot(&(vertex.pos / radius))
+                        > 1.0 - 1e-12
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn immutable_sphere_supports_independent_face_charts() {
+        let surface = Surface::new_sphere(DVec3::zeros(), 1.).unwrap();
+        let make_loop = |z: f64| {
+            let mut vertices = Vec::new();
+            let mut edges = Vec::new();
+            latitude_loop(z, 32, false, &mut vertices, &mut edges);
+            (vertices, edges)
+        };
+        let (north_vertices, north_edges) = make_loop(0.4);
+        let (south_vertices, south_edges) = make_loop(-0.4);
+        let north = surface
+            .prepare(&north_vertices, &north_edges, true)
+            .unwrap();
+        let before = north.lower_verts(&north_vertices).unwrap();
+        let south = surface
+            .prepare(&south_vertices, &south_edges, true)
+            .unwrap();
+        let south_points = south.lower_verts(&south_vertices).unwrap();
+        assert_eq!(before, north.lower_verts(&north_vertices).unwrap());
+        assert!(before.iter().zip(&south_points).any(|(a, b)| a != b));
+        for (vertex, &(u, v)) in north_vertices.iter().zip(&before) {
+            assert!((north.raise(DVec2::new(u, v)).unwrap() - vertex.pos).norm() < 1e-12);
         }
     }
 
@@ -1301,52 +1721,86 @@ mod tests {
                 DVec3::new(center_x, 0.12, 0.8),
                 DVec3::new(center_x + 0.12, 0.0, 0.8),
                 DVec3::new(center_x, -0.12, 0.8),
-            ] { vertices.push(Vertex { pos: p.normalize(), norm: DVec3::zeros(), color: DVec3::zeros() }); }
-            for i in 0..4 { edges.push((start + i, start + (i + 1) % 4)); }
+            ] {
+                vertices.push(Vertex {
+                    pos: p.normalize(),
+                    norm: DVec3::zeros(),
+                    color: DVec3::zeros(),
+                });
+            }
+            for i in 0..4 {
+                edges.push((start + i, start + (i + 1) % 4));
+            }
             let points: Vec<_> = vertices.iter().map(|v| v.pos).collect();
             let (area, error) = Surface::spherical_winding_sum(
-                DVec3::new(0.0, 0.0, 1.0), &points, &edges[edges.len() - 4..],
-            ).unwrap();
+                DVec3::new(0.0, 0.0, 1.0),
+                &points,
+                &edges[edges.len() - 4..],
+            )
+            .unwrap();
             assert!(area < -error, "holes must have clockwise signed area");
         }
         let (_, _, _, q) = lower_sphere(vertices, &edges, true);
         let pole = -q;
-        let in_hole = pole.z > 0.0 && [-0.45_f64, 0.45].iter().any(|center_x| {
-            // Central projection back onto the diamonds' construction plane.
-            (0.8 * pole.x / pole.z - center_x).abs()
-                + (0.8 * pole.y / pole.z).abs() < 0.12
-        });
+        let in_hole = pole.z > 0.0
+            && [-0.45_f64, 0.45].iter().any(|center_x| {
+                // Central projection back onto the diamonds' construction plane.
+                (0.8 * pole.x / pole.z - center_x).abs() + (0.8 * pole.y / pole.z).abs() < 0.12
+            });
         assert!(pole.z < -0.2_f64.sin() || in_hole);
     }
 
     #[test]
     fn periodic_unwrapping_preserves_nonuniform_boundary_parameters() {
-        let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
-            false, true,
-            KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),
-            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
-            [(1., 0.), (0., 1.), (-1., 0.), (0., -1.), (1., 0.)].iter()
-                .map(|&(x, y)| vec![DVec4::new(x, y, 0., 1.), DVec4::new(x, y, 1., 1.)])
-                .collect(),
-        )), 0., false);
-        let raw = vec![(0., 1.), (0.1, 1.), (0.6, 1.), (1., 1.),
-                       (1., 0.), (0.6, 0.), (0.1, 0.), (0., 0.)];
-        let (surf, chart) = match &surface {
-            Surface::NURBS { surf, chart, .. } => (surf, chart),
+        let surface = Surface::new_nurbs(
+            SampledSurface::new(NURBSSurface::new(
+                false,
+                true,
+                KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),
+                KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+                [(1., 0.), (0., 1.), (-1., 0.), (0., -1.), (1., 0.)]
+                    .iter()
+                    .map(|&(x, y)| vec![DVec4::new(x, y, 0., 1.), DVec4::new(x, y, 1., 1.)])
+                    .collect(),
+            )),
+            0.,
+            false,
+        );
+        let raw = vec![
+            (0., 1.),
+            (0.1, 1.),
+            (0.6, 1.),
+            (1., 1.),
+            (1., 0.),
+            (0.6, 0.),
+            (0.1, 0.),
+            (0., 0.),
+        ];
+        let chart = surface.test_chart();
+        let (surf, chart) = match (&surface, &chart) {
+            (Surface::NURBS { surf, .. }, FaceChart::Spline(chart)) => (surf, chart),
             _ => unreachable!(),
         };
-        let mut points: Vec<_> = raw.iter().map(|&(u, v)| {
-            let p = chart.lower(DVec2::new(u, v));
-            (p.x, p.y)
-        }).collect();
+        let mut points: Vec<_> = raw
+            .iter()
+            .map(|&(u, v)| {
+                let p = chart.lower(DVec2::new(u, v));
+                (p.x, p.y)
+            })
+            .collect();
         let original = points.clone();
-        let edges: Vec<_> = (0..points.len()).map(|i| (i, (i + 1) % points.len())).collect();
+        let edges: Vec<_> = (0..points.len())
+            .map(|i| (i, (i + 1) % points.len()))
+            .collect();
         surface.unwrap_periodic(&mut points, &edges, &[(0, edges.len(), false)]);
         assert_eq!(points, original, "polar charts bypass seam unwrapping");
         for (&raw, &after) in raw.iter().zip(&points) {
             let a = surf.surf.point(DVec2::new(raw.0, raw.1));
             let b = surface.raise(DVec2::new(after.0, after.1)).unwrap();
-            assert!((a - b).norm() < 1e-14, "unwrapping must not relocate boundary geometry");
+            assert!(
+                (a - b).norm() < 1e-14,
+                "unwrapping must not relocate boundary geometry"
+            );
         }
     }
 
@@ -1367,7 +1821,10 @@ mod tests {
                 bounds[0][other] = -1.0;
                 bounds[1][other] = 2.0;
                 let chart = SplineChart::Polar {
-                    angular: periodic, origin, scale: scales, bounds,
+                    angular: periodic,
+                    origin,
+                    scale: scales,
+                    bounds,
                 };
                 let mut raw = DVec2::zeros();
                 raw[periodic] = 3.1;
@@ -1381,8 +1838,11 @@ mod tests {
                 let first = chart.lower(seam);
                 for turn in [-2.0, -1.0, 1.0, 2.0] {
                     seam[periodic] = 2.0 + turn * 5.0;
-                    assert_eq!(chart.lower(seam), first,
-                        "periodic seam copies must have identical chart coordinates");
+                    assert_eq!(
+                        chart.lower(seam),
+                        first,
+                        "periodic seam copies must have identical chart coordinates"
+                    );
                 }
 
                 let h = 1e-6;
@@ -1400,35 +1860,73 @@ mod tests {
     #[test]
     fn bounded_short_edges_do_not_collapse_under_source_uncertainty() {
         let controls = [(1., 0., 1.), (1., 1., 0.5_f64.sqrt()), (0., 1., 1.)]
-            .iter().map(|&(x, y, w)| [1e-8, 1.].iter().map(|&r|
-                DVec4::new(x * r * w, y * r * w, r * w, w)).collect()).collect();
-        let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(true, true,
-            KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
-            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]), controls)), 1e-6, false);
+            .iter()
+            .map(|&(x, y, w)| {
+                [1e-8, 1.]
+                    .iter()
+                    .map(|&r| DVec4::new(x * r * w, y * r * w, r * w, w))
+                    .collect()
+            })
+            .collect();
+        let surface = Surface::new_nurbs(
+            SampledSurface::new(NURBSSurface::new(
+                true,
+                true,
+                KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
+                KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+                controls,
+            )),
+            1e-6,
+            false,
+        );
         let a = surface.lower(DVec3::new(1e-8, 0., 1e-8)).unwrap();
         let b = surface.lower(DVec3::new(0., 1e-8, 1e-8)).unwrap();
-        assert!((a - b).norm() > 0.5, "a short edge must retain distinct chart ends");
+        assert!(
+            (a - b).norm() > 0.5,
+            "a short edge must retain distinct chart ends"
+        );
     }
 
     #[test]
     fn bounded_spline_poles_preserve_sectors_without_collinear_facets() {
         for angular in [0, 1] {
             for upper_pole in [false, true] {
-                let mut controls: Vec<Vec<DVec4>> = [(1., 0., 1.), (1., 1., 0.5_f64.sqrt()), (0., 1., 1.)]
-                    .iter().map(|&(x, y, w)| [0., 1.].iter().map(|&v| {
-                        let r = if upper_pole { 1. - v } else { v };
-                        DVec4::new(x * r * w, y * r * w, r * w, w)
-                    }).collect()).collect();
+                let mut controls: Vec<Vec<DVec4>> =
+                    [(1., 0., 1.), (1., 1., 0.5_f64.sqrt()), (0., 1., 1.)]
+                        .iter()
+                        .map(|&(x, y, w)| {
+                            [0., 1.]
+                                .iter()
+                                .map(|&v| {
+                                    let r = if upper_pole { 1. - v } else { v };
+                                    DVec4::new(x * r * w, y * r * w, r * w, w)
+                                })
+                                .collect()
+                        })
+                        .collect();
                 let a = KnotVector::from_multiplicities(2, &[2., 5.], &[3, 3]);
                 let r = KnotVector::from_multiplicities(1, &[-1., 2.], &[2, 2]);
-                let (u, v) = if angular == 0 { (a, r) } else {
-                    controls = (0..2).map(|v| controls.iter().map(|row| row[v]).collect()).collect();
+                let (u, v) = if angular == 0 {
+                    (a, r)
+                } else {
+                    controls = (0..2)
+                        .map(|v| controls.iter().map(|row| row[v]).collect())
+                        .collect();
                     (r, a)
                 };
-                let mut surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
-                    true, true, u, v, controls)), 0., false);
-                let Surface::NURBS { surf, chart: chart @ SplineChart::Polar { scale, .. } } = &surface
-                    else { panic!("a bounded collapsed edge needs a pole chart") };
+                let mut surface = Surface::new_nurbs(
+                    SampledSurface::new(NURBSSurface::new(true, true, u, v, controls)),
+                    0.,
+                    false,
+                );
+                let chart_value = surface.test_chart();
+                let (
+                    Surface::NURBS { surf, .. },
+                    FaceChart::Spline(chart @ SplineChart::Polar { scale, .. }),
+                ) = (&surface, &chart_value)
+                else {
+                    panic!("a bounded collapsed edge needs a pole chart")
+                };
                 let radial = 1 - angular;
                 let mut raw = DVec2::zeros();
                 raw[radial] = if upper_pole { 2. } else { -1. };
@@ -1438,25 +1936,37 @@ mod tests {
                 }
                 let mut outside = DVec2::zeros();
                 outside[radial] = 0.5 * scale[radial].signum();
-                assert!(chart.raw(outside).is_none(), "the other half disk is outside this surface");
+                assert!(
+                    chart.raw(outside).is_none(),
+                    "the other half disk is outside this surface"
+                );
 
-                let mut vertices = vec![Vertex { pos: DVec3::zeros(),
-                    norm: DVec3::zeros(), color: DVec3::zeros() }];
+                let mut vertices = vec![Vertex {
+                    pos: DVec3::zeros(),
+                    norm: DVec3::zeros(),
+                    color: DVec3::zeros(),
+                }];
                 raw[radial] = if upper_pole { -1. } else { 2. };
                 for i in 0..=64 {
                     raw[angular] = 2. + 3. * i as f64 / 64.;
                     assert!((chart.raw(chart.lower(raw)).unwrap() - raw).norm() < 1e-14);
-                    vertices.push(Vertex { pos: surf.surf.point(raw),
-                        norm: DVec3::zeros(), color: DVec3::zeros() });
+                    vertices.push(Vertex {
+                        pos: surf.surf.point(raw),
+                        norm: DVec3::zeros(),
+                        color: DVec3::zeros(),
+                    });
                 }
-                let edges: Vec<_> = (0..vertices.len()).map(|i| (i, (i + 1) % vertices.len())).collect();
+                let edges: Vec<_> = (0..vertices.len())
+                    .map(|i| (i, (i + 1) % vertices.len()))
+                    .collect();
                 let mut points = surface.lower_verts(&mut vertices, &edges, true).unwrap();
                 surface.add_steiner_points(&mut points, &mut vertices);
                 let mut t = cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
                 t.run().unwrap();
                 let mut area = 0.;
                 for (a, b, c) in t.triangles() {
-                    let cross = (vertices[b].pos - vertices[a].pos).cross(&(vertices[c].pos - vertices[a].pos));
+                    let cross = (vertices[b].pos - vertices[a].pos)
+                        .cross(&(vertices[c].pos - vertices[a].pos));
                     assert!(cross.norm() > 0.);
                     area += 0.5 * cross.norm();
                 }
@@ -1470,41 +1980,86 @@ mod tests {
         for periodic in [0, 1] {
             for pole in [None, Some(false), Some(true)] {
                 let w = 0.5_f64.sqrt();
-                let circle = [(1., 0., 1.), (1., 1., w), (0., 1., 1.), (-1., 1., w),
-                    (-1., 0., 1.), (-1., -1., w), (0., -1., 1.), (1., -1., w), (1., 0., 1.)];
-                let mut controls: Vec<Vec<DVec4>> = circle.iter().map(|&(x, y, w)| {
-                    [0., 1.].iter().map(|&v| {
-                        let radius = match pole { None => 1., Some(false) => v, Some(true) => 1. - v };
-                        let z = if pole.is_some() { radius } else { v };
-                        DVec4::new(x * radius * w, y * radius * w, z * w, w)
-                    }).collect()
-                }).collect();
-                let angular = KnotVector::from_multiplicities(2, &[0., 1., 2., 3., 4.], &[3, 2, 2, 2, 3]);
+                let circle = [
+                    (1., 0., 1.),
+                    (1., 1., w),
+                    (0., 1., 1.),
+                    (-1., 1., w),
+                    (-1., 0., 1.),
+                    (-1., -1., w),
+                    (0., -1., 1.),
+                    (1., -1., w),
+                    (1., 0., 1.),
+                ];
+                let mut controls: Vec<Vec<DVec4>> = circle
+                    .iter()
+                    .map(|&(x, y, w)| {
+                        [0., 1.]
+                            .iter()
+                            .map(|&v| {
+                                let radius = match pole {
+                                    None => 1.,
+                                    Some(false) => v,
+                                    Some(true) => 1. - v,
+                                };
+                                let z = if pole.is_some() { radius } else { v };
+                                DVec4::new(x * radius * w, y * radius * w, z * w, w)
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let angular =
+                    KnotVector::from_multiplicities(2, &[0., 1., 2., 3., 4.], &[3, 2, 2, 2, 3]);
                 let radial = KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
-                let (u_knots, v_knots) = if periodic == 0 { (angular, radial) } else {
-                    controls = (0..2).map(|v| controls.iter().map(|row| row[v]).collect()).collect();
+                let (u_knots, v_knots) = if periodic == 0 {
+                    (angular, radial)
+                } else {
+                    controls = (0..2)
+                        .map(|v| controls.iter().map(|row| row[v]).collect())
+                        .collect();
                     (radial, angular)
                 };
-                let mut surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
-                    periodic != 0, periodic != 1, u_knots, v_knots, controls,
-                )), 0., false);
-                assert!(matches!(surface, Surface::NURBS { chart: SplineChart::Polar { .. }, .. }));
+                let mut surface = Surface::new_nurbs(
+                    SampledSurface::new(NURBSSurface::new(
+                        periodic != 0,
+                        periodic != 1,
+                        u_knots,
+                        v_knots,
+                        controls,
+                    )),
+                    0.,
+                    false,
+                );
+                assert!(matches!(
+                    surface.test_chart(),
+                    FaceChart::Spline(SplineChart::Polar { .. })
+                ));
                 let mut vertices = Vec::new();
                 let mut edges = Vec::new();
-                let radii = if pole.is_some() { vec![1.] } else { vec![2., 1.] };
+                let radii = if pole.is_some() {
+                    vec![1.]
+                } else {
+                    vec![2., 1.]
+                };
                 for (ring, radius) in radii.into_iter().enumerate() {
                     let start = vertices.len();
                     for i in 0..64 {
                         let angle = (if ring == 0 { 1. } else { -1. }) * 2. * PI * i as f64 / 64.;
                         let uv = DVec2::new(radius * angle.cos(), radius * angle.sin());
-                        vertices.push(Vertex { pos: surface.raise(uv).unwrap(),
-                            norm: DVec3::zeros(), color: DVec3::zeros() });
+                        vertices.push(Vertex {
+                            pos: surface.raise(uv).unwrap(),
+                            norm: DVec3::zeros(),
+                            color: DVec3::zeros(),
+                        });
                         edges.push((start + i, start + (i + 1) % 64));
                     }
                 }
                 if pole.is_some() {
-                    vertices.push(Vertex { pos: surface.raise(DVec2::zeros()).unwrap(),
-                        norm: DVec3::zeros(), color: DVec3::zeros() });
+                    vertices.push(Vertex {
+                        pos: surface.raise(DVec2::zeros()).unwrap(),
+                        norm: DVec3::zeros(),
+                        color: DVec3::zeros(),
+                    });
                 }
                 let mut points = surface.lower_verts(&mut vertices, &edges, true).unwrap();
                 surface.add_steiner_points(&mut points, &mut vertices);
@@ -1517,8 +2072,17 @@ mod tests {
                     assert!(cross.norm() > 0.0);
                     area += 0.5 * cross.norm();
                 }
-                let expected = if pole.is_some() { PI * 2.0_f64.sqrt() } else { 2. * PI };
-                assert!((area / expected - 1.).abs() < 0.01, "area {} != {}", area, expected);
+                let expected = if pole.is_some() {
+                    PI * 2.0_f64.sqrt()
+                } else {
+                    2. * PI
+                };
+                assert!(
+                    (area / expected - 1.).abs() < 0.01,
+                    "area {} != {}",
+                    area,
+                    expected
+                );
             }
         }
     }
@@ -1541,17 +2105,20 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(Surface::unwrap_periodic_coord(
-            &mut points, &edges, 0, edges.len(), 0, period, false,
+            &mut points,
+            &edges,
+            0,
+            edges.len(),
+            0,
+            period,
+            false,
         ));
 
-        let u_min = points.iter().map(|p| p.0)
-            .fold(f64::INFINITY, f64::min);
-        let u_max = points.iter().map(|p| p.0)
-            .fold(f64::NEG_INFINITY, f64::max);
+        let u_min = points.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+        let u_max = points.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
         assert!((u_max - u_min - period).abs() < 1e-9);
 
-        let mut triangulation =
-            cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
+        let mut triangulation = cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
         triangulation.run().unwrap();
         assert!(triangulation.triangles().next().is_some());
     }
@@ -1559,14 +2126,24 @@ mod tests {
     #[test]
     fn bspline_surface_gets_interior_steiner_points() {
         let knots = || KnotVector::from_multiplicities(2, &[0.0, 1.0], &[3, 3]);
-        let control_points = (0..3).map(|u| {
-            (0..3).map(|v| {
-                DVec4::new(u as f64, v as f64, (u * v) as f64 * 0.25, 1.0)
-            }).collect()
-        }).collect();
-        let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
-            true, true, knots(), knots(), control_points,
-        )), 0., false);
+        let control_points = (0..3)
+            .map(|u| {
+                (0..3)
+                    .map(|v| DVec4::new(u as f64, v as f64, (u * v) as f64 * 0.25, 1.0))
+                    .collect()
+            })
+            .collect();
+        let surface = Surface::new_nurbs(
+            SampledSurface::new(NURBSSurface::new(
+                true,
+                true,
+                knots(),
+                knots(),
+                control_points,
+            )),
+            0.,
+            false,
+        );
         let mut points = vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
         let mut vertices = Vec::new();
 
@@ -1574,19 +2151,36 @@ mod tests {
 
         assert_eq!(points.len(), 4 + 16 * 16);
         assert_eq!(vertices.len(), 16 * 16);
-        assert!(vertices.iter().all(|vertex| vertex.norm.norm() > 0.99));
+        assert!(
+            vertices.iter().all(|vertex| vertex.norm == DVec3::zeros()),
+            "sampling must leave final attributes to face finalization"
+        );
     }
 
     #[test]
     fn torus_sampling_resolves_both_intrinsic_angles() {
         for scale in [1e-9, 1., 1e9] {
             for polar_major in [true, false] {
-                let mut surface = Surface::new_torus_with_ref_direction(
-                    DVec3::zeros(), DVec3::z(), DVec3::x(), 4. * scale, scale).unwrap();
-                let Surface::Torus { polar_major: polar, radial_start, .. } = &mut surface else { unreachable!() };
-                *polar = polar_major;
-                *radial_start = 0.;
-                let (base, radial_scale) = if polar_major { (4. * scale, scale) } else { (scale, 4. * scale) };
+                let surface = Surface::new_torus_with_ref_direction(
+                    DVec3::zeros(),
+                    DVec3::z(),
+                    DVec3::x(),
+                    4. * scale,
+                    scale,
+                )
+                .unwrap();
+                let prepared = PreparedSurface {
+                    surface: &surface,
+                    chart: FaceChart::Torus {
+                        polar_major,
+                        radial_start: 0.,
+                    },
+                };
+                let (base, radial_scale) = if polar_major {
+                    (4. * scale, scale)
+                } else {
+                    (scale, 4. * scale)
+                };
                 let mut points = Vec::new();
                 for radius in [base, base + PI * radial_scale] {
                     for i in 0..32 {
@@ -1594,53 +2188,104 @@ mod tests {
                         points.push((radius * angle.cos(), radius * angle.sin()));
                     }
                 }
-                surface.add_steiner_points(&mut points, &mut Vec::new());
-                let mut angles: Vec<_> = points.iter().map(|&(x, y)| (x.hypot(y) - base) / radial_scale).collect();
+                prepared.add_steiner_points(&mut points, &mut Vec::new());
+                let mut angles: Vec<_> = points
+                    .iter()
+                    .map(|&(x, y)| (x.hypot(y) - base) / radial_scale)
+                    .collect();
                 angles.sort_by(f64::total_cmp);
-                let gap = angles.windows(2).map(|v| v[1] - v[0]).fold(0.0_f64, f64::max);
-                assert!(gap <= 2. * PI / 32. + 1e-12, "unresolved radial angle {}", gap);
+                let gap = angles
+                    .windows(2)
+                    .map(|v| v[1] - v[0])
+                    .fold(0.0_f64, f64::max);
+                assert!(
+                    gap <= 2. * PI / 32. + 1e-12,
+                    "unresolved radial angle {}",
+                    gap
+                );
             }
         }
     }
 
     #[test]
     fn planar_bilinear_splines_use_world_coordinate_predicates() {
-        let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(
-            true, true,
-            KnotVector::from_multiplicities(1, &[-1., 7.5], &[2, 2]),
-            KnotVector::from_multiplicities(1, &[-6.17, 1.], &[2, 2]),
-            vec![vec![DVec4::new(18., 4.665, -3.75, 1.), DVec4::new(18., 4.665, 3.42, 1.)],
-                 vec![DVec4::new(18., -3.835, -3.75, 1.), DVec4::new(18., -3.835, 3.42, 1.)]],
-        )), 0., false);
+        let surface = Surface::new_nurbs(
+            SampledSurface::new(NURBSSurface::new(
+                true,
+                true,
+                KnotVector::from_multiplicities(1, &[-1., 7.5], &[2, 2]),
+                KnotVector::from_multiplicities(1, &[-6.17, 1.], &[2, 2]),
+                vec![
+                    vec![
+                        DVec4::new(18., 4.665, -3.75, 1.),
+                        DVec4::new(18., 4.665, 3.42, 1.),
+                    ],
+                    vec![
+                        DVec4::new(18., -3.835, -3.75, 1.),
+                        DVec4::new(18., -3.835, 3.42, 1.),
+                    ],
+                ],
+            )),
+            0.,
+            false,
+        );
         assert!(matches!(surface, Surface::Plane { .. }));
         let mut vertices: Vec<_> = [(3.665, -3.75), (4.665, -3.75), (4.665, 3.42), (3.665, 3.42)]
-            .iter().map(|&(y, z)| Vertex { pos: DVec3::new(18., y, z), norm: DVec3::zeros(), color: DVec3::zeros() }).collect();
-        let mut points: Vec<_> = vertices.iter().map(|v| {
-            let uv = surface.lower(v.pos).unwrap(); (uv.x, uv.y)
-        }).collect();
+            .iter()
+            .map(|&(y, z)| Vertex {
+                pos: DVec3::new(18., y, z),
+                norm: DVec3::zeros(),
+                color: DVec3::zeros(),
+            })
+            .collect();
+        let mut points: Vec<_> = vertices
+            .iter()
+            .map(|v| {
+                let uv = surface.lower(v.pos).unwrap();
+                (uv.x, uv.y)
+            })
+            .collect();
         surface.add_steiner_points(&mut points, &mut vertices);
-        assert_eq!(vertices.len(), 4, "flat patches require no curvature samples");
-        let t = cdt::Triangulation::build_with_edges(&points, &[(0, 1), (1, 2), (2, 3), (3, 0)]).unwrap();
-        let area: f64 = t.triangles().map(|(a, b, c)| {
-            let area = (vertices[b].pos - vertices[a].pos).cross(&(vertices[c].pos - vertices[a].pos)).norm() * 0.5;
-            assert!(area > 0.); area
-        }).sum();
+        assert_eq!(
+            vertices.len(),
+            4,
+            "flat patches require no curvature samples"
+        );
+        let t = cdt::Triangulation::build_with_edges(&points, &[(0, 1), (1, 2), (2, 3), (3, 0)])
+            .unwrap();
+        let area: f64 = t
+            .triangles()
+            .map(|(a, b, c)| {
+                let area = (vertices[b].pos - vertices[a].pos)
+                    .cross(&(vertices[c].pos - vertices[a].pos))
+                    .norm()
+                    * 0.5;
+                assert!(area > 0.);
+                area
+            })
+            .sum();
         assert!((area - 7.17).abs() < 1e-12);
     }
 
     #[test]
     fn bspline_pole_uses_the_limiting_surface_normal() {
         let knots = || KnotVector::from_multiplicities(2, &[0.0, 1.0], &[3, 3]);
-        let control_points = (0..3).map(|u| {
-            let x = u as f64;
-            vec![
-                DVec4::new(x, 0.0, 0.0, 1.0),
-                DVec4::new(x, 0.0, 1.0, 1.0),
-                DVec4::new(1.0, 0.0, 1.0, 1.0),
-            ]
-        }).collect();
+        let control_points = (0..3)
+            .map(|u| {
+                let x = u as f64;
+                vec![
+                    DVec4::new(x, 0.0, 0.0, 1.0),
+                    DVec4::new(x, 0.0, 1.0, 1.0),
+                    DVec4::new(1.0, 0.0, 1.0, 1.0),
+                ]
+            })
+            .collect();
         let sampled = SampledSurface::new(NURBSSurface::new(
-            true, true, knots(), knots(), control_points,
+            true,
+            true,
+            knots(),
+            knots(),
+            control_points,
         ));
 
         let normal = Surface::surf_normal(DVec2::new(0.5, 1.1), &sampled);
@@ -1660,8 +2305,13 @@ mod tests {
         )
     }
 
-    fn append_ring(vertices: &mut Vec<Vertex>, edges: &mut Vec<(usize, usize)>,
-                   fixed_angle: f64, vary_major: bool, reverse: bool) {
+    fn append_ring(
+        vertices: &mut Vec<Vertex>,
+        edges: &mut Vec<(usize, usize)>,
+        fixed_angle: f64,
+        vary_major: bool,
+        reverse: bool,
+    ) {
         const SEGMENTS: usize = 32;
         let start = vertices.len();
         for i in 0..SEGMENTS {
@@ -1681,31 +2331,42 @@ mod tests {
         }
     }
 
-    fn assert_band_tessellates(mut surface: Surface, mut vertices: Vec<Vertex>,
-                               edges: Vec<(usize, usize)>) {
-        let mut points = surface.lower_verts(&mut vertices, &edges, true).unwrap();
+    fn assert_band_tessellates(
+        surface: Surface,
+        mut vertices: Vec<Vertex>,
+        edges: Vec<(usize, usize)>,
+    ) {
+        let prepared = surface.prepare(&vertices, &edges, true).unwrap();
+        let mut points = prepared.lower_verts(&vertices).unwrap();
         for (vertex, &(u, v)) in vertices.iter().zip(&points) {
-            let raised = surface.raise(DVec2::new(u, v)).unwrap();
+            let raised = prepared.raise(DVec2::new(u, v)).unwrap();
             assert!((raised - vertex.pos).norm() < 1e-9);
-            let du = surface.raise(DVec2::new(u + 1e-6, v)).unwrap() - raised;
-            let dv = surface.raise(DVec2::new(u, v + 1e-6)).unwrap() - raised;
-            assert!(du.cross(&dv).dot(&vertex.norm) > 0.0,
-                "both toroidal charts must preserve outward surface orientation");
+            let du = prepared.raise(DVec2::new(u + 1e-6, v)).unwrap() - raised;
+            let dv = prepared.raise(DVec2::new(u, v + 1e-6)).unwrap() - raised;
+            assert!(
+                du.cross(&dv)
+                    .dot(&prepared.normal(vertex.pos, DVec2::new(u, v)))
+                    > 0.0,
+                "both toroidal charts must preserve outward surface orientation"
+            );
         }
         let boundary_len = points.len();
-        let radial_min = points.iter().map(|(u, v)| u.hypot(*v))
+        let radial_min = points
+            .iter()
+            .map(|(u, v)| u.hypot(*v))
             .fold(f64::INFINITY, f64::min);
-        let radial_max = points.iter().map(|(u, v)| u.hypot(*v))
+        let radial_max = points
+            .iter()
+            .map(|(u, v)| u.hypot(*v))
             .fold(f64::NEG_INFINITY, f64::max);
-        surface.add_steiner_points(&mut points, &mut vertices);
+        prepared.add_steiner_points(&mut points, &mut vertices);
         assert!(points.len() > boundary_len);
         assert_eq!(points.len(), vertices.len());
         assert!(points[boundary_len..].iter().all(|(u, v)| {
             let radius = u.hypot(*v);
             radius > radial_min && radius < radial_max
         }));
-        let mut triangulation =
-            cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
+        let mut triangulation = cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
         triangulation.run().unwrap();
         assert!(triangulation.triangles().next().is_some());
     }
@@ -1717,7 +2378,8 @@ mod tests {
             DVec3::new(0.0, 0.0, 1.0),
             4.9,
             0.1,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[test]

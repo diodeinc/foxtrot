@@ -1,24 +1,29 @@
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 
-use nalgebra_glm as glm;
-use glm::{DVec2, DVec3, DVec4, DMat4, U32Vec3};
+use glm::{DMat4, DVec2, DVec3, DVec4, U32Vec3};
 use log::{debug, error, info, warn};
+use nalgebra_glm as glm;
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
 
-use step::{
-    ap214, ap214::*, step_file::{FromEntity, StepFile}, id::Id, ap214::Entity,
-};
 use crate::{
-    Error,
     curve::Curve,
-    mesh, mesh::{Mesh, Triangle},
+    mesh,
+    mesh::{Mesh, Triangle},
     stats::{FailureKind, Stats, TessellationFailure},
-    surface::Surface
+    surface::Surface,
+    Error,
 };
-use nurbs::{SampledCurve, SampledSurface, NURBSSurface, KnotVector};
+use nurbs::{KnotVector, NURBSSurface, SampledCurve, SampledSurface};
+use step::{
+    ap214,
+    ap214::Entity,
+    ap214::*,
+    id::Id,
+    step_file::{FromEntity, StepFile},
+};
 
 /// Set the `SAVE_DEBUG_SVGS` environment variable to a directory path to save
 /// SVG debug output for faces that error or panic during triangulation.
@@ -40,7 +45,8 @@ fn transformed_representation_relationship<'a>(
 ) -> Option<&'a RepresentationRelationshipWithTransformation_<'a>> {
     match &s.0[id.0] {
         Entity::RepresentationRelationshipWithTransformation(rel) => Some(rel),
-        Entity::ComplexEntity(subs) => subs.iter()
+        Entity::ComplexEntity(subs) => subs
+            .iter()
             .find_map(|sub| RepresentationRelationshipWithTransformation_::try_from_entity(sub)),
         _ => None,
     }
@@ -78,7 +84,7 @@ fn collect_shape_instances<'a>(
             e => {
                 warn!("Skipping {:?} (not a supported representation)", e);
                 continue;
-            },
+            }
         };
         let uncertainty = representation_uncertainty(s, context);
 
@@ -88,7 +94,8 @@ fn collect_shape_instances<'a>(
                 | Entity::BrepWithVoids(_)
                 | Entity::ShellBasedSurfaceModel(_) => {
                     let shape = to_mesh.entry(*m).or_insert_with(|| ShapeGeometry {
-                        instances: Vec::new(), uncertainty,
+                        instances: Vec::new(),
+                        uncertainty,
                     });
                     // A shared shape must satisfy its strictest context.
                     shape.uncertainty = shape.uncertainty.min(uncertainty);
@@ -103,17 +110,19 @@ fn collect_shape_instances<'a>(
     if to_mesh.is_empty() {
         s.0.iter()
             .enumerate()
-            .filter(|(_i, e)|
-                match e {
-                    Entity::ManifoldSolidBrep(_)
-                    | Entity::BrepWithVoids(_)
-                    | Entity::ShellBasedSurfaceModel(_) => true,
-                    _ => false,
-                }
-            )
+            .filter(|(_i, e)| match e {
+                Entity::ManifoldSolidBrep(_)
+                | Entity::BrepWithVoids(_)
+                | Entity::ShellBasedSurfaceModel(_) => true,
+                _ => false,
+            })
             .map(|(i, _e)| Id::new(i))
             .for_each(|i| {
-                to_mesh.entry(i).or_default().instances.push(DMat4::identity());
+                to_mesh
+                    .entry(i)
+                    .or_default()
+                    .instances
+                    .push(DMat4::identity());
             });
     }
 
@@ -121,16 +130,19 @@ fn collect_shape_instances<'a>(
 }
 
 fn collect_product_roots(s: &StepFile) -> HashSet<usize> {
-    let all_products: HashSet<_> = s.0.iter()
-        .enumerate()
-        .filter(|(_i, e)| matches!(e, Entity::ProductDefinition(_)))
-        .map(|(i, _)| i)
-        .collect();
-    let child_products: HashSet<_> = s.0.iter()
-        .filter_map(|e| NextAssemblyUsageOccurrence_::try_from_entity(e))
-        .map(|rel| rel.related_product_definition.0)
-        .collect();
-    all_products.into_iter()
+    let all_products: HashSet<_> =
+        s.0.iter()
+            .enumerate()
+            .filter(|(_i, e)| matches!(e, Entity::ProductDefinition(_)))
+            .map(|(i, _)| i)
+            .collect();
+    let child_products: HashSet<_> =
+        s.0.iter()
+            .filter_map(|e| NextAssemblyUsageOccurrence_::try_from_entity(e))
+            .map(|rel| rel.related_product_definition.0)
+            .collect();
+    all_products
+        .into_iter()
         .filter(|idx| !child_products.contains(idx))
         .collect()
 }
@@ -139,8 +151,9 @@ fn collect_product_representations<'a>(
     s: &'a StepFile,
 ) -> HashMap<ProductDefinition<'a>, Vec<Representation<'a>>> {
     let mut reps: HashMap<ProductDefinition<'a>, Vec<Representation<'a>>> = HashMap::new();
-    for sdr in s.0.iter()
-        .filter_map(|e| ShapeDefinitionRepresentation_::try_from_entity(e))
+    for sdr in
+        s.0.iter()
+            .filter_map(|e| ShapeDefinitionRepresentation_::try_from_entity(e))
     {
         let Some(pds) = s.entity::<ProductDefinitionShape_>(sdr.definition.cast()) else {
             continue;
@@ -164,23 +177,27 @@ fn collect_occurrence_instances<'a>(
     s: &'a StepFile,
     product_reps: &HashMap<ProductDefinition<'a>, Vec<Representation<'a>>>,
 ) -> HashMap<ProductDefinition<'a>, Vec<OccurrenceInstance<'a>>> {
-    let occurrence_shape_defs: HashMap<_, _> = s.0.iter()
-        .enumerate()
-        .filter_map(|(idx, e)| {
-            let pds = ProductDefinitionShape_::try_from_entity(e)?;
-            s.entity::<NextAssemblyUsageOccurrence_>(pds.definition.cast())
-                .map(|occ| (Id::new(idx), occ))
-        })
-        .collect();
+    let occurrence_shape_defs: HashMap<_, _> =
+        s.0.iter()
+            .enumerate()
+            .filter_map(|(idx, e)| {
+                let pds = ProductDefinitionShape_::try_from_entity(e)?;
+                s.entity::<NextAssemblyUsageOccurrence_>(pds.definition.cast())
+                    .map(|occ| (Id::new(idx), occ))
+            })
+            .collect();
 
-    let mut occurrences: HashMap<ProductDefinition<'a>, Vec<OccurrenceInstance<'a>>> = HashMap::new();
-    for cdsr in s.0.iter()
-        .filter_map(|e| ContextDependentShapeRepresentation_::try_from_entity(e))
+    let mut occurrences: HashMap<ProductDefinition<'a>, Vec<OccurrenceInstance<'a>>> =
+        HashMap::new();
+    for cdsr in
+        s.0.iter()
+            .filter_map(|e| ContextDependentShapeRepresentation_::try_from_entity(e))
     {
         let Some(occ) = occurrence_shape_defs.get(&cdsr.represented_product_relation) else {
             continue;
         };
-        let Some(rel) = transformed_representation_relationship(s, cdsr.representation_relation) else {
+        let Some(rel) = transformed_representation_relationship(s, cdsr.representation_relation)
+        else {
             warn!(
                 "Skipping context-dependent shape representation {:?}: expected transformed representation relationship",
                 cdsr
@@ -232,7 +249,8 @@ fn collect_occurrence_instances<'a>(
             continue;
         };
 
-        occurrences.entry(occ.relating_product_definition)
+        occurrences
+            .entry(occ.relating_product_definition)
             .or_default()
             .push(OccurrenceInstance {
                 child_product: occ.related_product_definition,
@@ -256,7 +274,7 @@ fn collect_rep_instances<'a>(s: &'a StepFile) -> HashMap<Representation<'a>, Vec
             todo.extend(
                 reps.iter()
                     .copied()
-                    .map(|rep| (product, rep, DMat4::identity()))
+                    .map(|rep| (product, rep, DMat4::identity())),
             );
         }
     }
@@ -269,11 +287,7 @@ fn collect_rep_instances<'a>(s: &'a StepFile) -> HashMap<Representation<'a>, Vec
                 if occ.parent_rep != rep {
                     continue;
                 }
-                todo.push((
-                    occ.child_product,
-                    occ.child_rep,
-                    mat * occ.transform,
-                ));
+                todo.push((occ.child_product, occ.child_rep, mat * occ.transform));
             }
         }
     }
@@ -286,7 +300,9 @@ fn collect_rep_instances<'a>(s: &'a StepFile) -> HashMap<Representation<'a>, Vec
 
 /// Convert an SiUnit with name Metre to a mm scale factor.
 fn si_unit_to_mm(si: &SiUnit_) -> Option<f64> {
-    if !matches!(si.name, SiUnitName::Metre) { return None; }
+    if !matches!(si.name, SiUnitName::Metre) {
+        return None;
+    }
     Some(match &si.prefix {
         Some(SiPrefix::Exa) => 1e21,
         Some(SiPrefix::Peta) => 1e18,
@@ -328,14 +344,20 @@ fn resolve_length_unit_to_mm(s: &StepFile, mut idx: usize) -> Option<f64> {
             let result = scale * si_unit_to_mm(si)?;
             return (result.is_finite() && result > 0.0).then_some(result);
         }
-        let conversion = parts.iter().find_map(ConversionBasedUnit_::try_from_entity)?;
+        let conversion = parts
+            .iter()
+            .find_map(ConversionBasedUnit_::try_from_entity)?;
         let (value, unit) = match s.0.get(conversion.conversion_factor.0)? {
             Entity::MeasureWithUnit(m) => (&m.value_component, m.unit_component),
             Entity::LengthMeasureWithUnit(m) => (&m.value_component, m.unit_component),
             _ => return None,
         };
-        let MeasureValue::LengthMeasure(length) = value else { return None; };
-        if !length.0.is_finite() || length.0 <= 0.0 { return None; }
+        let MeasureValue::LengthMeasure(length) = value else {
+            return None;
+        };
+        if !length.0.is_finite() || length.0 <= 0.0 {
+            return None;
+        }
         scale *= length.0;
         idx = unit.0;
     }
@@ -346,7 +368,8 @@ fn resolve_length_unit_to_mm(s: &StepFile, mut idx: usize) -> Option<f64> {
 /// convert coordinates to millimeters.  Returns 1.0 if the file already
 /// uses mm or if the unit cannot be determined.
 fn detect_length_scale_to_mm(s: &StepFile) -> f64 {
-    s.0.iter().flat_map(entity_components)
+    s.0.iter()
+        .flat_map(entity_components)
         .filter_map(GlobalUnitAssignedContext_::try_from_entity)
         .flat_map(|context| &context.units)
         .find_map(|unit| resolve_length_unit_to_mm(s, unit.0))
@@ -357,15 +380,23 @@ fn detect_length_scale_to_mm(s: &StepFile) -> f64 {
 /// Convert it to native coordinates before any assembly/output transforms.
 fn representation_uncertainty(s: &StepFile, context: RepresentationContext) -> f64 {
     let parts = entity_components(&s[context]);
-    let native_scale = parts.iter().filter_map(GlobalUnitAssignedContext_::try_from_entity)
+    let native_scale = parts
+        .iter()
+        .filter_map(GlobalUnitAssignedContext_::try_from_entity)
         .flat_map(|units| &units.units)
         .find_map(|unit| resolve_length_unit_to_mm(s, unit.0));
-    let Some(native_scale) = native_scale else { return 0.0; };
-    parts.iter().filter_map(GlobalUncertaintyAssignedContext_::try_from_entity)
+    let Some(native_scale) = native_scale else {
+        return 0.0;
+    };
+    parts
+        .iter()
+        .filter_map(GlobalUncertaintyAssignedContext_::try_from_entity)
         .flat_map(|context| &context.uncertainty)
         .filter_map(|id| s.entity(*id))
         .filter_map(|measure| {
-            let MeasureValue::LengthMeasure(length) = &measure.value_component else { return None; };
+            let MeasureValue::LengthMeasure(length) = &measure.value_component else {
+                return None;
+            };
             let scale = resolve_length_unit_to_mm(s, measure.unit_component.0)?;
             let value = length.0 * (scale / native_scale);
             (value.is_finite() && value >= 0.0).then_some(value)
@@ -390,23 +421,23 @@ fn detect_length_scale_fallback(s: &StepFile) -> f64 {
         };
         // Check if this entity group contains a LENGTH_UNIT marker
         let has_length_unit = subs.iter().any(|e| matches!(e, Entity::LengthUnit(_)));
-        if !has_length_unit { continue; }
+        if !has_length_unit {
+            continue;
+        }
 
         for sub in subs {
             match sub {
-                Entity::SiUnit(si) if matches!(si.name, SiUnitName::Metre) => {
-                    match &si.prefix {
-                        Some(SiPrefix::Milli) => found_milli_metre = true,
-                        None => found_bare_metre = true,
-                        _ => {},
-                    }
+                Entity::SiUnit(si) if matches!(si.name, SiUnitName::Metre) => match &si.prefix {
+                    Some(SiPrefix::Milli) => found_milli_metre = true,
+                    None => found_bare_metre = true,
+                    _ => {}
                 },
                 Entity::ConversionBasedUnit(cbu) => {
                     if cbu.name.0.to_uppercase().contains("INCH") {
                         found_inch = true;
                     }
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
     }
@@ -441,17 +472,19 @@ fn detect_length_scale_fallback(s: &StepFile) -> f64 {
 }
 
 pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
-    let styled_item_colors: HashMap<usize, DVec3> = s.0.iter()
+    let styled_item_colors: HashMap<usize, DVec3> = s
+        .0
+        .iter()
         .filter_map(|e| MechanicalDesignGeometricPresentationRepresentation_::try_from_entity(e))
         .flat_map(|m| m.items.iter())
         .filter_map(|item| s.entity(item.cast::<StyledItem_>()))
-        .filter_map(|styled|
+        .filter_map(|styled| {
             if styled.styles.len() != 1 {
                 None
             } else {
-                presentation_style_color(s, styled.styles[0])
-                    .map(|c| (styled.item.0, c))
-            })
+                presentation_style_color(s, styled.styles[0]).map(|c| (styled.item.0, c))
+            }
+        })
         .collect();
 
     // Store a map of ShapeRepresentationRelationships, which some models
@@ -471,20 +504,26 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
             Entity::ManifoldSurfaceShapeRepresentation(b) => &b.items,
             _ => return false,
         };
-        items.iter().any(|m| matches!(
-            &s[*m],
-            Entity::ManifoldSolidBrep(_)
-                | Entity::BrepWithVoids(_)
-                | Entity::ShellBasedSurfaceModel(_)
-        ))
+        items.iter().any(|m| {
+            matches!(
+                &s[*m],
+                Entity::ManifoldSolidBrep(_)
+                    | Entity::BrepWithVoids(_)
+                    | Entity::ShellBasedSurfaceModel(_)
+            )
+        })
     };
 
     let mut shape_rep_relationship: HashMap<Id<_>, Vec<Id<_>>> = HashMap::new();
-    for (r1, r2) in s.0.iter()
-        .filter_map(|e| ShapeRepresentationRelationship_::try_from_entity(e))
-        .map(|e| (e.rep_1, e.rep_2))
+    for (r1, r2) in
+        s.0.iter()
+            .filter_map(|e| ShapeRepresentationRelationship_::try_from_entity(e))
+            .map(|e| (e.rep_1, e.rep_2))
     {
-        match (representation_has_mesh_items(r1), representation_has_mesh_items(r2)) {
+        match (
+            representation_has_mesh_items(r1),
+            representation_has_mesh_items(r2),
+        ) {
             (true, false) => shape_rep_relationship.entry(r2).or_default().push(r1),
             (false, true) => shape_rep_relationship.entry(r1).or_default().push(r2),
             _ => continue,
@@ -497,57 +536,81 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
     } else {
         info!("Semantic representation instances: {}", rep_instances.len());
     }
-    let to_mesh = collect_shape_instances(
-        s,
-        &rep_instances,
-        &shape_rep_relationship,
-    );
+    let to_mesh = collect_shape_instances(s, &rep_instances, &shape_rep_relationship);
 
     let (to_mesh_iter, empty) = {
         #[cfg(feature = "rayon")]
-        { (to_mesh.par_iter(), || (Mesh::default(), Stats::default())) }
+        {
+            (to_mesh.par_iter(), || (Mesh::default(), Stats::default()))
+        }
         #[cfg(not(feature = "rayon"))]
-        { (to_mesh.iter(), (Mesh::default(), Stats::default())) }
+        {
+            (to_mesh.iter(), (Mesh::default(), Stats::default()))
+        }
     };
-    let mesh_fold = to_mesh_iter
-        .fold(
-            // Empty constructor
-            empty,
+    let mesh_fold = to_mesh_iter.fold(
+        // Empty constructor
+        empty,
+        // Fold operation
+        |(mut mesh, mut stats), (id, shape)| {
+            let mats = &shape.instances;
+            info!(
+                "processing shape entity {} ({} transforms)",
+                id.0,
+                mats.len()
+            );
+            let v_start = mesh.verts.len();
+            let t_start = mesh.triangles.len();
+            let default_color = styled_item_colors
+                .get(&id.0)
+                .copied()
+                .unwrap_or(DVec3::new(0.5, 0.5, 0.5));
+            crate::timing::time("shape:mesh_faces", || match &s[*id] {
+                Entity::ManifoldSolidBrep(b) => shell(
+                    s,
+                    b.outer.cast(),
+                    &mut mesh,
+                    &mut stats,
+                    &styled_item_colors,
+                    default_color,
+                    shape.uncertainty,
+                ),
+                Entity::ShellBasedSurfaceModel(b) => {
+                    for v in &b.sbsm_boundary {
+                        shell(
+                            s,
+                            *v,
+                            &mut mesh,
+                            &mut stats,
+                            &styled_item_colors,
+                            default_color,
+                            shape.uncertainty,
+                        );
+                    }
+                }
+                Entity::BrepWithVoids(b) => {
+                    for c in std::iter::once(b.outer.cast()).chain(b.voids.iter().map(|c| c.cast()))
+                    {
+                        shell(
+                            s,
+                            c,
+                            &mut mesh,
+                            &mut stats,
+                            &styled_item_colors,
+                            default_color,
+                            shape.uncertainty,
+                        );
+                    }
+                }
+                _ => {
+                    warn!("Skipping {:?} (not a known solid)", s[*id]);
+                }
+            });
 
-            // Fold operation
-            |(mut mesh, mut stats), (id, shape)| {
-                let mats = &shape.instances;
-                info!("processing shape entity {} ({} transforms)", id.0,
-                      mats.len());
-                let v_start = mesh.verts.len();
-                let t_start = mesh.triangles.len();
-                let default_color = styled_item_colors.get(&id.0)
-                    .copied()
-                    .unwrap_or(DVec3::new(0.5, 0.5, 0.5));
-                crate::timing::time("shape:mesh_faces", || match &s[*id] {
-                    Entity::ManifoldSolidBrep(b) =>
-                        shell(s, b.outer.cast(), &mut mesh, &mut stats,
-                            &styled_item_colors, default_color, shape.uncertainty),
-                    Entity::ShellBasedSurfaceModel(b) =>
-                        for v in &b.sbsm_boundary {
-                            shell(s, *v, &mut mesh, &mut stats,
-                                &styled_item_colors, default_color, shape.uncertainty);
-                        },
-                    Entity::BrepWithVoids(b) =>
-                        for c in std::iter::once(b.outer.cast())
-                            .chain(b.voids.iter().map(|c| c.cast())) {
-                            shell(s, c, &mut mesh, &mut stats,
-                                &styled_item_colors, default_color, shape.uncertainty);
-                        },
-                    _ => {
-                        warn!("Skipping {:?} (not a known solid)", s[*id]);
-                    },
-                });
-
-                // Build copies of the mesh by copying and applying transforms
-                let v_end = mesh.verts.len();
-                let t_end = mesh.triangles.len();
-                crate::timing::time("shape:instance_copies", || {
+            // Build copies of the mesh by copying and applying transforms
+            let v_end = mesh.verts.len();
+            let t_end = mesh.triangles.len();
+            crate::timing::time("shape:instance_copies", || {
                 for mat in &mats[1..] {
                     for v in v_start..v_end {
                         let p = mesh.verts[v].pos;
@@ -579,14 +642,18 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                     let n = mesh.verts[v].norm;
                     mesh.verts[v].norm = (mat * glm::vec3_to_vec4(&n)).xyz();
                 }
-                });
-                (mesh, stats)
             });
+            (mesh, stats)
+        },
+    );
 
     let (mesh, mut stats) = {
         #[cfg(feature = "rayon")]
-        { mesh_fold.reduce(empty,
-                |a, b| (Mesh::combine(a.0, b.0), Stats::combine(a.1, b.1))) }
+        {
+            mesh_fold.reduce(empty, |a, b| {
+                (Mesh::combine(a.0, b.0), Stats::combine(a.1, b.1))
+            })
+        }
         #[cfg(not(feature = "rayon"))]
         {
             mesh_fold
@@ -617,77 +684,86 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
     if !stats.is_complete() {
         warn!(
             "triangulation finished with {} face errors and {} panics",
-            stats.num_errors(), stats.num_panics()
+            stats.num_errors(),
+            stats.num_panics()
         );
     }
     (mesh, stats)
 }
 
-fn item_defined_transformation(s: &StepFile, t: Id<ItemDefinedTransformation_>)
-    -> Result<DMat4, Error>
-{
-    let i = s.entity(t).ok_or(Error::InvalidStepEntity("ItemDefinedTransformation"))?;
+fn item_defined_transformation(
+    s: &StepFile,
+    t: Id<ItemDefinedTransformation_>,
+) -> Result<DMat4, Error> {
+    let i = s
+        .entity(t)
+        .ok_or(Error::InvalidStepEntity("ItemDefinedTransformation"))?;
 
     let (location, axis, ref_direction) = axis2_placement_3d(s, i.transform_item_1.cast())?;
-    let t1 = Surface::make_affine_transform(axis,
-        ref_direction,
-        axis.cross(&ref_direction),
-        location);
+    let t1 =
+        Surface::make_affine_transform(axis, ref_direction, axis.cross(&ref_direction), location);
 
     let (location, axis, ref_direction) = axis2_placement_3d(s, i.transform_item_2.cast())?;
-    let t2 = Surface::make_affine_transform(axis,
-        ref_direction,
-        axis.cross(&ref_direction),
-        location);
+    let t2 =
+        Surface::make_affine_transform(axis, ref_direction, axis.cross(&ref_direction), location);
 
-    let t1i = t1.try_inverse()
+    let t1i = t1
+        .try_inverse()
         .ok_or(Error::SingularTransform("item-defined transformation"))?;
     Ok(t2 * t1i)
 }
 
-fn presentation_style_color(s: &StepFile, p: PresentationStyleAssignment)
-    -> Option<DVec3>
-{
+fn presentation_style_color(s: &StepFile, p: PresentationStyleAssignment) -> Option<DVec3> {
     // AAAAAHHHHH
     s.entity(p)
         .and_then(|p: &PresentationStyleAssignment_| {
-                let mut surf = p.styles.iter().filter_map(|y| {
-                    // This is an ambiguous parse, so we hard-code the first
-                    // Entity item in the enum
-                    use PresentationStyleSelect::PreDefinedPresentationStyle;
-                    if let PreDefinedPresentationStyle(u) = y {
-                        s.entity(u.cast::<SurfaceStyleUsage_>())
-                    } else {
-                        None
-                    }});
-                let out = surf.next();
-                out
-            })
-        .and_then(|surf: &SurfaceStyleUsage_|
-            s.entity(surf.style.cast::<SurfaceSideStyle_>()))
-        .and_then(|surf: &SurfaceSideStyle_| if surf.styles.len() != 1 {
+            let mut surf = p.styles.iter().filter_map(|y| {
+                // This is an ambiguous parse, so we hard-code the first
+                // Entity item in the enum
+                use PresentationStyleSelect::PreDefinedPresentationStyle;
+                if let PreDefinedPresentationStyle(u) = y {
+                    s.entity(u.cast::<SurfaceStyleUsage_>())
+                } else {
+                    None
+                }
+            });
+            let out = surf.next();
+            out
+        })
+        .and_then(|surf: &SurfaceStyleUsage_| s.entity(surf.style.cast::<SurfaceSideStyle_>()))
+        .and_then(|surf: &SurfaceSideStyle_| {
+            if surf.styles.len() != 1 {
                 None
             } else {
                 s.entity(surf.styles[0].cast::<SurfaceStyleFillArea_>())
-            })
-        .and_then(|surf: &SurfaceStyleFillArea_|
-            s.entity(surf.fill_area))
-        .and_then(|fill: &FillAreaStyle_| if fill.fill_styles.len() != 1 {
+            }
+        })
+        .and_then(|surf: &SurfaceStyleFillArea_| s.entity(surf.fill_area))
+        .and_then(|fill: &FillAreaStyle_| {
+            if fill.fill_styles.len() != 1 {
                 None
             } else {
                 s.entity(fill.fill_styles[0].cast::<FillAreaStyleColour_>())
-            })
-        .and_then(|f: &FillAreaStyleColour_|
-            s.entity(f.fill_colour.cast::<ColourRgb_>()))
+            }
+        })
+        .and_then(|f: &FillAreaStyleColour_| s.entity(f.fill_colour.cast::<ColourRgb_>()))
         .map(|c| DVec3::new(c.red, c.green, c.blue))
 }
 
 fn cartesian_point(s: &StepFile, a: Id<CartesianPoint_>) -> Result<DVec3, Error> {
-    let p = s.entity(a).ok_or(Error::InvalidStepEntity("CartesianPoint"))?;
+    let p = s
+        .entity(a)
+        .ok_or(Error::InvalidStepEntity("CartesianPoint"))?;
     if p.coordinates.len() < 3 {
-        return Err(Error::InvalidGeometry("cartesian point has fewer than 3 coordinates"));
+        return Err(Error::InvalidGeometry(
+            "cartesian point has fewer than 3 coordinates",
+        ));
     }
-    Ok(DVec3::new(p.coordinates[0].0, p.coordinates[1].0, p.coordinates[2].0))
+    Ok(DVec3::new(
+        p.coordinates[0].0,
+        p.coordinates[1].0,
+        p.coordinates[2].0,
+    ))
 }
 
 fn direction(s: &StepFile, a: Direction) -> Result<DVec3, Error> {
@@ -695,18 +771,27 @@ fn direction(s: &StepFile, a: Direction) -> Result<DVec3, Error> {
     if p.direction_ratios.len() < 3 {
         return Err(Error::InvalidGeometry("direction has fewer than 3 ratios"));
     }
-    Ok(DVec3::new(p.direction_ratios[0],
-               p.direction_ratios[1],
-               p.direction_ratios[2]))
+    Ok(DVec3::new(
+        p.direction_ratios[0],
+        p.direction_ratios[1],
+        p.direction_ratios[2],
+    ))
 }
 
-fn axis2_placement_3d(s: &StepFile, t: Id<Axis2Placement3d_>)
-    -> Result<(DVec3, DVec3, DVec3), Error>
-{
-    let a = s.entity(t).ok_or(Error::InvalidStepEntity("Axis2Placement3d"))?;
+fn axis2_placement_3d(
+    s: &StepFile,
+    t: Id<Axis2Placement3d_>,
+) -> Result<(DVec3, DVec3, DVec3), Error> {
+    let a = s
+        .entity(t)
+        .ok_or(Error::InvalidStepEntity("Axis2Placement3d"))?;
     let location = cartesian_point(s, a.location)?;
     // TODO: this doesn't necessarily match the behavior of `build_axes`
-    let axis = direction(s, a.axis.ok_or(Error::MissingStepField("Axis2Placement3d.axis"))?)?;
+    let axis = direction(
+        s,
+        a.axis
+            .ok_or(Error::MissingStepField("Axis2Placement3d.axis"))?,
+    )?;
     let ref_direction = match a.ref_direction {
         None => DVec3::new(1.0, 0.0, 0.0),
         Some(r) => direction(s, r)?,
@@ -728,16 +813,20 @@ fn shell(
         Entity::OpenShell(shell) => Some((&shell.cfs_faces, true)),
         // WR1 forbids an oriented shell as the element of another oriented
         // shell. Resolve the concrete face set once, without recursive cases.
-        Entity::OrientedClosedShell(shell) => s.entity(shell.closed_shell_element)
+        Entity::OrientedClosedShell(shell) => s
+            .entity(shell.closed_shell_element)
             .map(|element| (&element.cfs_faces, shell.orientation)),
-        Entity::OrientedOpenShell(shell) => s.entity(shell.open_shell_element)
+        Entity::OrientedOpenShell(shell) => s
+            .entity(shell.open_shell_element)
             .map(|element| (&element.cfs_faces, shell.orientation)),
         _ => None,
     };
     let Some((faces, orientation)) = data else {
         error!("Invalid shell or oriented shell element {:?}", c);
         stats.failures.push(TessellationFailure {
-            entity_id: c.0, surface_id: None, kind: FailureKind::InvalidEntity,
+            entity_id: c.0,
+            surface_id: None,
+            kind: FailureKind::InvalidEntity,
             message: "invalid shell or oriented shell element".into(),
         });
         return;
@@ -749,7 +838,14 @@ fn shell(
         scratch.verts.clear();
         scratch.triangles.clear();
         stats.num_faces += 1;
-        match advanced_face(s, *face, &mut scratch, styled_item_colors, default_color, uncertainty) {
+        match advanced_face(
+            s,
+            *face,
+            &mut scratch,
+            styled_item_colors,
+            default_color,
+            uncertainty,
+        ) {
             Ok(()) => mesh.append(&mut scratch),
             Err(err) => {
                 let surface_id = match &s[*face] {
@@ -759,14 +855,22 @@ fn shell(
                 };
                 let kind = match err {
                     Error::TriangulationPanic => FailureKind::Panic,
-                    Error::UnknownSurfaceType | Error::UnknownCurveType | Error::ClosedSurface
-                        | Error::SelfIntersectingSurface | Error::ClosedCurve
-                        | Error::SelfIntersectingCurve => FailureKind::Unsupported,
-                    Error::InvalidStepEntity(_) | Error::MissingStepField(_) => FailureKind::InvalidEntity,
+                    Error::UnknownSurfaceType
+                    | Error::UnknownCurveType
+                    | Error::ClosedSurface
+                    | Error::SelfIntersectingSurface
+                    | Error::ClosedCurve
+                    | Error::SelfIntersectingCurve => FailureKind::Unsupported,
+                    Error::InvalidStepEntity(_) | Error::MissingStepField(_) => {
+                        FailureKind::InvalidEntity
+                    }
                     _ => FailureKind::Geometry,
                 };
                 stats.failures.push(TessellationFailure {
-                    entity_id: face.0, surface_id, kind, message: err.to_string(),
+                    entity_id: face.0,
+                    surface_id,
+                    kind,
+                    message: err.to_string(),
                 });
                 debug!("Failed to triangulate face #{}: {}", face.0, err);
             }
@@ -775,7 +879,9 @@ fn shell(
     // conditional_reverse acts on face orientation, not face-set order.
     // Reverse both render normals and geometric winding for cavity walls.
     if !orientation {
-        for v in &mut mesh.verts[v_start..] { v.norm = -v.norm; }
+        for v in &mut mesh.verts[v_start..] {
+            v.norm = -v.norm;
+        }
         for t in &mut mesh.triangles[t_start..] {
             t.verts = U32Vec3::new(t.verts.x, t.verts.z, t.verts.y);
         }
@@ -798,7 +904,10 @@ fn advanced_face(
         Entity::FaceSurface(face) => (&face.bounds[..], face.face_geometry, face.same_sense),
         _ => return Err(Error::InvalidStepEntity("FaceSurface")),
     };
-    let face_color = styled_item_colors.get(&f.0).copied().unwrap_or(default_color);
+    let face_color = styled_item_colors
+        .get(&f.0)
+        .copied()
+        .unwrap_or(default_color);
     info!("triangulating face {} (geometry {})", f.0, face_geometry.0);
 
     debug_assert!(mesh.verts.is_empty() && mesh.triangles.is_empty());
@@ -830,7 +939,7 @@ fn advanced_face(
                     norm: DVec3::zeros(),
                     color: face_color,
                 });
-            },
+            }
 
             // Default for lists of contour points
             _ => {
@@ -857,7 +966,8 @@ fn advanced_face(
 
                 // Close the loop by returning to the starting point
                 edges.pop();
-                let last = edges.last_mut()
+                let last = edges
+                    .last_mut()
                     .ok_or(Error::InvalidGeometry("contour loop had no edges"))?;
                 last.1 = start;
                 if edge_loop_len > 0 {
@@ -868,13 +978,19 @@ fn advanced_face(
     }
 
     // Swept surfaces use the actual trims to choose a finite NURBS domain.
-    let has_seam = edge_uses.values().any(|&(forward, reverse)| forward > 0 && reverse > 0);
-    let mut surf = crate::timing::time("face:get_surface",
-        || get_surface(s, face_geometry, &boundary_points, uncertainty, has_seam))?;
+    let has_seam = edge_uses
+        .values()
+        .any(|&(forward, reverse)| forward > 0 && reverse > 0);
+    let surf = crate::timing::time("face:get_surface", || {
+        get_surface(s, face_geometry, &boundary_points, uncertainty, has_seam)
+    })?;
 
     // Opposite uses of the same topological edge are seams, not trims.
     // A compact surface with no remaining boundary covers its entire domain.
-    if edge_uses.values().all(|&(forward, reverse)| forward == reverse) {
+    if edge_uses
+        .values()
+        .all(|&(forward, reverse)| forward == reverse)
+    {
         if let Some(full) = surf.untrimmed_mesh(face_color, same_sense) {
             mesh.verts.truncate(v_start);
             *mesh = Mesh::combine(std::mem::take(mesh), full);
@@ -884,51 +1000,66 @@ fn advanced_face(
 
     // Add curvature samples before constraint insertion. The CDT subdivides
     // constraints at existing vertices, including samples exactly on an edge.
-    let mut pts = crate::timing::time("face:lower_verts",
-        || surf.lower_verts(&mut mesh.verts[v_start..], &edges, same_sense))?;
-    crate::timing::time("face:unwrap_periodic",
-        || surf.unwrap_periodic(&mut pts, &edges, &unwrap_ranges));
+    let prepared = surf.prepare(&mesh.verts[v_start..], &edges, same_sense)?;
+    let mut pts = crate::timing::time("face:lower_verts", || {
+        prepared.lower_verts(&mesh.verts[v_start..])
+    })?;
+    crate::timing::time("face:unwrap_periodic", || {
+        prepared.unwrap_periodic(&mut pts, &edges, &unwrap_ranges)
+    });
     let had_boundary = !edges.is_empty();
     cancel_retraced_edges(&pts, &mut edges);
     if had_boundary && edges.is_empty() {
         return Err(Error::InvalidGeometry("face boundary cancels completely"));
     }
     let mut constraints: Vec<_> = edges.iter().map(|&(a, b)| (a, b, true)).collect();
-    crate::timing::time("face:resolve_crossing_edges",
-        || resolve_crossing_edges(&mut pts, &mut constraints, &mut mesh.verts, v_start));
+    crate::timing::time("face:resolve_crossing_edges", || {
+        resolve_crossing_edges(&mut pts, &mut constraints, &mut mesh.verts, v_start)
+    });
     let bonus_points = pts.len();
-    crate::timing::time("face:add_steiner_points",
-        || surf.add_steiner_points(&mut pts, &mut mesh.verts));
+    crate::timing::time("face:add_steiner_points", || {
+        prepared.add_steiner_points(&mut pts, &mut mesh.verts)
+    });
     let face_id = face_geometry.0;
     let n_steiner = pts.len() - bonus_points;
-    info!("face {} cdt input: {} pts ({} boundary, {} steiner), {} edges",
-          face_id, pts.len(), bonus_points, n_steiner, constraints.len());
+    info!(
+        "face {} cdt input: {} pts ({} boundary, {} steiner), {} edges",
+        face_id,
+        pts.len(),
+        bonus_points,
+        n_steiner,
+        constraints.len()
+    );
     if std::env::var("DUMP_FACE").ok().as_deref() == Some(&face_id.to_string()) {
         eprintln!("DUMP_FACE {}: pts={:?}", face_id, pts);
         eprintln!("DUMP_FACE {}: constraints={:?}", face_id, constraints);
     }
     // Preserve per-face panic diagnostics without mutating the input on error.
-    let result = crate::timing::time("face:cdt", ||
+    let result = crate::timing::time("face:cdt", || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut t = cdt::Triangulation::new_with_constraints(&pts, constraints.iter().copied())?;
-        if let Err(e) = t.run() {
-            if let Some(dir) = save_debug_svg_dir() {
-                let filename = format!("{}/err{}.svg", dir, face_id);
-                if let Err(err) = t.save_debug_svg(&filename) {
-                    warn!("Could not save debug SVG {}: {}", filename, err);
+            let mut t =
+                cdt::Triangulation::new_with_constraints(&pts, constraints.iter().copied())?;
+            if let Err(e) = t.run() {
+                if let Some(dir) = save_debug_svg_dir() {
+                    let filename = format!("{}/err{}.svg", dir, face_id);
+                    if let Err(err) = t.save_debug_svg(&filename) {
+                        warn!("Could not save debug SVG {}: {}", filename, err);
+                    }
                 }
+                return Err(e);
             }
-            return Err(e);
-        }
-        Ok(t)
-    })));
+            Ok(t)
+        }))
+    });
     let t = result.map_err(|_| Error::TriangulationPanic)??;
     for (a, b, c) in t.triangles() {
-        mesh.triangles.push(Triangle { verts: if same_sense {
-            U32Vec3::new(a as u32, b as u32, c as u32)
-        } else {
-            U32Vec3::new(a as u32, c as u32, b as u32)
-        }});
+        mesh.triangles.push(Triangle {
+            verts: if same_sense {
+                U32Vec3::new(a as u32, b as u32, c as u32)
+            } else {
+                U32Vec3::new(a as u32, c as u32, b as u32)
+            },
+        });
     }
     if mesh.triangles.is_empty() {
         return Err(Error::InvalidGeometry("empty face tessellation"));
@@ -937,7 +1068,7 @@ fn advanced_face(
     // only after topology is complete. Never move the boundary positions.
     for (v, &(u, w)) in mesh.verts.iter_mut().zip(&pts) {
         v.color = face_color;
-        v.norm = surf.normal(v.pos, DVec2::new(u, w)) * if same_sense { 1. } else { -1. };
+        v.norm = prepared.normal(v.pos, DVec2::new(u, w)) * if same_sense { 1. } else { -1. };
     }
     info!("face {} done", face_id);
     Ok(())
@@ -953,29 +1084,47 @@ struct HomogeneousCurve {
 // Tangent-intersection controls for four rational quadratic circle spans.
 // Reuse the first control at the seam exactly, without sin(2π) roundoff.
 const CIRCLE_CONTROLS: [(f64, f64); 9] = [
-    (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (-1.0, 1.0),
-    (-1.0, 0.0), (-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (1.0, 0.0),
+    (1.0, 0.0),
+    (1.0, 1.0),
+    (0.0, 1.0),
+    (-1.0, 1.0),
+    (-1.0, 0.0),
+    (-1.0, -1.0),
+    (0.0, -1.0),
+    (1.0, -1.0),
+    (1.0, 0.0),
 ];
 
 fn homogeneous_curve(s: &StepFile, curve: ap214::Curve) -> Result<HomogeneousCurve, Error> {
     match &s[curve] {
         Entity::BSplineCurveWithKnots(b) => {
             let points = control_points_1d(s, &b.control_points_list)?
-                .into_iter().map(|p| DVec4::new(p.x, p.y, p.z, 1.0)).collect();
+                .into_iter()
+                .map(|p| DVec4::new(p.x, p.y, p.z, 1.0))
+                .collect();
             Ok(HomogeneousCurve {
                 open: b.closed_curve.0 != Some(true),
                 knots: curve_knot_vector(b)?,
                 control_points: points,
             })
-        },
+        }
         Entity::ComplexEntity(parts) => {
-            let b = parts.iter().find_map(|e| match e {
-                Entity::BSplineCurveWithKnots(b) => Some(b), _ => None,
-            }).ok_or(Error::UnknownCurveType)?;
-            let r = parts.iter().find_map(|e| match e {
-                Entity::RationalBSplineCurve(r) => Some(r), _ => None,
-            }).ok_or(Error::UnknownCurveType)?;
-            let points = control_points_1d(s, &b.control_points_list)?.into_iter()
+            let b = parts
+                .iter()
+                .find_map(|e| match e {
+                    Entity::BSplineCurveWithKnots(b) => Some(b),
+                    _ => None,
+                })
+                .ok_or(Error::UnknownCurveType)?;
+            let r = parts
+                .iter()
+                .find_map(|e| match e {
+                    Entity::RationalBSplineCurve(r) => Some(r),
+                    _ => None,
+                })
+                .ok_or(Error::UnknownCurveType)?;
+            let points = control_points_1d(s, &b.control_points_list)?
+                .into_iter()
                 .zip(r.weights_data.iter())
                 .map(|(p, &w)| DVec4::new(p.x * w, p.y * w, p.z * w, w))
                 .collect();
@@ -984,36 +1133,57 @@ fn homogeneous_curve(s: &StepFile, curve: ap214::Curve) -> Result<HomogeneousCur
                 knots: curve_knot_vector(b)?,
                 control_points: points,
             })
-        },
-        Entity::Circle(c) => conic_curve(s, c.position.cast(), c.radius.0.0.0, c.radius.0.0.0),
-        Entity::Ellipse(c) => conic_curve(s, c.position.cast(), c.semi_axis_1.0.0.0, c.semi_axis_2.0.0.0),
+        }
+        Entity::Circle(c) => conic_curve(s, c.position.cast(), c.radius.0 .0 .0, c.radius.0 .0 .0),
+        Entity::Ellipse(c) => conic_curve(
+            s,
+            c.position.cast(),
+            c.semi_axis_1.0 .0 .0,
+            c.semi_axis_2.0 .0 .0,
+        ),
         _ => Err(Error::UnknownCurveType),
     }
 }
 
 fn curve_knot_vector(b: &BSplineCurveWithKnots_) -> Result<KnotVector, Error> {
     let knots: Vec<f64> = b.knots.iter().map(|k| k.0).collect();
-    let multiplicities: Vec<usize> = b.knot_multiplicities.iter()
-        .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative curve multiplicity")))
+    let multiplicities: Vec<usize> = b
+        .knot_multiplicities
+        .iter()
+        .map(|&k| {
+            k.try_into()
+                .map_err(|_| Error::NumericConversion("negative curve multiplicity"))
+        })
         .collect::<Result<_, _>>()?;
     Ok(KnotVector::from_multiplicities(
-        b.degree.try_into().map_err(|_| Error::NumericConversion("negative curve degree"))?,
-        &knots, &multiplicities))
+        b.degree
+            .try_into()
+            .map_err(|_| Error::NumericConversion("negative curve degree"))?,
+        &knots,
+        &multiplicities,
+    ))
 }
 
-fn conic_curve(s: &StepFile, position: Axis2Placement3d, a: f64, b: f64)
-    -> Result<HomogeneousCurve, Error>
-{
+fn conic_curve(
+    s: &StepFile,
+    position: Axis2Placement3d,
+    a: f64,
+    b: f64,
+) -> Result<HomogeneousCurve, Error> {
     let (center, axis, x) = axis2_placement_3d(s, position)?;
     let z = axis.normalize();
     let x = (x - z * x.dot(&z)).normalize();
     let y = z.cross(&x);
     let q = std::f64::consts::FRAC_1_SQRT_2;
-    let control_points = CIRCLE_CONTROLS.iter().enumerate().map(|(i, &(u, v))| {
-        let w = if i % 2 == 0 { 1.0 } else { q };
-        let p = center + x * (a * u) + y * (b * v);
-        DVec4::new(p.x * w, p.y * w, p.z * w, w)
-    }).collect();
+    let control_points = CIRCLE_CONTROLS
+        .iter()
+        .enumerate()
+        .map(|(i, &(u, v))| {
+            let w = if i % 2 == 0 { 1.0 } else { q };
+            let p = center + x * (a * u) + y * (b * v);
+            DVec4::new(p.x * w, p.y * w, p.z * w, w)
+        })
+        .collect();
     Ok(HomogeneousCurve {
         open: false,
         knots: KnotVector::from_multiplicities(2, &[0.0, 0.25, 0.5, 0.75, 1.0], &[3, 2, 2, 2, 3]),
@@ -1021,11 +1191,16 @@ fn conic_curve(s: &StepFile, position: Axis2Placement3d, a: f64, b: f64)
     })
 }
 
-fn extrusion_surface(curve: HomogeneousCurve, vector: DVec3, boundary: &[DVec3], uncertainty: f64)
-    -> Result<Surface, Error>
-{
+fn extrusion_surface(
+    curve: HomogeneousCurve,
+    vector: DVec3,
+    boundary: &[DVec3],
+    uncertainty: f64,
+) -> Result<Surface, Error> {
     let denominator = vector.norm_squared();
-    if denominator == 0.0 { return Err(Error::InvalidGeometry("zero extrusion vector")); }
+    if denominator == 0.0 {
+        return Err(Error::InvalidGeometry("zero extrusion vector"));
+    }
     let mut range = (f64::INFINITY, f64::NEG_INFINITY);
     for h in &curve.control_points {
         let p = h.xyz() / h.w;
@@ -1036,20 +1211,50 @@ fn extrusion_surface(curve: HomogeneousCurve, vector: DVec3, boundary: &[DVec3],
         }
     }
     if !range.0.is_finite() || range.0 == range.1 {
-        return Err(Error::InvalidGeometry("extrusion has empty parameter range"));
+        return Err(Error::InvalidGeometry(
+            "extrusion has empty parameter range",
+        ));
     }
-    let controls = curve.control_points.into_iter().map(|h| vec![
-        h + DVec4::new(vector.x * h.w * range.0, vector.y * h.w * range.0, vector.z * h.w * range.0, 0.0),
-        h + DVec4::new(vector.x * h.w * range.1, vector.y * h.w * range.1, vector.z * h.w * range.1, 0.0),
-    ]).collect();
-    let surface = NURBSSurface::new(curve.open, true, curve.knots,
-        KnotVector::from_multiplicities(1, &[range.0, range.1], &[2, 2]), controls);
-    Ok(Surface::new_nurbs(SampledSurface::new(surface), uncertainty, false))
+    let controls = curve
+        .control_points
+        .into_iter()
+        .map(|h| {
+            vec![
+                h + DVec4::new(
+                    vector.x * h.w * range.0,
+                    vector.y * h.w * range.0,
+                    vector.z * h.w * range.0,
+                    0.0,
+                ),
+                h + DVec4::new(
+                    vector.x * h.w * range.1,
+                    vector.y * h.w * range.1,
+                    vector.z * h.w * range.1,
+                    0.0,
+                ),
+            ]
+        })
+        .collect();
+    let surface = NURBSSurface::new(
+        curve.open,
+        true,
+        curve.knots,
+        KnotVector::from_multiplicities(1, &[range.0, range.1], &[2, 2]),
+        controls,
+    );
+    Ok(Surface::new_nurbs(
+        SampledSurface::new(surface),
+        uncertainty,
+        false,
+    ))
 }
 
-fn revolution_surface(curve: HomogeneousCurve, origin: DVec3, axis: DVec3, uncertainty: f64)
-    -> Result<Surface, Error>
-{
+fn revolution_surface(
+    curve: HomogeneousCurve,
+    origin: DVec3,
+    axis: DVec3,
+    uncertainty: f64,
+) -> Result<Surface, Error> {
     if axis.norm_squared() == 0.0 {
         return Err(Error::InvalidGeometry("zero revolution axis"));
     }
@@ -1057,149 +1262,227 @@ fn revolution_surface(curve: HomogeneousCurve, origin: DVec3, axis: DVec3, uncer
     let q = std::f64::consts::FRAC_1_SQRT_2;
     // ISO 10303-42 defines revolution as the first parameter and the basis
     // curve as the second. Swapping them reverses the surface normal.
-    let controls = CIRCLE_CONTROLS.iter().enumerate().map(|(j, &(x, y))| {
-        let wj = if j % 2 == 0 { 1.0 } else { q };
-        curve.control_points.iter().map(|h| {
-            let p = h.xyz() / h.w;
-            let axial = origin + axis * (p - origin).dot(&axis);
-            let radial = p - axial;
-            // The first parameter is the standard four-span rational
-            // quadratic circle, not an angular parameter.
-            let point = axial + radial * x + axis.cross(&radial) * y;
-            let weight = h.w * wj;
-            DVec4::new(point.x * weight, point.y * weight, point.z * weight, weight)
-        }).collect()
-    }).collect();
-    let circle_knots = KnotVector::from_multiplicities(
-        2, &[0.0, 0.25, 0.5, 0.75, 1.0], &[3, 2, 2, 2, 3]);
+    let controls = CIRCLE_CONTROLS
+        .iter()
+        .enumerate()
+        .map(|(j, &(x, y))| {
+            let wj = if j % 2 == 0 { 1.0 } else { q };
+            curve
+                .control_points
+                .iter()
+                .map(|h| {
+                    let p = h.xyz() / h.w;
+                    let axial = origin + axis * (p - origin).dot(&axis);
+                    let radial = p - axial;
+                    // The first parameter is the standard four-span rational
+                    // quadratic circle, not an angular parameter.
+                    let point = axial + radial * x + axis.cross(&radial) * y;
+                    let weight = h.w * wj;
+                    DVec4::new(point.x * weight, point.y * weight, point.z * weight, weight)
+                })
+                .collect()
+        })
+        .collect();
+    let circle_knots =
+        KnotVector::from_multiplicities(2, &[0.0, 0.25, 0.5, 0.75, 1.0], &[3, 2, 2, 2, 3]);
     let surface = NURBSSurface::new(false, curve.open, circle_knots, curve.knots, controls);
-    Ok(Surface::new_nurbs(SampledSurface::new(surface), uncertainty, false))
+    Ok(Surface::new_nurbs(
+        SampledSurface::new(surface),
+        uncertainty,
+        false,
+    ))
 }
 
-fn spline_surface(b: &BSplineSurfaceWithKnots_, controls: Vec<Vec<DVec4>>)
-    -> Result<NURBSSurface, Error>
-{
+fn spline_surface(
+    b: &BSplineSurfaceWithKnots_,
+    controls: Vec<Vec<DVec4>>,
+) -> Result<NURBSSurface, Error> {
     let u_knots: Vec<f64> = b.u_knots.iter().map(|k| k.0).collect();
-    let u_multiplicities: Vec<usize> = b.u_multiplicities.iter()
-        .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative u multiplicity")))
+    let u_multiplicities: Vec<usize> = b
+        .u_multiplicities
+        .iter()
+        .map(|&k| {
+            k.try_into()
+                .map_err(|_| Error::NumericConversion("negative u multiplicity"))
+        })
         .collect::<Result<_, _>>()?;
     let u_knot_vec = KnotVector::from_multiplicities(
-        b.u_degree.try_into().map_err(|_| Error::NumericConversion("negative u degree"))?,
-        &u_knots, &u_multiplicities);
+        b.u_degree
+            .try_into()
+            .map_err(|_| Error::NumericConversion("negative u degree"))?,
+        &u_knots,
+        &u_multiplicities,
+    );
 
     let v_knots: Vec<f64> = b.v_knots.iter().map(|k| k.0).collect();
-    let v_multiplicities: Vec<usize> = b.v_multiplicities.iter()
-        .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative v multiplicity")))
+    let v_multiplicities: Vec<usize> = b
+        .v_multiplicities
+        .iter()
+        .map(|&k| {
+            k.try_into()
+                .map_err(|_| Error::NumericConversion("negative v multiplicity"))
+        })
         .collect::<Result<_, _>>()?;
     let v_knot_vec = KnotVector::from_multiplicities(
-        b.v_degree.try_into().map_err(|_| Error::NumericConversion("negative v degree"))?,
-        &v_knots, &v_multiplicities);
+        b.v_degree
+            .try_into()
+            .map_err(|_| Error::NumericConversion("negative v degree"))?,
+        &v_knots,
+        &v_multiplicities,
+    );
 
-    Ok(NURBSSurface::new(b.u_closed.0 != Some(true), b.v_closed.0 != Some(true),
-        u_knot_vec, v_knot_vec, controls))
+    Ok(NURBSSurface::new(
+        b.u_closed.0 != Some(true),
+        b.v_closed.0 != Some(true),
+        u_knot_vec,
+        v_knot_vec,
+        controls,
+    ))
 }
 
-fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3], uncertainty: f64, has_seam: bool) -> Result<Surface, Error> {
+fn get_surface(
+    s: &StepFile,
+    surf: ap214::Surface,
+    boundary: &[DVec3],
+    uncertainty: f64,
+    has_seam: bool,
+) -> Result<Surface, Error> {
     match &s[surf] {
         Entity::CylindricalSurface(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position)?;
-            Surface::new_cylinder(axis, ref_direction, location, c.radius.0.0.0)
-        },
+            Surface::new_cylinder(axis, ref_direction, location, c.radius.0 .0 .0)
+        }
         Entity::ToroidalSurface(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position)?;
             Surface::new_torus_with_ref_direction(
-                location, axis, ref_direction,
-                c.major_radius.0.0.0, c.minor_radius.0.0.0)
-        },
+                location,
+                axis,
+                ref_direction,
+                c.major_radius.0 .0 .0,
+                c.minor_radius.0 .0 .0,
+            )
+        }
         Entity::DegenerateToroidalSurface(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position)?;
-            let major = c.major_radius.0.0.0;
-            let minor = c.minor_radius.0.0.0;
+            let major = c.major_radius.0 .0 .0;
+            let minor = c.minor_radius.0 .0 .0;
             if !(0.0 < major && major < minor) {
-                return Err(Error::InvalidGeometry("degenerate torus requires 0 < major < minor"));
+                return Err(Error::InvalidGeometry(
+                    "degenerate torus requires 0 < major < minor",
+                ));
             }
             // For the inner lemon, u' = u + π and v' = π - v turn the
             // negative radial branch into a positive one with major radius
             // -R. This also selects the spec's outward normal: away from the
             // furthest, rather than nearest, point on the major circle.
-            Surface::new_torus_with_ref_direction(location, axis, ref_direction,
-                if c.select_outer { major } else { -major }, minor)
-        },
+            Surface::new_torus_with_ref_direction(
+                location,
+                axis,
+                ref_direction,
+                if c.select_outer { major } else { -major },
+                minor,
+            )
+        }
         Entity::Plane(p) => {
             // We'll ignore axis and ref_direction in favor of building an
             // orthonormal basis later on
-            let (location, axis, ref_direction) = axis2_placement_3d(s, p.position)?;
-            Surface::new_plane(axis, ref_direction, location)
-        },
+            let (_location, axis, _ref_direction) = axis2_placement_3d(s, p.position)?;
+            Surface::new_plane(axis)
+        }
         // We treat cones like planes, since that's a valid mapping into 2D
         Entity::ConicalSurface(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position)?;
             Surface::new_cone(axis, ref_direction, location, c.semi_angle.0)
-        },
+        }
         Entity::SphericalSurface(c) => {
             // We'll ignore axis and ref_direction in favor of building an
             // orthonormal basis later on
             let (location, _axis, _ref_direction) = axis2_placement_3d(s, c.position)?;
-            Surface::new_sphere(location, c.radius.0.0.0)
-        },
+            Surface::new_sphere(location, c.radius.0 .0 .0)
+        }
         Entity::SurfaceOfLinearExtrusion(e) => {
-            let v = s.entity(e.extrusion_axis)
+            let v = s
+                .entity(e.extrusion_axis)
                 .ok_or(Error::InvalidStepEntity("Vector"))?;
             let vector = direction(s, v.orientation)?.normalize() * v.magnitude.0;
-            extrusion_surface(homogeneous_curve(s, e.swept_curve)?, vector, boundary, uncertainty)
-        },
+            extrusion_surface(
+                homogeneous_curve(s, e.swept_curve)?,
+                vector,
+                boundary,
+                uncertainty,
+            )
+        }
         Entity::SurfaceOfRevolution(r) => {
-            let placement = s.entity(r.axis_position)
+            let placement = s
+                .entity(r.axis_position)
                 .ok_or(Error::InvalidStepEntity("Axis1Placement"))?;
             let origin = cartesian_point(s, placement.location)?;
-            let axis = direction(s, placement.axis
-                .ok_or(Error::MissingStepField("Axis1Placement.axis"))?)?;
-            revolution_surface(homogeneous_curve(s, r.swept_curve)?, origin, axis, uncertainty)
-        },
+            let axis = direction(
+                s,
+                placement
+                    .axis
+                    .ok_or(Error::MissingStepField("Axis1Placement.axis"))?,
+            )?;
+            revolution_surface(
+                homogeneous_curve(s, r.swept_curve)?,
+                origin,
+                axis,
+                uncertainty,
+            )
+        }
         Entity::BSplineSurfaceWithKnots(b) => {
             let control_points_list = control_points_2d(s, &b.control_points_list)?
                 .into_iter()
-                .map(|row| row.into_iter()
-                    .map(|p| DVec4::new(p.x, p.y, p.z, 1.0))
-                    .collect())
+                .map(|row| {
+                    row.into_iter()
+                        .map(|p| DVec4::new(p.x, p.y, p.z, 1.0))
+                        .collect()
+                })
                 .collect();
 
             let surf = spline_surface(b, control_points_list)?;
-            Ok(Surface::new_nurbs(SampledSurface::new(surf), uncertainty, has_seam))
-        },
+            Ok(Surface::new_nurbs(
+                SampledSurface::new(surf),
+                uncertainty,
+                has_seam,
+            ))
+        }
         Entity::ComplexEntity(v) if v.len() == 2 => {
             let bspline = if let Entity::BSplineSurfaceWithKnots(b) = &v[0] {
                 b
             } else {
                 warn!("Could not get BSplineSurfaceWithKnots from {:?}", v[0]);
-                return Err(Error::UnknownSurfaceType)
+                return Err(Error::UnknownSurfaceType);
             };
             let rational = if let Entity::RationalBSplineSurface(b) = &v[1] {
                 b
             } else {
                 warn!("Could not get RationalBSplineSurface from {:?}", v[1]);
-                return Err(Error::UnknownSurfaceType)
+                return Err(Error::UnknownSurfaceType);
             };
 
-            let control_points_list = control_points_2d(
-                    s, &bspline.control_points_list)?
+            let control_points_list = control_points_2d(s, &bspline.control_points_list)?
                 .into_iter()
                 .zip(rational.weights_data.iter())
-                .map(|(ctrl, weight)|
+                .map(|(ctrl, weight)| {
                     ctrl.into_iter()
                         .zip(weight.into_iter())
                         .map(|(p, w)| DVec4::new(p.x * w, p.y * w, p.z * w, *w))
-                        .collect())
+                        .collect()
+                })
                 .collect();
 
             let surf = spline_surface(bspline, control_points_list)?;
-            Ok(Surface::new_nurbs(SampledSurface::new(surf), uncertainty, has_seam))
-
-        },
+            Ok(Surface::new_nurbs(
+                SampledSurface::new(surf),
+                uncertainty,
+                has_seam,
+            ))
+        }
         e => {
             warn!("Could not get surface from {:?}", e);
             Err(Error::UnknownSurfaceType)
-        },
+        }
     }
 }
 
@@ -1207,15 +1490,18 @@ fn control_points_1d(s: &StepFile, row: &Vec<CartesianPoint>) -> Result<Vec<DVec
     row.iter().map(|p| cartesian_point(s, *p)).collect()
 }
 
-fn control_points_2d(s: &StepFile, rows: &Vec<Vec<CartesianPoint>>) -> Result<Vec<Vec<DVec3>>, Error> {
-    rows.iter()
-        .map(|row| control_points_1d(s, row))
-        .collect()
+fn control_points_2d(
+    s: &StepFile,
+    rows: &Vec<Vec<CartesianPoint>>,
+) -> Result<Vec<Vec<DVec3>>, Error> {
+    rows.iter().map(|row| control_points_1d(s, row)).collect()
 }
 
-fn face_bound(s: &StepFile, b: FaceBound, edge_uses: &mut HashMap<usize, (usize, usize)>)
-    -> Result<(Vec<DVec3>, usize), Error>
-{
+fn face_bound(
+    s: &StepFile,
+    b: FaceBound,
+    edge_uses: &mut HashMap<usize, (usize, usize)>,
+) -> Result<(Vec<DVec3>, usize), Error> {
     let (bound, orientation) = match &s[b] {
         Entity::FaceBound(b) => (b.bound, b.orientation),
         Entity::FaceOuterBound(b) => (b.bound, b.orientation),
@@ -1224,7 +1510,9 @@ fn face_bound(s: &StepFile, b: FaceBound, edge_uses: &mut HashMap<usize, (usize,
     match &s[bound] {
         Entity::EdgeLoop(e) => {
             for id in &e.edge_list {
-                let edge = s.entity(*id).ok_or(Error::InvalidStepEntity("OrientedEdge"))?;
+                let edge = s
+                    .entity(*id)
+                    .ok_or(Error::InvalidStepEntity("OrientedEdge"))?;
                 let uses = edge_uses.entry(edge.edge_element.0).or_default();
                 if edge.orientation == orientation {
                     uses.0 += 1;
@@ -1237,17 +1525,13 @@ fn face_bound(s: &StepFile, b: FaceBound, edge_uses: &mut HashMap<usize, (usize,
                 d.reverse()
             }
             Ok((d, e.edge_list.len()))
-        },
-        Entity::VertexLoop(v) => {
-            Ok((vec![vertex_point(s, v.loop_vertex)?], 0))
         }
+        Entity::VertexLoop(v) => Ok((vec![vertex_point(s, v.loop_vertex)?], 0)),
         _ => Err(Error::InvalidStepEntity("FaceBound.bound")),
     }
 }
 
-fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge])
-    -> Result<Vec<DVec3>, Error>
-{
+fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge]) -> Result<Vec<DVec3>, Error> {
     let mut out = Vec::new();
     for (i, e) in edge_list.iter().enumerate() {
         // Remove the last item from the list, since it's the beginning
@@ -1255,7 +1539,9 @@ fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge])
         if i > 0 {
             out.pop();
         }
-        let edge = s.entity(*e).ok_or(Error::InvalidStepEntity("OrientedEdge"))?;
+        let edge = s
+            .entity(*e)
+            .ok_or(Error::InvalidStepEntity("OrientedEdge"))?;
         let o = edge_curve(s, edge.edge_element.cast(), edge.orientation)?;
         out.extend(o.into_iter());
     }
@@ -1271,36 +1557,55 @@ fn edge_curve(s: &StepFile, e: EdgeCurve, orientation: bool) -> Result<Vec<DVec3
     // EDGE_CURVE owns its discretization. ORIENTED_EDGE changes traversal
     // only: resampling backward creates numerically different seam geometry.
     let mut points = curve.build(u, v, is_loop)?;
-    if !orientation { points.reverse(); }
+    if !orientation {
+        points.reverse();
+    }
     Ok(points)
 }
 
-fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
-         curve_id: ap214::Curve) -> Result<Curve, Error>
-{
+fn curve(
+    s: &StepFile,
+    edge_curve: &ap214::EdgeCurve_,
+    curve_id: ap214::Curve,
+) -> Result<Curve, Error> {
     Ok(match &s[curve_id] {
         Entity::Circle(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position.cast())?;
-            Curve::new_circle(location, axis, ref_direction, c.radius.0.0.0,
-                              edge_curve.edge_start == edge_curve.edge_end,
-                              edge_curve.same_sense)?
-        },
+            Curve::new_circle(
+                location,
+                axis,
+                ref_direction,
+                c.radius.0 .0 .0,
+                edge_curve.edge_start == edge_curve.edge_end,
+                edge_curve.same_sense,
+            )?
+        }
         Entity::Ellipse(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position.cast())?;
-            Curve::new_ellipse(location, axis, ref_direction,
-                               c.semi_axis_1.0.0.0, c.semi_axis_2.0.0.0,
-                               edge_curve.edge_start == edge_curve.edge_end,
-                               edge_curve.same_sense)?
-        },
+            Curve::new_ellipse(
+                location,
+                axis,
+                ref_direction,
+                c.semi_axis_1.0 .0 .0,
+                c.semi_axis_2.0 .0 .0,
+                edge_curve.edge_start == edge_curve.edge_end,
+                edge_curve.same_sense,
+            )?
+        }
         Entity::Hyperbola(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position.cast())?;
-            Curve::new_hyperbola(location, axis, ref_direction,
-                                 c.semi_axis.0.0.0, c.semi_imag_axis.0.0.0)?
-        },
+            Curve::new_hyperbola(
+                location,
+                axis,
+                ref_direction,
+                c.semi_axis.0 .0 .0,
+                c.semi_imag_axis.0 .0 .0,
+            )?
+        }
         Entity::Parabola(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position.cast())?;
             Curve::new_parabola(location, axis, ref_direction, c.focal_dist.0)?
-        },
+        }
         Entity::BSplineCurveWithKnots(c) => {
             if c.self_intersect.0 == Some(true) {
                 return Err(Error::SelfIntersectingCurve);
@@ -1309,28 +1614,24 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
             let control_points_list = control_points_1d(s, &c.control_points_list)?;
 
             let open = c.closed_curve.0 != Some(true);
-            let curve = nurbs::BSplineCurve::new(
-                open,
-                curve_knot_vector(c)?,
-                control_points_list,
-            );
+            let curve = nurbs::BSplineCurve::new(open, curve_knot_vector(c)?, control_points_list);
             Curve::BSplineCurveWithKnots {
                 curve: SampledCurve::new(curve),
                 dir: edge_curve.same_sense,
             }
-        },
+        }
         Entity::ComplexEntity(v) if v.len() == 2 => {
             let bspline = if let Entity::BSplineCurveWithKnots(b) = &v[0] {
                 b
             } else {
                 warn!("Could not get BSplineCurveWithKnots from {:?}", v[0]);
-                return Err(Error::UnknownCurveType)
+                return Err(Error::UnknownCurveType);
             };
             let rational = if let Entity::RationalBSplineCurve(b) = &v[1] {
                 b
             } else {
                 warn!("Could not get RationalBSplineCurve from {:?}", v[1]);
-                return Err(Error::UnknownCurveType)
+                return Err(Error::UnknownCurveType);
             };
             let knot_vec = curve_knot_vector(bspline)?;
 
@@ -1341,55 +1642,61 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
                 .collect();
 
             let open = bspline.closed_curve.0 != Some(true);
-            let curve = nurbs::NURBSCurve::new(
-                open,
-                knot_vec,
-                control_points_list,
-            );
+            let curve = nurbs::NURBSCurve::new(open, knot_vec, control_points_list);
             Curve::NURBSCurve {
                 curve: SampledCurve::new(curve),
                 dir: edge_curve.same_sense,
             }
-        },
-        Entity::SurfaceCurve(v) => {
-            curve(s, edge_curve, v.curve_3d)?
-        },
-        Entity::SeamCurve(v) => {
-            curve(s, edge_curve, v.curve_3d)?
-        },
+        }
+        Entity::SurfaceCurve(v) => curve(s, edge_curve, v.curve_3d)?,
+        Entity::SeamCurve(v) => curve(s, edge_curve, v.curve_3d)?,
         Entity::Line(line) => {
             let origin = cartesian_point(s, line.pnt)?;
-            let vector = s.entity(line.dir).ok_or(Error::InvalidStepEntity("Vector"))?;
+            let vector = s
+                .entity(line.dir)
+                .ok_or(Error::InvalidStepEntity("Vector"))?;
             let d = direction(s, vector.orientation)?;
             let scale = d.amax();
-            if !(scale > 0. && scale.is_finite() && vector.magnitude.0 > 0.
-                 && vector.magnitude.0.is_finite()) {
-                return Err(Error::InvalidGeometry("line vector must be finite and nonzero"));
+            if !(scale > 0.
+                && scale.is_finite()
+                && vector.magnitude.0 > 0.
+                && vector.magnitude.0.is_finite())
+            {
+                return Err(Error::InvalidGeometry(
+                    "line vector must be finite and nonzero",
+                ));
             }
             let d = d / scale;
-            let controls = [edge_curve.edge_start, edge_curve.edge_end].iter().map(|&v| {
-                let p = vertex_point(s, v)?;
-                let offset = p - origin;
-                Ok(p - (offset - d * (offset.dot(&d) / d.norm_squared())))
-            }).collect::<Result<Vec<_>, Error>>()?;
+            let controls = [edge_curve.edge_start, edge_curve.edge_end]
+                .iter()
+                .map(|&v| {
+                    let p = vertex_point(s, v)?;
+                    let offset = p - origin;
+                    Ok(p - (offset - d * (offset.dot(&d) / d.norm_squared())))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
             // A trimmed LINE is a degree-one spline. Preserve its geometry
             // through the same sampling and shared-endpoint pipeline as every
             // other spline, rather than replacing it with its vertex chord.
             Curve::BSplineCurveWithKnots {
-                curve: SampledCurve::new(nurbs::BSplineCurve::new(true,
-                    KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]), controls)),
+                curve: SampledCurve::new(nurbs::BSplineCurve::new(
+                    true,
+                    KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+                    controls,
+                )),
                 dir: edge_curve.same_sense,
             }
-        },
+        }
         e => {
             warn!("Could not get edge from {:?}", e);
             return Err(Error::UnknownCurveType);
-        },
+        }
     })
 }
 
 fn vertex_point(s: &StepFile, v: Vertex) -> Result<DVec3, Error> {
-    let v = s.entity(v.cast::<VertexPoint_>())
+    let v = s
+        .entity(v.cast::<VertexPoint_>())
         .ok_or(Error::InvalidStepEntity("VertexPoint"))?;
     cartesian_point(s, v.vertex_geometry.cast())
 }
@@ -1400,16 +1707,22 @@ fn vertex_point(s: &StepFile, v: Vertex) -> Result<DVec3, Error> {
 /// Work in the chosen chart so distinct representatives of a cut stay distinct.
 fn cancel_retraced_edges(pts: &[(f64, f64)], edges: &mut Vec<(usize, usize)>) {
     let mut vertices = HashMap::new();
-    let canonical: Vec<_> = pts.iter().enumerate().map(|(i, &(x, y))| {
-        let bits = |v: f64| if v == 0.0 { 0 } else { v.to_bits() };
-        *vertices.entry((bits(x), bits(y))).or_insert(i)
-    }).collect();
+    let canonical: Vec<_> = pts
+        .iter()
+        .enumerate()
+        .map(|(i, &(x, y))| {
+            let bits = |v: f64| if v == 0.0 { 0 } else { v.to_bits() };
+            *vertices.entry((bits(x), bits(y))).or_insert(i)
+        })
+        .collect();
     let mut segments = HashMap::new();
     let mut boundary = Vec::new();
     let mut odd = Vec::new();
     for &(a, b) in edges.iter() {
         let (a, b) = (canonical[a], canonical[b]);
-        if a == b { continue; }
+        if a == b {
+            continue;
+        }
         let index = *segments.entry((a.min(b), a.max(b))).or_insert_with(|| {
             boundary.push((a, b));
             odd.push(false);
@@ -1417,16 +1730,21 @@ fn cancel_retraced_edges(pts: &[(f64, f64)], edges: &mut Vec<(usize, usize)>) {
         });
         odd[index] ^= true;
     }
-    *edges = boundary.into_iter().zip(odd)
-        .filter_map(|(edge, odd)| if odd { Some(edge) } else { None }).collect();
+    *edges = boundary
+        .into_iter()
+        .zip(odd)
+        .filter_map(|(edge, odd)| if odd { Some(edge) } else { None })
+        .collect();
 }
 
 /// Endpoint weights for proper interior intersections of A-B and C-D.
 /// Retain both weights: subtracting a rounded weight from one can erase a
 /// representable displacement near the opposite endpoint.
 fn segment_intersection_weights(
-    a: (f64, f64), b: (f64, f64),
-    c: (f64, f64), d: (f64, f64),
+    a: (f64, f64),
+    b: (f64, f64),
+    c: (f64, f64),
+    d: (f64, f64),
 ) -> Option<([f64; 2], [f64; 2])> {
     let coord = |(x, y)| robust::Coord { x, y };
     let ca = robust::orient2d(coord(c), coord(d), coord(a));
@@ -1434,7 +1752,9 @@ fn segment_intersection_weights(
     let ac = robust::orient2d(coord(a), coord(b), coord(c));
     let ad = robust::orient2d(coord(a), coord(b), coord(d));
     let opposite = |a: f64, b: f64| (a < 0. && b > 0.) || (a > 0. && b < 0.);
-    if !opposite(ca, cb) || !opposite(ac, ad) { return None; }
+    if !opposite(ca, cb) || !opposite(ac, ad) {
+        return None;
+    }
     // Topology uses exact predicate signs, not a length or parameter epsilon.
     // The same signed areas give parameters without a near-parallel division
     // whose numerator and denominator both suffer cancellation.
@@ -1459,36 +1779,60 @@ fn resolve_crossing_edges(
         (bits(x), bits(y))
     };
     let mut vertices = HashMap::new();
-    for (i, &p) in pts.iter().enumerate() { vertices.entry(key(p)).or_insert(i); }
+    for (i, &p) in pts.iter().enumerate() {
+        vertices.entry(key(p)).or_insert(i);
+    }
     loop {
         let mut splits = vec![Vec::new(); edges.len()];
         // Sweep x-sorted bounding boxes to avoid comparing disjoint edges.
-        let mut boxes: Vec<_> = edges.iter().enumerate().map(|(i, &(a, b, _))| {
-            let (ax, ay) = pts[a];
-            let (bx, by) = pts[b];
-            (ax.min(bx), ax.max(bx), ay.min(by), ay.max(by), i)
-        }).collect();
+        let mut boxes: Vec<_> = edges
+            .iter()
+            .enumerate()
+            .map(|(i, &(a, b, _))| {
+                let (ax, ay) = pts[a];
+                let (bx, by) = pts[b];
+                (ax.min(bx), ax.max(bx), ay.min(by), ay.max(by), i)
+            })
+            .collect();
         boxes.sort_by(|p, q| p.0.total_cmp(&q.0));
         for bi in 0..boxes.len() {
             let (_, xmax_i, ymin_i, ymax_i, ei) = boxes[bi];
             for bj in (bi + 1)..boxes.len() {
                 let (xmin_j, _, ymin_j, ymax_j, ej) = boxes[bj];
-                if xmin_j > xmax_i { break; }
-                if ymin_j > ymax_i || ymax_j < ymin_i { continue; }
+                if xmin_j > xmax_i {
+                    break;
+                }
+                if ymin_j > ymax_i || ymax_j < ymin_i {
+                    continue;
+                }
                 // Prefer a boundary's interpolation over an internal grid edge.
                 let (i, j) = if (edges[ei].2, std::cmp::Reverse(ei))
-                    >= (edges[ej].2, std::cmp::Reverse(ej)) { (ei, ej) } else { (ej, ei) };
-                if edges[i].0 == edges[j].0 || edges[i].0 == edges[j].1
-                || edges[i].1 == edges[j].0 || edges[i].1 == edges[j].1 {
+                    >= (edges[ej].2, std::cmp::Reverse(ej))
+                {
+                    (ei, ej)
+                } else {
+                    (ej, ei)
+                };
+                if edges[i].0 == edges[j].0
+                    || edges[i].0 == edges[j].1
+                    || edges[i].1 == edges[j].0
+                    || edges[i].1 == edges[j].1
+                {
                     continue;
                 }
                 if let Some((t, s)) = segment_intersection_weights(
-                    pts[edges[i].0], pts[edges[i].1], pts[edges[j].0], pts[edges[j].1],
+                    pts[edges[i].0],
+                    pts[edges[i].1],
+                    pts[edges[j].0],
+                    pts[edges[j].1],
                 ) {
                     // The nearer endpoint anchors both chart and geometry.
                     // Constant coordinates stay constant under interpolation.
-                    let (a, b, f) = if t[1] <= t[0] { (edges[i].0, edges[i].1, t[1]) }
-                        else { (edges[i].1, edges[i].0, t[0]) };
+                    let (a, b, f) = if t[1] <= t[0] {
+                        (edges[i].0, edges[i].1, t[1])
+                    } else {
+                        (edges[i].1, edges[i].0, t[0])
+                    };
                     let (pa, pb) = (pts[a], pts[b]);
                     let p = (pa.0 + (pb.0 - pa.0) * f, pa.1 + (pb.1 - pa.1) * f);
                     let va = verts[v_start + a];
@@ -1507,7 +1851,8 @@ fn resolve_crossing_edges(
                         pts.push(p);
                         verts.push(mesh::Vertex {
                             pos,
-                            norm: DVec3::zeros(), color: DVec3::zeros(),
+                            norm: DVec3::zeros(),
+                            color: DVec3::zeros(),
                         });
                         index
                     });
@@ -1516,14 +1861,26 @@ fn resolve_crossing_edges(
                 }
             }
         }
-        if splits.iter().all(Vec::is_empty) { break; }
+        if splits.iter().all(Vec::is_empty) {
+            break;
+        }
         let mut divided = Vec::new();
         for (&(a, b, boundary), split) in edges.iter().zip(&mut splits) {
-            split.sort_by(|a, b| a.0[1].total_cmp(&b.0[1])
-                .then(b.0[0].total_cmp(&a.0[0])).then(a.1.cmp(&b.1)));
+            split.sort_by(|a, b| {
+                a.0[1]
+                    .total_cmp(&b.0[1])
+                    .then(b.0[0].total_cmp(&a.0[0]))
+                    .then(a.1.cmp(&b.1))
+            });
             let mut last = vertices[&key(pts[a])];
-            for next in split.iter().map(|&(_, i)| i).chain(std::iter::once(vertices[&key(pts[b])])) {
-                if next != last { divided.push((last, next, boundary)); }
+            for next in split
+                .iter()
+                .map(|&(_, i)| i)
+                .chain(std::iter::once(vertices[&key(pts[b])]))
+            {
+                if next != last {
+                    divided.push((last, next, boundary));
+                }
                 last = next;
             }
         }
@@ -1567,17 +1924,21 @@ mod tests {
         let color = DVec3::new(0.2, 0.4, 0.6);
         advanced_face(&step, Id::new(72), &mut mesh, &HashMap::new(), color, 0.).unwrap();
         assert!(mesh.verts.iter().any(|v| v.pos == DVec3::new(1., 1., 0.)));
-        assert!(mesh.verts.iter().all(|v| v.norm == -DVec3::z() && v.color == color));
+        assert!(mesh
+            .verts
+            .iter()
+            .all(|v| v.norm == -DVec3::z() && v.color == color));
         for t in &mesh.triangles {
-            let [a,b,c] = [t.verts.x,t.verts.y,t.verts.z].map(|i| mesh.verts[i as usize].pos);
-            assert!((b-a).cross(&(c-a)).z < 0.);
+            let [a, b, c] = [t.verts.x, t.verts.y, t.verts.z].map(|i| mesh.verts[i as usize].pos);
+            assert!((b - a).cross(&(c - a)).z < 0.);
         }
     }
 
     #[test]
     fn failed_faces_do_not_publish_vertices_or_corrupt_following_faces() {
         for faces in ["#9,#10", "#10,#9"] {
-            let text = format!("ISO-10303-21;HEADER;ENDSEC;DATA;
+            let text = format!(
+                "ISO-10303-21;HEADER;ENDSEC;DATA;
                 #1=CARTESIAN_POINT('',(5.,0.,0.));
                 #2=DIRECTION('',(0.,0.,1.));
                 #3=DIRECTION('',(1.,0.,0.));
@@ -1591,13 +1952,17 @@ mod tests {
                 #11=PLANE('',#4);
                 #12=CLOSED_SHELL('',({faces}));
                 #13=MANIFOLD_SOLID_BREP('',#12);
-                ENDSEC;END-ISO-10303-21;");
+                ENDSEC;END-ISO-10303-21;"
+            );
             let flat = StepFile::strip_flatten(text.as_bytes()).unwrap();
             let step = StepFile::parse(&flat).unwrap();
             let (mesh, stats) = triangulate(&step);
             assert_eq!((stats.num_faces, stats.num_errors()), (2, 1));
             assert_eq!((mesh.verts.len(), mesh.triangles.len()), (1024, 2048));
-            assert!(mesh.triangles.iter().all(|t| t.verts.iter().all(|&i| i < 1024)));
+            assert!(mesh
+                .triangles
+                .iter()
+                .all(|t| t.verts.iter().all(|&i| i < 1024)));
         }
     }
 
@@ -1628,11 +1993,13 @@ mod tests {
         let flat = StepFile::strip_flatten(text).unwrap();
         let step = StepFile::parse(&flat).unwrap();
         let (mesh, stats) = triangulate(&step);
-        assert_eq!((stats.num_shells, stats.num_faces, stats.num_errors()), (2, 2, 0));
+        assert_eq!(
+            (stats.num_shells, stats.num_faces, stats.num_errors()),
+            (2, 2, 0)
+        );
         let mut volume = 0.;
         for t in &mesh.triangles {
-            let [a, b, c] = [t.verts.x, t.verts.y, t.verts.z]
-                .map(|i| mesh.verts[i as usize]);
+            let [a, b, c] = [t.verts.x, t.verts.y, t.verts.z].map(|i| mesh.verts[i as usize]);
             let cross = (b.pos - a.pos).cross(&(c.pos - a.pos));
             assert!(cross.dot(&a.norm) > 0.);
             volume += a.pos.dot(&b.pos.cross(&c.pos)) / 6.;
@@ -1650,7 +2017,8 @@ mod tests {
     #[test]
     fn seam_only_and_vertex_loop_faces_cover_a_complete_torus() {
         for bounds in ["#15", "#16", "#17,#18"] {
-            let text = format!("ISO-10303-21;HEADER;ENDSEC;DATA;
+            let text = format!(
+                "ISO-10303-21;HEADER;ENDSEC;DATA;
                 #1=CARTESIAN_POINT('',(0.,0.,0.));
                 #2=DIRECTION('',(0.,0.,1.));
                 #3=DIRECTION('',(1.,0.,0.));
@@ -1670,12 +2038,20 @@ mod tests {
                 #17=FACE_BOUND('',#14,.T.);
                 #18=FACE_BOUND('',#14,.F.);
                 #19=ADVANCED_FACE('',({bounds}),#5,.T.);
-                ENDSEC;END-ISO-10303-21;");
+                ENDSEC;END-ISO-10303-21;"
+            );
             let flat = StepFile::strip_flatten(text.as_bytes()).unwrap();
             let step = StepFile::parse(&flat).unwrap();
             let mut mesh = Mesh::default();
-            advanced_face(&step, Id::new(19), &mut mesh,
-                &HashMap::new(), DVec3::zeros(), 0.).unwrap();
+            advanced_face(
+                &step,
+                Id::new(19),
+                &mut mesh,
+                &HashMap::new(),
+                DVec3::zeros(),
+                0.,
+            )
+            .unwrap();
             assert_eq!(mesh.verts.len(), 1024);
             assert_eq!(mesh.triangles.len(), 2048);
         }
@@ -1686,18 +2062,38 @@ mod tests {
         for scale in [1., 1e-20, 1e20] {
             let point = |x, y| (x * scale, y * scale);
             for x in [0.5, 1e-14, 1. - 1e-14] {
-                let (t, s) = segment_intersection_weights(point(0., 0.), point(1., 0.),
-                    point(x, -1.), point(x, 1.)).unwrap();
+                let (t, s) = segment_intersection_weights(
+                    point(0., 0.),
+                    point(1., 0.),
+                    point(x, -1.),
+                    point(x, 1.),
+                )
+                .unwrap();
                 assert!((t[1] - x).abs() < 1e-15);
                 assert_eq!(s, [0.5, 0.5]);
             }
-            assert!(segment_intersection_weights(point(0., 0.), point(1., 0.),
-                point(0., 0.), point(0., 1.)).is_none());
-            assert!(segment_intersection_weights(point(0., 0.), point(1., 0.),
-                point(0., 1.), point(1., 1.)).is_none());
+            assert!(segment_intersection_weights(
+                point(0., 0.),
+                point(1., 0.),
+                point(0., 0.),
+                point(0., 1.)
+            )
+            .is_none());
+            assert!(segment_intersection_weights(
+                point(0., 0.),
+                point(1., 0.),
+                point(0., 1.),
+                point(1., 1.)
+            )
+            .is_none());
         }
-        let (t, s) = segment_intersection_weights((0., 0.), (1., 1.),
-            (0., f64::EPSILON), (1., 1. - f64::EPSILON)).unwrap();
+        let (t, s) = segment_intersection_weights(
+            (0., 0.),
+            (1., 1.),
+            (0., f64::EPSILON),
+            (1., 1. - f64::EPSILON),
+        )
+        .unwrap();
         assert_eq!((t, s), ([0.5, 0.5], [0.5, 0.5]));
     }
 
@@ -1707,12 +2103,22 @@ mod tests {
         let mut edges = Vec::new();
         for i in 1..12 {
             let n = pts.len();
-            pts.extend([(i as f64, 0.), (i as f64, 12.), (0., i as f64), (12., i as f64)]);
+            pts.extend([
+                (i as f64, 0.),
+                (i as f64, 12.),
+                (0., i as f64),
+                (12., i as f64),
+            ]);
             edges.extend([(n, n + 1, false), (n + 2, n + 3, false)]);
         }
-        let mut verts: Vec<_> = pts.iter().map(|&(x, y)| mesh::Vertex {
-            pos: DVec3::new(x, y, 0.), norm: DVec3::zeros(), color: DVec3::zeros(),
-        }).collect();
+        let mut verts: Vec<_> = pts
+            .iter()
+            .map(|&(x, y)| mesh::Vertex {
+                pos: DVec3::new(x, y, 0.),
+                norm: DVec3::zeros(),
+                color: DVec3::zeros(),
+            })
+            .collect();
         resolve_crossing_edges(&mut pts, &mut edges, &mut verts, 0);
         assert_eq!(pts.len(), 44 + 121);
         assert_eq!(edges.len(), 22 * 12);
@@ -1721,12 +2127,25 @@ mod tests {
 
         for internal_first in [false, true] {
             let mut pts = vec![(0., 0.), (2., 0.), (2., 2.), (0., 2.), (-1., 1.), (3., 1.)];
-            let mut edges = vec![(0, 1, true), (1, 2, true), (2, 3, true), (3, 0, true), (4, 5, false)];
-            if internal_first { edges.reverse(); }
-            let mut verts: Vec<_> = pts.iter().enumerate().map(|(i, &(x, y))| mesh::Vertex {
-                pos: DVec3::new(x, y, if i < 4 { 5. } else { 0. }),
-                norm: DVec3::zeros(), color: DVec3::zeros(),
-            }).collect();
+            let mut edges = vec![
+                (0, 1, true),
+                (1, 2, true),
+                (2, 3, true),
+                (3, 0, true),
+                (4, 5, false),
+            ];
+            if internal_first {
+                edges.reverse();
+            }
+            let mut verts: Vec<_> = pts
+                .iter()
+                .enumerate()
+                .map(|(i, &(x, y))| mesh::Vertex {
+                    pos: DVec3::new(x, y, if i < 4 { 5. } else { 0. }),
+                    norm: DVec3::zeros(),
+                    color: DVec3::zeros(),
+                })
+                .collect();
             resolve_crossing_edges(&mut pts, &mut edges, &mut verts, 0);
             assert_eq!(pts.len(), 8);
             assert!(verts[6..].iter().all(|v| v.pos.z == 5.));
@@ -1744,9 +2163,14 @@ mod tests {
                 let mut pts = vec![(0.1, 0.), (0.1, 1.), (0., y), (1., y)];
                 let boundary = if reverse { (1, 0, true) } else { (0, 1, true) };
                 let mut edges = vec![boundary, (2, 3, false)];
-                let mut verts: Vec<_> = pts.iter().map(|&(_, y)| mesh::Vertex {
-                    pos: DVec3::new(0.1, 0.2, y), norm: DVec3::zeros(), color: DVec3::zeros(),
-                }).collect();
+                let mut verts: Vec<_> = pts
+                    .iter()
+                    .map(|&(_, y)| mesh::Vertex {
+                        pos: DVec3::new(0.1, 0.2, y),
+                        norm: DVec3::zeros(),
+                        color: DVec3::zeros(),
+                    })
+                    .collect();
                 resolve_crossing_edges(&mut pts, &mut edges, &mut verts, 0);
                 assert_eq!(pts.len(), 5);
                 assert_eq!(pts[4].0, 0.1);
@@ -1764,12 +2188,15 @@ mod tests {
             let mut edges = vec![(0, 1, true), (2, 3, false)];
             let vertex = |x, y| mesh::Vertex {
                 pos: DVec3::new(1e9 + x, 1e9 + y, 0.),
-                norm: DVec3::zeros(), color: DVec3::zeros(),
+                norm: DVec3::zeros(),
+                color: DVec3::zeros(),
             };
             // Exercise face-local indices inside a mesh with prior vertices.
             let mut verts = vec![vertex(-1., -1.)];
             verts.extend(pts.iter().map(|&(x, y)| vertex(x, y)));
-            if collapsed_edge { verts[2] = verts[1]; }
+            if collapsed_edge {
+                verts[2] = verts[1];
+            }
             resolve_crossing_edges(&mut pts, &mut edges, &mut verts, 1);
             if collapsed_edge {
                 // Coincident endpoints do not identify a unique chart
@@ -1786,8 +2213,15 @@ mod tests {
 
     #[test]
     fn retraced_seams_cancel_without_snapping_distinct_chart_points() {
-        let pts = [(0., 0.), (1., 0.), (0., 1.), (0.5, 0.5),
-                   (-0., 0.), (0.5, 0.5), (0.5, 0.5 + f64::EPSILON)];
+        let pts = [
+            (0., 0.),
+            (1., 0.),
+            (0., 1.),
+            (0.5, 0.5),
+            (-0., 0.),
+            (0.5, 0.5),
+            (0.5, 0.5 + f64::EPSILON),
+        ];
         let mut edges = vec![(0, 1), (1, 2), (2, 0), (0, 3), (5, 4), (3, 6)];
         cancel_retraced_edges(&pts, &mut edges);
         assert_eq!(edges, vec![(0, 1), (1, 2), (2, 0), (3, 6)]);
@@ -1843,7 +2277,9 @@ mod tests {
         let mut step = StepFile::parse(&flat).unwrap();
         for sense in [true, false] {
             for id in [10, 11] {
-                let Entity::EdgeCurve(edge) = &mut step.0[id] else { panic!() };
+                let Entity::EdgeCurve(edge) = &mut step.0[id] else {
+                    panic!()
+                };
                 edge.same_sense = sense;
                 let forward = edge_curve(&step, Id::new(id), true).unwrap();
                 let mut backward = edge_curve(&step, Id::new(id), false).unwrap();
@@ -1875,8 +2311,13 @@ mod tests {
         assert_eq!(representation_uncertainty(&step, Id::new(4)), 2e-7);
         assert!((representation_uncertainty(&step, Id::new(5)) - 2e-10).abs() < 1e-25);
         assert_eq!(representation_uncertainty(&step, Id::new(6)), 0.);
-        let roots = [(Id::new(7), vec![DMat4::identity()]),
-                     (Id::new(8), vec![DMat4::identity()])].iter().cloned().collect();
+        let roots = [
+            (Id::new(7), vec![DMat4::identity()]),
+            (Id::new(8), vec![DMat4::identity()]),
+        ]
+        .iter()
+        .cloned()
+        .collect();
         let shapes = collect_shape_instances(&step, &roots, &HashMap::new());
         assert_eq!(shapes[&Id::new(10)].uncertainty, 2e-7);
         assert!((shapes[&Id::new(11)].uncertainty - 2e-10).abs() < 1e-25);
@@ -1899,7 +2340,9 @@ mod tests {
         assert!((resolve_length_unit_to_mm(&step, 4).unwrap() - 304.8).abs() < 1e-12);
         assert_eq!(resolve_length_unit_to_mm(&step, 6), Some(100.));
         assert_eq!(resolve_length_unit_to_mm(&step, 7), None);
-        let Entity::LengthMeasureWithUnit(factor) = &mut step.0[3] else { panic!() };
+        let Entity::LengthMeasureWithUnit(factor) = &mut step.0[3] else {
+            panic!()
+        };
         factor.unit_component = Id::new(4);
         assert_eq!(resolve_length_unit_to_mm(&step, 2), None);
     }
@@ -1924,29 +2367,45 @@ mod tests {
     #[test]
     fn degenerate_torus_selects_branch_and_outward_normal() {
         for (outer, v) in [(true, 0.3_f64), (false, std::f64::consts::PI + 0.3)] {
-            let text = format!("ISO-10303-21;HEADER;ENDSEC;DATA;\
+            let text = format!(
+                "ISO-10303-21;HEADER;ENDSEC;DATA;\
                 #1=CARTESIAN_POINT('',(0.,0.,0.));\
                 #2=DIRECTION('',(0.,0.,1.));\
                 #3=DIRECTION('',(1.,0.,0.));\
                 #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);\
                 #5=DEGENERATE_TOROIDAL_SURFACE('',#4,1.,2.,.{}.);\
-                ENDSEC;END-ISO-10303-21;", if outer { "T" } else { "F" });
+                ENDSEC;END-ISO-10303-21;",
+                if outer { "T" } else { "F" }
+            );
             let flat = StepFile::strip_flatten(text.as_bytes()).unwrap();
             let step = StepFile::parse(&flat).unwrap();
-            let mut surface = get_surface(&step, Id::new(5), &[], 0., false).unwrap();
-            let mut verts: Vec<_> = [0.5_f64, 0.7, 0.9].iter().map(|&u| {
-                let radius = 1.0 + 2.0 * v.cos();
-                mesh::Vertex {
-                    pos: DVec3::new(radius * u.cos(), radius * u.sin(), 2.0 * v.sin()),
-                    norm: DVec3::zeros(), color: DVec3::zeros(),
-                }
-            }).collect();
-            let uv = surface.lower_verts(&mut verts, &[], true).unwrap();
+            let surface = get_surface(&step, Id::new(5), &[], 0., false).unwrap();
+            let mut verts: Vec<_> = [0.5_f64, 0.7, 0.9]
+                .iter()
+                .map(|&u| {
+                    let radius = 1.0 + 2.0 * v.cos();
+                    mesh::Vertex {
+                        pos: DVec3::new(radius * u.cos(), radius * u.sin(), 2.0 * v.sin()),
+                        norm: DVec3::zeros(),
+                        color: DVec3::zeros(),
+                    }
+                })
+                .collect();
+            let prepared = surface.prepare(&verts, &[], true).unwrap();
+            let uv = prepared.lower_verts(&verts).unwrap();
             for (i, u) in [0.5_f64, 0.7, 0.9].iter().enumerate() {
                 let expected = DVec3::new(v.cos() * u.cos(), v.cos() * u.sin(), v.sin());
-                assert!(verts[i].norm.dot(&expected) > 1.0 - 1e-12);
-                assert!((surface.raise(glm::DVec2::new(uv[i].0, uv[i].1)).unwrap()
-                    - verts[i].pos).norm() < 1e-12);
+                assert!(
+                    prepared
+                        .normal(verts[i].pos, glm::DVec2::new(uv[i].0, uv[i].1))
+                        .dot(&expected)
+                        > 1.0 - 1e-12
+                );
+                assert!(
+                    (prepared.raise(glm::DVec2::new(uv[i].0, uv[i].1)).unwrap() - verts[i].pos)
+                        .norm()
+                        < 1e-12
+                );
             }
         }
     }
@@ -1957,26 +2416,41 @@ mod tests {
         HomogeneousCurve {
             open: true,
             knots: KnotVector::from_multiplicities(1, &[0.0, 1.0], &[2, 2]),
-            control_points: points.into_iter().zip(weights).map(|(p, w)|
-                DVec4::new(p.x * w, p.y * w, p.z * w, w)).collect(),
+            control_points: points
+                .into_iter()
+                .zip(weights)
+                .map(|(p, w)| DVec4::new(p.x * w, p.y * w, p.z * w, w))
+                .collect(),
         }
     }
 
     fn nurbs(surface: Surface) -> SampledSurface<4> {
-        match surface { Surface::NURBS { surf, .. } => surf, _ => panic!("expected NURBS") }
+        match surface {
+            Surface::NURBS { surf, .. } => surf,
+            _ => panic!("expected NURBS"),
+        }
     }
 
     #[test]
     fn revolution_poles_use_uncertainty_without_erasing_larger_holes() {
-        for (radius, uncertainty, origin) in [(1e-16, 0., -1.), (1e-16, 2e-7, 0.), (1e-6, 2e-7, -1.)] {
+        for (radius, uncertainty, origin) in
+            [(1e-16, 0., -1.), (1e-16, 2e-7, 0.), (1e-6, 2e-7, -1.)]
+        {
             let curve = HomogeneousCurve {
                 open: true,
                 knots: KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
                 control_points: vec![DVec4::new(0., radius, 0., 1.), DVec4::new(1., 1., 0., 1.)],
             };
-            let surface = revolution_surface(curve, DVec3::zeros(), DVec3::x(), uncertainty).unwrap();
-            let Surface::NURBS { chart: crate::surface::SplineChart::Polar { angular, origin: chart_origin, .. }, .. }
-                = surface else { panic!("expected polar spline chart") };
+            let surface =
+                revolution_surface(curve, DVec3::zeros(), DVec3::x(), uncertainty).unwrap();
+            let crate::surface::FaceChart::Spline(crate::surface::SplineChart::Polar {
+                angular,
+                origin: chart_origin,
+                ..
+            }) = surface.test_chart()
+            else {
+                panic!("expected polar spline chart")
+            };
             assert_eq!(chart_origin[1 - angular], origin);
         }
     }
@@ -1984,11 +2458,13 @@ mod tests {
     #[test]
     fn exact_extrusion_points_and_normal() {
         let vector = DVec3::new(0.5, -1.0, 2.0);
-        let boundary = [DVec3::new(-10.0, -10.0, -10.0), DVec3::new(10.0, 10.0, 10.0)];
+        let boundary = [
+            DVec3::new(-10.0, -10.0, -10.0),
+            DVec3::new(10.0, 10.0, 10.0),
+        ];
         let surface = nurbs(extrusion_surface(test_curve(true), vector, &boundary, 0.).unwrap());
         let uv = glm::DVec2::new(0.4, 0.3);
-        let basis = (DVec3::new(2.0, -1.0, 0.5) * 0.6
-            + DVec3::new(3.0, 1.0, 2.0) * 0.8) / 1.4;
+        let basis = (DVec3::new(2.0, -1.0, 0.5) * 0.6 + DVec3::new(3.0, 1.0, 2.0) * 0.8) / 1.4;
         assert!((surface.surf.point(uv) - (basis + vector * uv.y)).norm() < 1e-12);
         let d = surface.surf.derivs::<1>(uv);
         let expected = d[1][0].cross(&vector).normalize();
@@ -2004,7 +2480,8 @@ mod tests {
         let p = DVec3::new(2.0, -1.0, 0.5) * 0.6 + DVec3::new(3.0, 1.0, 2.0) * 0.4;
         let axial = origin + axis * (p - origin).dot(&axis);
         let radial = p - axial;
-        let expected = axial + radial * std::f64::consts::FRAC_1_SQRT_2
+        let expected = axial
+            + radial * std::f64::consts::FRAC_1_SQRT_2
             + axis.cross(&radial) * std::f64::consts::FRAC_1_SQRT_2;
         assert!((surface.surf.point(uv) - expected).norm() < 1e-12);
         let d = surface.surf.derivs::<1>(uv);
@@ -2012,12 +2489,14 @@ mod tests {
         assert!(normal.norm() > 1e-6);
         let tangent = DVec3::new(1.0, 2.0, 1.5);
         let parallel = axis * tangent.dot(&axis);
-        let rotated = parallel + ((tangent - parallel) + axis.cross(&tangent))
-            * std::f64::consts::FRAC_1_SQRT_2;
+        let rotated = parallel
+            + ((tangent - parallel) + axis.cross(&tangent)) * std::f64::consts::FRAC_1_SQRT_2;
         let expected_normal = axis.cross(&(expected - origin)).cross(&rotated);
         assert!(normal.normalize().dot(&expected_normal.normalize()) > 1.0 - 1e-12);
-        assert_eq!(surface.surf.point(glm::DVec2::new(0.0, 0.4)),
-                   surface.surf.point(glm::DVec2::new(1.0, 0.4)));
+        assert_eq!(
+            surface.surf.point(glm::DVec2::new(0.0, 0.4)),
+            surface.surf.point(glm::DVec2::new(1.0, 0.4))
+        );
     }
 
     #[test]
