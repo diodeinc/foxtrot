@@ -34,13 +34,13 @@ if mode == 'f64_invalid': data['degenerate_f64'] = 1
 if mode == 'f64_nonfinite': data['degenerate_f64'] = float('nan')
 if mode.startswith('browser_'):
     data.update(triangles=2, browser_nonfinite=0, browser_triangles=2, browser_degenerate=0,
-                browser_zero_normals=0, browser_area=1.0)
+                browser_zero_normals=0)
 if mode == 'browser_some_collapsed': data.update(browser_degenerate=1, browser_zero_normals=3)
 if mode == 'browser_all_collapsed': data['browser_degenerate'] = 2
 if mode == 'browser_nonfinite_components': data['browser_nonfinite'] = 1
-if mode == 'browser_missing': del data['browser_area']
+if mode == 'browser_missing': del data['browser_zero_normals']
 if mode == 'browser_f64_invalid': data['degenerate_f64'] = 1
-if mode == 'browser_bad_number': data['browser_area'] = float('nan')
+if mode == 'browser_bad_number': data['browser_degenerate'] = float('nan')
 marker = metrics.with_suffix('.count')
 count = int(marker.read_text()) if marker.exists() else 0
 marker.write_text(str(count + 1))

@@ -227,7 +227,6 @@ def run_file(entry, args):
                 "browser_triangles",
                 "browser_degenerate",
                 "browser_zero_normals",
-                "browser_area",
             )
             browser_supplied = [k for k in browser_required if k in metrics]
             if browser_supplied and len(browser_supplied) != len(
@@ -504,8 +503,12 @@ def main(argv=None):
         default=60,
         help="seconds per invocation, including OCCT",
     )
-    parser.add_argument("--meshes", choices=["none", "all", "failures"], default="failures",
-                        help="none skips STL export and validation; requires a browser-metric worker")
+    parser.add_argument(
+        "--meshes",
+        choices=["none", "all", "failures"],
+        default="failures",
+        help="none skips STL export and validation; requires a browser-metric worker",
+    )
     parser.add_argument("--occt", action="store_true")
     parser.add_argument("--relative-tolerance", type=nonnegative, default=0.05)
     parser.add_argument("--absolute-tolerance", type=nonnegative, default=0.01)
@@ -620,12 +623,15 @@ def main(argv=None):
             )
         write_json(args.output / "results.json", report)
         review = {
-            r["path"] for r in report["results"]
-            if r["status"] != "ok" or any(r.get("quality_diagnostics", {}).values())
+            r["path"]
+            for r in report["results"]
+            if r["status"] != "ok"
+            or any(r.get("quality_diagnostics", {}).values())
         }
-        write_json(args.output / "review-manifest.json", {
-            "schema": SCHEMA, "files": [e for e in entries if e["path"] in review],
-        })
+        write_json(
+            args.output / "review-manifest.json",
+            {"schema": SCHEMA, "files": [e for e in entries if e["path"] in review]},
+        )
         (args.output / "report.md").write_text(markdown(report))
         print(f"Report: {args.output / 'report.md'}")
         return int(
