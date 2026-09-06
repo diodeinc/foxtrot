@@ -81,8 +81,20 @@ The new harness requires Python 3.10+ and uses only the standard library unless
 you enable OCCT. It recursively discovers `.step`/`.stp` files, regardless of
 extension case. Each model runs in a separate process with a hard timeout;
 on POSIX the harness kills the worker process group and reaps the worker.
-Partial tessellation, panics, crashes, empty/nonfinite/degenerate meshes, and
-oracle failures produce a nonzero exit code, not a misleading success.
+Partial tessellation, panics, crashes, nonfinite browser attributes, empty or
+entirely collapsed browser meshes, and oracle failures produce a nonzero exit.
+The worker evaluates the same centered f32 position/normal/color buffer as
+Three.js, produced from f64 geometry by `Mesh::to_triangle_buffer`.
+
+Isolated collapsed triangles, zero normals, and f64 degenerates remain explicit
+`quality_diagnostics`, not automatic whole-model failures. `ok` means processing
+and browser-buffer checks passed, **not** that visual quality is established.
+Review flagged models at useful viewing scales for holes, silhouette errors,
+and shading defects. No triangles are deleted or vertices merged to pass checks.
+STL remains a world-coordinate diagnostic for coarse measurements and optional
+OCCT comparison; its f32 precision does not gate browser output. Reports identify
+their classification basis. Older workers retain the legacy strict STL gate;
+changes between these methodologies are reclassifications, not repaired models.
 
 ### Select, benchmark, compare
 
@@ -117,8 +129,9 @@ grows. Comparisons require the same selected paths and contents, report changed
 face/triangle counts and increased error/warning counts, and reject incompatible
 benchmark settings when timing is gated. Counts changing is a review signal,
 not necessarily a bug. Any current functional failure still fails the run even
-if it existed in the baseline. Old `regression_test` commands remain available,
-but their basename-keyed JSON is not compatible: record a fresh baseline.
+if it existed in the baseline. The old thread-based `regression_test` executable
+is removed; use this process-isolated harness and record a fresh baseline instead
+of importing its basename-keyed JSON.
 
 ### Debug and close the loop
 

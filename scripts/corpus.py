@@ -222,39 +222,91 @@ def run_file(entry, args):
                 "log_warn",
                 "log_error",
             )
-            # Older workers do not report an f64 diagnostic. When present,
-            # validate it and do not let f32 rounding hide an upstream defect.
+            browser_required = (
+                "browser_nonfinite",
+                "browser_triangles",
+                "browser_degenerate",
+                "browser_zero_normals",
+                "browser_area",
+            )
+            browser_supplied = [k for k in browser_required if k in metrics]
+            if browser_supplied and len(browser_supplied) != len(
+                browser_required
+            ):
+                raise ValueError("incomplete browser worker metrics")
+            # Older workers do not report this diagnostic. It remains review
+            # evidence rather than an acceptance gate when present.
             degenerate_f64 = metrics.get("degenerate_f64", 0)
             if any(
                 not isinstance(value, (int, float))
                 or not math.isfinite(value)
                 or value < 0
-                for value in [metrics.get(k) for k in required] + [degenerate_f64]
+                for value in [metrics.get(k) for k in required]
+                + [metrics[k] for k in browser_supplied]
+                + [degenerate_f64]
             ):
                 raise ValueError("invalid worker metrics")
-            geometry = mesh_metrics(directory / "mesh.stl")
-            if geometry["triangle_count"] != metrics["triangles"]:
+            browser_metrics = "browser_triangles" in metrics
+            if browser_metrics and (
+                metrics["browser_triangles"] != metrics["triangles"]
+                or metrics["browser_degenerate"] > metrics["browser_triangles"]
+                or metrics["browser_zero_normals"] > metrics["browser_triangles"] * 3
+            ):
+                raise ValueError("inconsistent browser worker counts")
+            mesh_path = directory / "mesh.stl"
+            geometry = mesh_metrics(mesh_path) if mesh_path.exists() else None
+            if not browser_metrics and geometry is None:
+                raise ValueError("legacy worker did not export a mesh")
+            if geometry is not None and geometry["triangle_count"] != metrics["triangles"]:
                 raise ValueError("worker triangle count does not match exported mesh")
             sample.update(metrics)
             sample["process_ms"] = metrics["parse_ms"] + metrics["triangulate_ms"]
+            deterministic = [
+                "triangles",
+                "faces",
+                "errors",
+                "panics",
+                "log_warn",
+                "log_error",
+                "degenerate_f64",
+            ]
+            if browser_metrics:
+                deterministic += [
+                    "browser_nonfinite",
+                    "browser_triangles",
+                    "browser_degenerate",
+                    "browser_zero_normals",
+                ]
             if "metrics" in result and any(
                 result["metrics"].get(k) != metrics.get(k)
-                for k in (
-                    "triangles",
-                    "faces",
-                    "errors",
-                    "panics",
-                    "log_warn",
-                    "log_error",
-                    "degenerate_f64",
-                )
+                for k in deterministic
             ):
                 result["status"] = "nondeterministic"
             result["metrics"] = metrics
-            result["geometry"] = geometry
+            if geometry is not None:
+                result["geometry"] = geometry
+            result["classification"] = {
+                "basis": (
+                    "browser_f32_triangle_buffer" if browser_metrics else "legacy_stl"
+                ),
+                "visual_verification": False,
+            }
+            result["quality_diagnostics"] = {
+                "browser_degenerate_triangles": metrics.get("browser_degenerate", 0),
+                "browser_zero_normal_vertices": metrics.get("browser_zero_normals", 0),
+                "degenerate_f64_review": degenerate_f64,
+            }
             if metrics["errors"] or metrics["panics"] or metrics["log_error"]:
                 result["status"] = "tessellation_error"
-            elif degenerate_f64 or not geometry["validation"]["valid"]:
+            elif browser_metrics and (
+                metrics["browser_nonfinite"]
+                or not metrics["browser_triangles"]
+                or metrics["browser_degenerate"] >= metrics["browser_triangles"]
+            ):
+                result["status"] = "invalid_mesh"
+            elif not browser_metrics and (
+                degenerate_f64 or not geometry["validation"]["valid"]
+            ):
                 result["status"] = "invalid_mesh"
             if index >= args.warmup:
                 result["samples"].append(sample)
@@ -387,6 +439,8 @@ def markdown(report):
         "",
         "See manifest.json for exact inputs, results.json for raw samples and configuration,",
         "and cases/*/run-*.log for diagnostics/backtraces. Timing excludes STL export and process startup.",
+        "Each result records whether acceptance used browser f32 triangle-buffer metrics or the legacy strict STL gate; these classifications are not interchangeable fixes or visual verification.",
+        "Browser isolated degenerates, zero normals, and f64 degenerates are named review diagnostics, not strict failures. STL is optional diagnostic/world-unit transport for browser-metric workers.",
         "OCCT checks bounds and area only, not topology or mesh equivalence.",
         "",
     ]

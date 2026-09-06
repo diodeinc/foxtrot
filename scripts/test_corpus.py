@@ -32,10 +32,20 @@ if mode == 'nonfinite': data['parse_ms'] = float('nan')
 if mode == 'counts': data['triangles'] = 2
 if mode == 'f64_invalid': data['degenerate_f64'] = 1
 if mode == 'f64_nonfinite': data['degenerate_f64'] = float('nan')
+if mode.startswith('browser_'):
+    data.update(triangles=2, browser_nonfinite=0, browser_triangles=2, browser_degenerate=0,
+                browser_zero_normals=0, browser_area=1.0)
+if mode == 'browser_some_collapsed': data.update(browser_degenerate=1, browser_zero_normals=3)
+if mode == 'browser_all_collapsed': data['browser_degenerate'] = 2
+if mode == 'browser_nonfinite_components': data['browser_nonfinite'] = 1
+if mode == 'browser_missing': del data['browser_area']
+if mode == 'browser_f64_invalid': data['degenerate_f64'] = 1
+if mode == 'browser_bad_number': data['browser_area'] = float('nan')
 marker = metrics.with_suffix('.count')
 count = int(marker.read_text()) if marker.exists() else 0
 marker.write_text(str(count + 1))
 if mode == 'vary': data['faces'] += count
+if mode == 'browser_vary': data['browser_zero_normals'] += count
 metrics.write_text(json.dumps(data))
 if mode == 'stale' and count: sys.exit(0)
 if mode == 'invalid':
@@ -43,8 +53,10 @@ if mode == 'invalid':
     data['triangles'] = 0
     metrics.write_text(json.dumps(data))
     sys.exit(0)
-mesh.write_bytes(bytes(80) + struct.pack('<I', 1) +
-                 struct.pack('<12fH', 0,0,0, 0,0,0, 1,0,0, 0,1,0, 0))
+facets = 2 if mode.startswith('browser_') else 1
+mesh.write_bytes(bytes(80) + struct.pack('<I', facets) +
+                 struct.pack('<12fH', 0,0,0, 0,0,0, 1,0,0, 0,1,0, 0) * facets)
+if mode == 'browser_no_stl': mesh.unlink()
 print('worker diagnostic')
 """
 
@@ -225,8 +237,47 @@ class CorpusTests(unittest.TestCase):
             code, report, _ = self.run_harness(
                 mode, "--include", mode + ".step", "--repeat", "2"
             )
-            self.assertEqual(code, 1)
+            self.assertEqual(code, int(status != "ok"))
             self.assertEqual(report["results"][0]["status"], status)
+
+    def test_browser_acceptance_and_quality_diagnostics(self):
+        expected = {
+            "browser_some_collapsed": "ok",
+            "browser_all_collapsed": "invalid_mesh",
+            "browser_nonfinite_components": "invalid_mesh",
+            "browser_missing": "harness_error",
+            "browser_bad_number": "harness_error",
+            "browser_f64_invalid": "ok",
+            "browser_no_stl": "ok",
+            "browser_vary": "nondeterministic",
+        }
+        for mode, status in expected.items():
+            with self.subTest(mode=mode):
+                self.model(mode + ".step", mode)
+                code, report, _ = self.run_harness(
+                    "case-" + mode,
+                    "--include",
+                    mode + ".step",
+                    "--repeat",
+                    "2" if mode == "browser_vary" else "1",
+                )
+                result = report["results"][0]
+                self.assertEqual(code, int(status != "ok"))
+                self.assertEqual(result["status"], status)
+                if status != "harness_error":
+                    self.assertEqual(
+                        result["classification"]["basis"],
+                        "browser_f32_triangle_buffer",
+                    )
+        some = json.loads(
+            (self.base / "case-browser_some_collapsed" / "results.json").read_text()
+        )["results"][0]
+        self.assertEqual(some["quality_diagnostics"]["browser_degenerate_triangles"], 1)
+        self.assertEqual(some["quality_diagnostics"]["browser_zero_normal_vertices"], 3)
+        f64 = json.loads(
+            (self.base / "case-browser_f64_invalid" / "results.json").read_text()
+        )["results"][0]
+        self.assertEqual(f64["quality_diagnostics"]["degenerate_f64_review"], 1)
 
     def test_timing_gate_and_retained_comparison_meshes(self):
         self.model("one.step")

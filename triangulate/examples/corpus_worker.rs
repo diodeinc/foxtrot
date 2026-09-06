@@ -70,15 +70,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         collinear([a, b, c])
     }).count();
     let start = Instant::now();
+    let browser = mesh.to_triangle_buffer();
+    let browser_nonfinite = browser.iter().filter(|v| !v.is_finite()).count();
+    let browser_zero_normals = browser.chunks_exact(9)
+        .filter(|v| v[3..6].iter().all(|&x| x == 0.)).count();
+    let mut browser_degenerate = 0;
+    let mut browser_area = 0.;
+    for triangle in browser.chunks_exact(27) {
+        let [a, b, c] = [0, 9, 18].map(|i| nalgebra_glm::DVec3::new(
+            triangle[i] as f64, triangle[i + 1] as f64, triangle[i + 2] as f64));
+        if [a, b, c].iter().all(|p| p.iter().all(|x| x.is_finite())) {
+            browser_degenerate += usize::from(collinear([a, b, c]));
+            browser_area += (b - a).cross(&(c - a)).norm() * 0.5;
+        }
+    }
     mesh.save_stl(&args[3])?;
     let export_ms = start.elapsed().as_secs_f64() * 1000.0;
     // Only numeric fields: strings and report serialization belong to the harness.
     std::fs::write(&args[2], format!(
-        "{{\"read_ms\":{},\"parse_ms\":{},\"triangulate_ms\":{},\"export_ms\":{},\"triangles\":{},\"vertices\":{},\"faces\":{},\"shells\":{},\"errors\":{},\"panics\":{},\"log_warn\":{},\"log_error\":{},\"degenerate_f64\":{}}}",
+        "{{\"read_ms\":{},\"parse_ms\":{},\"triangulate_ms\":{},\"export_ms\":{},\"triangles\":{},\"vertices\":{},\"faces\":{},\"shells\":{},\"errors\":{},\"panics\":{},\"log_warn\":{},\"log_error\":{},\"degenerate_f64\":{},\"browser_nonfinite\":{},\"browser_triangles\":{},\"browser_degenerate\":{},\"browser_zero_normals\":{},\"browser_area\":{}}}",
         read_ms, parse_ms, triangulate_ms, export_ms, mesh.triangles.len(),
         mesh.verts.len(), stats.num_faces, stats.num_shells, stats.num_errors,
         stats.num_panics, WARNINGS.load(Ordering::Relaxed), ERRORS.load(Ordering::Relaxed),
-        degenerate_f64,
+        degenerate_f64, browser_nonfinite, browser.len() / 27, browser_degenerate,
+        browser_zero_normals, browser_area,
     ))?;
     Ok(())
 }
