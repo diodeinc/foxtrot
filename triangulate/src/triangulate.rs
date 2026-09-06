@@ -1090,6 +1090,29 @@ fn revolution_surface(curve: HomogeneousCurve, origin: DVec3, axis: DVec3, uncer
     Ok(Surface::new_nurbs(SampledSurface::new(surface), uncertainty, false))
 }
 
+fn spline_surface(b: &BSplineSurfaceWithKnots_, controls: Vec<Vec<DVec4>>)
+    -> Result<NURBSSurface, Error>
+{
+    let u_knots: Vec<f64> = b.u_knots.iter().map(|k| k.0).collect();
+    let u_multiplicities: Vec<usize> = b.u_multiplicities.iter()
+        .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative u multiplicity")))
+        .collect::<Result<_, _>>()?;
+    let u_knot_vec = KnotVector::from_multiplicities(
+        b.u_degree.try_into().map_err(|_| Error::NumericConversion("negative u degree"))?,
+        &u_knots, &u_multiplicities);
+
+    let v_knots: Vec<f64> = b.v_knots.iter().map(|k| k.0).collect();
+    let v_multiplicities: Vec<usize> = b.v_multiplicities.iter()
+        .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative v multiplicity")))
+        .collect::<Result<_, _>>()?;
+    let v_knot_vec = KnotVector::from_multiplicities(
+        b.v_degree.try_into().map_err(|_| Error::NumericConversion("negative v degree"))?,
+        &v_knots, &v_multiplicities);
+
+    Ok(NURBSSurface::new(b.u_closed.0 != Some(true), b.v_closed.0 != Some(true),
+        u_knot_vec, v_knot_vec, controls))
+}
+
 fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3], uncertainty: f64, has_seam: bool) -> Result<Surface, Error> {
     match &s[surf] {
         Entity::CylindricalSurface(c) => {
@@ -1147,25 +1170,7 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3], uncertain
                 .ok_or(Error::MissingStepField("Axis1Placement.axis"))?)?;
             revolution_surface(homogeneous_curve(s, r.swept_curve)?, origin, axis, uncertainty)
         },
-        Entity::BSplineSurfaceWithKnots(b) =>
-        {
-            // TODO: make KnotVector::from_multiplicies accept iterators?
-            let u_knots: Vec<f64> = b.u_knots.iter().map(|k| k.0).collect();
-            let u_multiplicities: Vec<usize> = b.u_multiplicities.iter()
-                .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative u multiplicity")))
-                .collect::<Result<_, _>>()?;
-            let u_knot_vec = KnotVector::from_multiplicities(
-                b.u_degree.try_into().map_err(|_| Error::NumericConversion("negative u degree"))?,
-                &u_knots, &u_multiplicities);
-
-            let v_knots: Vec<f64> = b.v_knots.iter().map(|k| k.0).collect();
-            let v_multiplicities: Vec<usize> = b.v_multiplicities.iter()
-                .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative v multiplicity")))
-                .collect::<Result<_, _>>()?;
-            let v_knot_vec = KnotVector::from_multiplicities(
-                b.v_degree.try_into().map_err(|_| Error::NumericConversion("negative v degree"))?,
-                &v_knots, &v_multiplicities);
-
+        Entity::BSplineSurfaceWithKnots(b) => {
             let control_points_list = control_points_2d(s, &b.control_points_list)?
                 .into_iter()
                 .map(|row| row.into_iter()
@@ -1173,45 +1178,22 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3], uncertain
                     .collect())
                 .collect();
 
-            let surf = NURBSSurface::new(
-                b.u_closed.0 != Some(true),
-                b.v_closed.0 != Some(true),
-                u_knot_vec,
-                v_knot_vec,
-                control_points_list,
-            );
+            let surf = spline_surface(b, control_points_list)?;
             Ok(Surface::new_nurbs(SampledSurface::new(surf), uncertainty, has_seam))
         },
         Entity::ComplexEntity(v) if v.len() == 2 => {
             let bspline = if let Entity::BSplineSurfaceWithKnots(b) = &v[0] {
                 b
             } else {
-                warn!("Could not get BSplineCurveWithKnots from {:?}", v[0]);
-                return Err(Error::UnknownCurveType)
+                warn!("Could not get BSplineSurfaceWithKnots from {:?}", v[0]);
+                return Err(Error::UnknownSurfaceType)
             };
             let rational = if let Entity::RationalBSplineSurface(b) = &v[1] {
                 b
             } else {
-                warn!("Could not get RationalBSplineCurve from {:?}", v[1]);
-                return Err(Error::UnknownCurveType)
+                warn!("Could not get RationalBSplineSurface from {:?}", v[1]);
+                return Err(Error::UnknownSurfaceType)
             };
-
-            // TODO: make KnotVector::from_multiplicies accept iterators?
-            let u_knots: Vec<f64> = bspline.u_knots.iter().map(|k| k.0).collect();
-            let u_multiplicities: Vec<usize> = bspline.u_multiplicities.iter()
-                .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative u multiplicity")))
-                .collect::<Result<_, _>>()?;
-            let u_knot_vec = KnotVector::from_multiplicities(
-                bspline.u_degree.try_into().map_err(|_| Error::NumericConversion("negative u degree"))?,
-                &u_knots, &u_multiplicities);
-
-            let v_knots: Vec<f64> = bspline.v_knots.iter().map(|k| k.0).collect();
-            let v_multiplicities: Vec<usize> = bspline.v_multiplicities.iter()
-                .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative v multiplicity")))
-                .collect::<Result<_, _>>()?;
-            let v_knot_vec = KnotVector::from_multiplicities(
-                bspline.v_degree.try_into().map_err(|_| Error::NumericConversion("negative v degree"))?,
-                &v_knots, &v_multiplicities);
 
             let control_points_list = control_points_2d(
                     s, &bspline.control_points_list)?
@@ -1224,13 +1206,7 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3], uncertain
                         .collect())
                 .collect();
 
-            let surf = NURBSSurface::new(
-                bspline.u_closed.0 != Some(true),
-                bspline.v_closed.0 != Some(true),
-                u_knot_vec,
-                v_knot_vec,
-                control_points_list,
-            );
+            let surf = spline_surface(bspline, control_points_list)?;
             Ok(Surface::new_nurbs(SampledSurface::new(surf), uncertainty, has_seam))
 
         },
@@ -1346,18 +1322,10 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
 
             let control_points_list = control_points_1d(s, &c.control_points_list)?;
 
-            let knots: Vec<f64> = c.knots.iter().map(|k| k.0).collect();
-            let multiplicities: Vec<usize> = c.knot_multiplicities.iter()
-                .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative curve multiplicity")))
-                .collect::<Result<_, _>>()?;
-            let knot_vec = KnotVector::from_multiplicities(
-                c.degree.try_into().map_err(|_| Error::NumericConversion("negative curve degree"))?,
-                &knots, &multiplicities);
-
             let open = c.closed_curve.0 != Some(true);
             let curve = nurbs::BSplineCurve::new(
                 open,
-                knot_vec,
+                curve_knot_vector(c)?,
                 control_points_list,
             );
             Curve::BSplineCurveWithKnots {
@@ -1378,13 +1346,7 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
                 warn!("Could not get RationalBSplineCurve from {:?}", v[1]);
                 return Err(Error::UnknownCurveType)
             };
-            let knots: Vec<f64> = bspline.knots.iter().map(|k| k.0).collect();
-            let multiplicities: Vec<usize> = bspline.knot_multiplicities.iter()
-                .map(|&k| k.try_into().map_err(|_| Error::NumericConversion("negative curve multiplicity")))
-                .collect::<Result<_, _>>()?;
-            let knot_vec = KnotVector::from_multiplicities(
-                bspline.degree.try_into().map_err(|_| Error::NumericConversion("negative curve degree"))?,
-                &knots, &multiplicities);
+            let knot_vec = curve_knot_vector(bspline)?;
 
             let control_points_list = control_points_1d(s, &bspline.control_points_list)?
                 .into_iter()
