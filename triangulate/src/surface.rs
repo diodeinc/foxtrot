@@ -99,8 +99,6 @@ pub enum Surface {
     },
     NURBS {
         surf: SampledSurface<4>,
-        uncertainty: f64,
-        has_seam: bool,
     },
     Sphere {
         location: DVec3,
@@ -143,16 +141,12 @@ pub struct PreparedSurface<'a> {
 }
 
 impl Surface {
-    pub fn new_nurbs(surf: SampledSurface<4>, uncertainty: f64, has_seam: bool) -> Self {
+    pub fn new_nurbs(surf: SampledSurface<4>) -> Self {
         if let Some(normal) = surf.surf.bilinear_plane_normal() {
             return Self::new_plane(normal)
                 .expect("regular planar patch has a nonzero finite normal");
         }
-        Surface::NURBS {
-            surf,
-            uncertainty,
-            has_seam,
-        }
+        Surface::NURBS { surf }
     }
 
     fn spline_chart(surf: &SampledSurface<4>, uncertainty: f64, has_seam: bool) -> SplineChart {
@@ -394,12 +388,14 @@ impl Surface {
         verts: &[Vertex],
         boundary_edges: &[(usize, usize)],
         same_sense: bool,
+        uncertainty: f64,
+        has_seam: bool,
     ) -> Result<PreparedSurface<'a>, Error> {
-        if verts.is_empty() {
-            return Err(Error::InvalidGeometry("surface has no vertices"));
-        }
         let chart = match self {
             Surface::Cylinder { mat_i, .. } => {
+                if verts.is_empty() {
+                    return Err(Error::InvalidGeometry("surface has no vertices"));
+                }
                 let mut z_min = f64::INFINITY;
                 let mut z_max = f64::NEG_INFINITY;
                 for v in verts {
@@ -410,6 +406,9 @@ impl Surface {
                 FaceChart::Cylinder { z_min, z_max }
             }
             Surface::Sphere { location, .. } => {
+                if verts.is_empty() {
+                    return Err(Error::InvalidGeometry("surface has no vertices"));
+                }
                 let points: Vec<_> = verts
                     .iter()
                     .map(|v| {
@@ -438,6 +437,9 @@ impl Surface {
                 major_radius,
                 ..
             } => {
+                if verts.is_empty() {
+                    return Err(Error::InvalidGeometry("surface has no vertices"));
+                }
                 let mut major_angles = Vec::with_capacity(verts.len());
                 let mut minor_angles = Vec::with_capacity(verts.len());
                 for vertex in verts {
@@ -460,11 +462,9 @@ impl Surface {
                     },
                 }
             }
-            Surface::NURBS {
-                surf,
-                uncertainty,
-                has_seam,
-            } => FaceChart::Spline(Self::spline_chart(surf, *uncertainty, *has_seam)),
+            Surface::NURBS { surf } => {
+                FaceChart::Spline(Self::spline_chart(surf, uncertainty, has_seam))
+            }
             _ => FaceChart::Direct,
         };
         Ok(PreparedSurface {
@@ -1303,101 +1303,6 @@ impl PreparedSurface<'_> {
 }
 
 #[cfg(test)]
-impl Surface {
-    pub(crate) fn test_chart(&self) -> FaceChart {
-        match self {
-            Surface::NURBS {
-                surf,
-                uncertainty,
-                has_seam,
-            } => FaceChart::Spline(Self::spline_chart(surf, *uncertainty, *has_seam)),
-            _ => FaceChart::Direct,
-        }
-    }
-    fn lower(&self, p: DVec3) -> Result<DVec2, Error> {
-        PreparedSurface {
-            surface: self,
-            chart: self.test_chart(),
-        }
-        .lower(p)
-    }
-    pub(crate) fn raise(&self, uv: DVec2) -> Option<DVec3> {
-        PreparedSurface {
-            surface: self,
-            chart: self.test_chart(),
-        }
-        .raise(uv)
-    }
-    fn normal(&self, p: DVec3, uv: DVec2) -> DVec3 {
-        PreparedSurface {
-            surface: self,
-            chart: self.test_chart(),
-        }
-        .normal(p, uv)
-    }
-    pub(crate) fn lower_verts(
-        &self,
-        verts: &mut [Vertex],
-        edges: &[(usize, usize)],
-        sense: bool,
-    ) -> Result<Vec<(f64, f64)>, Error> {
-        self.prepare(verts, edges, sense)?.lower_verts(verts)
-    }
-    fn unwrap_periodic(
-        &self,
-        pts: &mut [(f64, f64)],
-        edges: &[(usize, usize)],
-        ranges: &[(usize, usize, bool)],
-    ) {
-        PreparedSurface {
-            surface: self,
-            chart: self.test_chart(),
-        }
-        .unwrap_periodic(pts, edges, ranges)
-    }
-    fn add_steiner_points(&self, pts: &mut Vec<(f64, f64)>, verts: &mut Vec<Vertex>) {
-        PreparedSurface {
-            surface: self,
-            chart: self.test_chart(),
-        }
-        .add_steiner_points(pts, verts)
-    }
-    fn smallest_circular_arc(a: &mut [f64]) -> (f64, f64) {
-        PreparedSurface::smallest_circular_arc(a)
-    }
-    fn unwrap_from_start(a: f64, b: f64) -> f64 {
-        PreparedSurface::unwrap_from_start(a, b)
-    }
-    fn point_minor_arc_distance(p: DVec3, a: DVec3, b: DVec3) -> Result<f64, Error> {
-        PreparedSurface::point_minor_arc_distance(p, a, b)
-    }
-    fn angular_distance(a: DVec3, b: DVec3) -> f64 {
-        PreparedSurface::angular_distance(a, b)
-    }
-    fn spherical_winding_sum(
-        q: DVec3,
-        p: &[DVec3],
-        e: &[(usize, usize)],
-    ) -> Result<(f64, f64), Error> {
-        PreparedSurface::spherical_winding_sum(q, p, e)
-    }
-    fn unwrap_periodic_coord(
-        p: &mut [(f64, f64)],
-        e: &[(usize, usize)],
-        a: usize,
-        b: usize,
-        c: usize,
-        d: f64,
-        skip: bool,
-    ) -> bool {
-        PreparedSurface::unwrap_periodic_coord(p, e, a, b, c, d, skip)
-    }
-    fn surf_normal(uv: DVec2, surf: &SampledSurface<4>) -> DVec3 {
-        PreparedSurface::surf_normal(uv, surf)
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use nurbs::{KnotVector, NURBSSurface};
@@ -1447,19 +1352,22 @@ mod tests {
             KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
             controls,
         ));
-        let exact = Surface::new_nurbs(surf.clone(), 0., true);
+        let exact = Surface::new_nurbs(surf.clone());
+        let exact = exact.prepare(&[], &[], true, 0., true).unwrap();
         assert!(matches!(
-            exact.test_chart(),
+            exact.chart,
             FaceChart::Spline(SplineChart::Cartesian { .. })
         ));
-        let no_seam = Surface::new_nurbs(surf.clone(), 1e-10, false);
+        let no_seam = Surface::new_nurbs(surf.clone());
+        let no_seam = no_seam.prepare(&[], &[], true, 1e-10, false).unwrap();
         assert!(matches!(
-            no_seam.test_chart(),
+            no_seam.chart,
             FaceChart::Spline(SplineChart::Cartesian { .. })
         ));
-        let closed = Surface::new_nurbs(surf, 1e-10, true);
+        let closed = Surface::new_nurbs(surf);
+        let closed = closed.prepare(&[], &[], true, 1e-10, true).unwrap();
         assert!(matches!(
-            closed.test_chart(),
+            closed.chart,
             FaceChart::Spline(SplineChart::Polar { angular: 0, .. })
         ));
     }
@@ -1486,17 +1394,16 @@ mod tests {
         ];
         let surface = Surface::new_nurbs(
             SampledSurface::new(NURBSSurface::new(false, true, knots(), knots(), controls)),
-            0.5,
-            false,
         );
-        let pole = surface.raise(DVec2::zeros()).unwrap();
-        assert!(surface.lower(pole).unwrap().norm() < 1e-14);
+        let prepared = surface.prepare(&[], &[], true, 0.5, false).unwrap();
+        let pole = prepared.raise(DVec2::zeros()).unwrap();
+        assert!(prepared.lower(pole).unwrap().norm() < 1e-14);
         for radius in [1e-4, 0.01, 0.1] {
-            let point = surface.raise(DVec2::new(radius, 0.)).unwrap();
+            let point = prepared.raise(DVec2::new(radius, 0.)).unwrap();
             assert!((point - pole).norm() < 0.5);
-            let lowered = surface.lower(point).unwrap();
+            let lowered = prepared.lower(point).unwrap();
             assert!((lowered.norm() - radius).abs() < 1e-12);
-            assert!((surface.raise(lowered).unwrap() - point).norm() < 1e-12);
+            assert!((prepared.raise(lowered).unwrap() - point).norm() < 1e-12);
         }
     }
 
@@ -1504,9 +1411,9 @@ mod tests {
     fn circular_arc_keeps_the_selected_endpoint_representative() {
         for input in [[-1e-16, 0., PI / 2., PI], [0.13, 0.7, 0.4, 0.2]] {
             let mut angles = input;
-            let (start, span) = Surface::smallest_circular_arc(&mut angles);
+            let (start, span) = PreparedSurface::smallest_circular_arc(&mut angles);
             for angle in input {
-                let offset = Surface::unwrap_from_start(angle, start) - start;
+                let offset = PreparedSurface::unwrap_from_start(angle, start) - start;
                 assert!(
                     offset >= -1e-14 && offset <= span + 1e-14,
                     "{} lies outside [{}, {}]",
@@ -1525,6 +1432,7 @@ mod tests {
                 let mut axis = DVec3::new(0.2, 0.3, 0.4);
                 axis[dropped] = sign;
                 let surface = Surface::new_plane(axis).unwrap();
+                let prepared = surface.prepare(&[], &[], true, 0., false).unwrap();
                 let a = DVec3::new(3.13, -0.45, 1.75);
                 let mut b = a;
                 let mut c = a;
@@ -1534,14 +1442,15 @@ mod tests {
                 b[dropped] -= axis[x] / axis[dropped];
                 c[y] += 1.0;
                 c[dropped] -= axis[y] / axis[dropped];
-                let pa = surface.lower(a).unwrap();
+                let pa = prepared.lower(a).unwrap();
                 assert_eq!(pa, DVec2::new(a[x], a[y] * sign));
-                let pb = surface.lower(b).unwrap() - pa;
-                let pc = surface.lower(c).unwrap() - pa;
+                let pb = prepared.lower(b).unwrap() - pa;
+                let pc = prepared.lower(c).unwrap() - pa;
                 assert!((pb.x * pc.y - pb.y * pc.x) * (b - a).cross(&(c - a)).dot(&axis) > 0.);
             }
         }
         let tiny = Surface::new_plane(DVec3::new(0., 1e-100, 0.)).unwrap();
+        let tiny = tiny.prepare(&[], &[], true, 0., false).unwrap();
         assert_eq!(
             tiny.normal(DVec3::zeros(), DVec2::zeros()),
             DVec3::new(0., 1., 0.)
@@ -1575,15 +1484,15 @@ mod tests {
     }
 
     fn lower_sphere(
-        mut vertices: Vec<Vertex>,
+        vertices: Vec<Vertex>,
         edges: &[(usize, usize)],
         same_sense: bool,
     ) -> (Surface, Vec<Vertex>, Vec<(f64, f64)>, DVec3) {
         let surface = Surface::new_sphere(DVec3::zeros(), 1.0).unwrap();
-        let prepared = surface.prepare(&vertices, edges, same_sense).unwrap();
-        let points = surface
-            .lower_verts(&mut vertices, edges, same_sense)
+        let prepared = surface
+            .prepare(&vertices, edges, same_sense, 0., false)
             .unwrap();
+        let points = prepared.lower_verts(&vertices).unwrap();
         let chart_center = match &prepared.chart {
             FaceChart::Sphere { mat, .. } => mat.column(0).xyz(),
             _ => unreachable!(),
@@ -1606,13 +1515,14 @@ mod tests {
         let a = DVec3::new(1.0, 0.0, 0.0);
         let b = DVec3::new(0.0, 1.0, 0.0);
         let interior = DVec3::new(1.0, 1.0, 0.2).normalize();
-        let distance = Surface::point_minor_arc_distance(interior, a, b).unwrap();
+        let distance = PreparedSurface::point_minor_arc_distance(interior, a, b).unwrap();
         assert!((distance - 0.2_f64.atan2(2.0_f64.sqrt())).abs() < 1e-14);
 
         let beyond = DVec3::new(-0.01, 1.0, 0.001).normalize();
-        let endpoint = Surface::angular_distance(beyond, b);
+        let endpoint = PreparedSurface::angular_distance(beyond, b);
         assert!(
-            (Surface::point_minor_arc_distance(beyond, a, b).unwrap() - endpoint).abs() < 1e-14
+            (PreparedSurface::point_minor_arc_distance(beyond, a, b).unwrap() - endpoint).abs()
+                < 1e-14
         );
     }
 
@@ -1646,7 +1556,9 @@ mod tests {
                 vertex.pos *= radius;
             }
             let surface = Surface::new_sphere(DVec3::zeros(), radius).unwrap();
-            let prepared = surface.prepare(&vertices, &edges, true).unwrap();
+            let prepared = surface
+                .prepare(&vertices, &edges, true, 0., false)
+                .unwrap();
             let uv = prepared.lower_verts(&vertices).unwrap();
             for (vertex, &(u, v)) in vertices.iter().zip(&uv) {
                 let chart = DVec2::new(u, v);
@@ -1674,11 +1586,11 @@ mod tests {
         let (north_vertices, north_edges) = make_loop(0.4);
         let (south_vertices, south_edges) = make_loop(-0.4);
         let north = surface
-            .prepare(&north_vertices, &north_edges, true)
+            .prepare(&north_vertices, &north_edges, true, 0., false)
             .unwrap();
         let before = north.lower_verts(&north_vertices).unwrap();
         let south = surface
-            .prepare(&south_vertices, &south_edges, true)
+            .prepare(&south_vertices, &south_edges, true, 0., false)
             .unwrap();
         let south_points = south.lower_verts(&south_vertices).unwrap();
         assert_eq!(before, north.lower_verts(&north_vertices).unwrap());
@@ -1732,7 +1644,7 @@ mod tests {
                 edges.push((start + i, start + (i + 1) % 4));
             }
             let points: Vec<_> = vertices.iter().map(|v| v.pos).collect();
-            let (area, error) = Surface::spherical_winding_sum(
+            let (area, error) = PreparedSurface::spherical_winding_sum(
                 DVec3::new(0.0, 0.0, 1.0),
                 &points,
                 &edges[edges.len() - 4..],
@@ -1763,8 +1675,6 @@ mod tests {
                     .map(|&(x, y)| vec![DVec4::new(x, y, 0., 1.), DVec4::new(x, y, 1., 1.)])
                     .collect(),
             )),
-            0.,
-            false,
         );
         let raw = vec![
             (0., 1.),
@@ -1776,9 +1686,9 @@ mod tests {
             (0.1, 0.),
             (0., 0.),
         ];
-        let chart = surface.test_chart();
-        let (surf, chart) = match (&surface, &chart) {
-            (Surface::NURBS { surf, .. }, FaceChart::Spline(chart)) => (surf, chart),
+        let prepared = surface.prepare(&[], &[], true, 0., false).unwrap();
+        let (surf, chart) = match (&surface, &prepared.chart) {
+            (Surface::NURBS { surf }, FaceChart::Spline(chart)) => (surf, chart),
             _ => unreachable!(),
         };
         let mut points: Vec<_> = raw
@@ -1792,11 +1702,11 @@ mod tests {
         let edges: Vec<_> = (0..points.len())
             .map(|i| (i, (i + 1) % points.len()))
             .collect();
-        surface.unwrap_periodic(&mut points, &edges, &[(0, edges.len(), false)]);
+        prepared.unwrap_periodic(&mut points, &edges, &[(0, edges.len(), false)]);
         assert_eq!(points, original, "polar charts bypass seam unwrapping");
         for (&raw, &after) in raw.iter().zip(&points) {
             let a = surf.surf.point(DVec2::new(raw.0, raw.1));
-            let b = surface.raise(DVec2::new(after.0, after.1)).unwrap();
+            let b = prepared.raise(DVec2::new(after.0, after.1)).unwrap();
             assert!(
                 (a - b).norm() < 1e-14,
                 "unwrapping must not relocate boundary geometry"
@@ -1876,11 +1786,10 @@ mod tests {
                 KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
                 controls,
             )),
-            1e-6,
-            false,
         );
-        let a = surface.lower(DVec3::new(1e-8, 0., 1e-8)).unwrap();
-        let b = surface.lower(DVec3::new(0., 1e-8, 1e-8)).unwrap();
+        let prepared = surface.prepare(&[], &[], true, 1e-6, false).unwrap();
+        let a = prepared.lower(DVec3::new(1e-8, 0., 1e-8)).unwrap();
+        let b = prepared.lower(DVec3::new(0., 1e-8, 1e-8)).unwrap();
         assert!(
             (a - b).norm() > 0.5,
             "a short edge must retain distinct chart ends"
@@ -1914,16 +1823,14 @@ mod tests {
                         .collect();
                     (r, a)
                 };
-                let mut surface = Surface::new_nurbs(
+                let surface = Surface::new_nurbs(
                     SampledSurface::new(NURBSSurface::new(true, true, u, v, controls)),
-                    0.,
-                    false,
                 );
-                let chart_value = surface.test_chart();
+                let prepared = surface.prepare(&[], &[], true, 0., false).unwrap();
                 let (
-                    Surface::NURBS { surf, .. },
+                    Surface::NURBS { surf },
                     FaceChart::Spline(chart @ SplineChart::Polar { scale, .. }),
-                ) = (&surface, &chart_value)
+                ) = (&surface, &prepared.chart)
                 else {
                     panic!("a bounded collapsed edge needs a pole chart")
                 };
@@ -1959,8 +1866,8 @@ mod tests {
                 let edges: Vec<_> = (0..vertices.len())
                     .map(|i| (i, (i + 1) % vertices.len()))
                     .collect();
-                let mut points = surface.lower_verts(&mut vertices, &edges, true).unwrap();
-                surface.add_steiner_points(&mut points, &mut vertices);
+                let mut points = prepared.lower_verts(&vertices).unwrap();
+                prepared.add_steiner_points(&mut points, &mut vertices);
                 let mut t = cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
                 t.run().unwrap();
                 let mut area = 0.;
@@ -2019,7 +1926,7 @@ mod tests {
                         .collect();
                     (radial, angular)
                 };
-                let mut surface = Surface::new_nurbs(
+                let surface = Surface::new_nurbs(
                     SampledSurface::new(NURBSSurface::new(
                         periodic != 0,
                         periodic != 1,
@@ -2027,11 +1934,10 @@ mod tests {
                         v_knots,
                         controls,
                     )),
-                    0.,
-                    false,
                 );
+                let prepared = surface.prepare(&[], &[], true, 0., false).unwrap();
                 assert!(matches!(
-                    surface.test_chart(),
+                    prepared.chart,
                     FaceChart::Spline(SplineChart::Polar { .. })
                 ));
                 let mut vertices = Vec::new();
@@ -2047,7 +1953,7 @@ mod tests {
                         let angle = (if ring == 0 { 1. } else { -1. }) * 2. * PI * i as f64 / 64.;
                         let uv = DVec2::new(radius * angle.cos(), radius * angle.sin());
                         vertices.push(Vertex {
-                            pos: surface.raise(uv).unwrap(),
+                            pos: prepared.raise(uv).unwrap(),
                             norm: DVec3::zeros(),
                             color: DVec3::zeros(),
                         });
@@ -2056,13 +1962,13 @@ mod tests {
                 }
                 if pole.is_some() {
                     vertices.push(Vertex {
-                        pos: surface.raise(DVec2::zeros()).unwrap(),
+                        pos: prepared.raise(DVec2::zeros()).unwrap(),
                         norm: DVec3::zeros(),
                         color: DVec3::zeros(),
                     });
                 }
-                let mut points = surface.lower_verts(&mut vertices, &edges, true).unwrap();
-                surface.add_steiner_points(&mut points, &mut vertices);
+                let mut points = prepared.lower_verts(&vertices).unwrap();
+                prepared.add_steiner_points(&mut points, &mut vertices);
                 let mut t = cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
                 t.run().unwrap();
                 let mut area = 0.;
@@ -2104,7 +2010,7 @@ mod tests {
             .map(|i| (i, (i + 1) % points.len()))
             .collect::<Vec<_>>();
 
-        assert!(Surface::unwrap_periodic_coord(
+        assert!(PreparedSurface::unwrap_periodic_coord(
             &mut points,
             &edges,
             0,
@@ -2141,13 +2047,12 @@ mod tests {
                 knots(),
                 control_points,
             )),
-            0.,
-            false,
         );
         let mut points = vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
         let mut vertices = Vec::new();
 
-        surface.add_steiner_points(&mut points, &mut vertices);
+        let prepared = surface.prepare(&[], &[], true, 0., false).unwrap();
+        prepared.add_steiner_points(&mut points, &mut vertices);
 
         assert_eq!(points.len(), 4 + 16 * 16);
         assert_eq!(vertices.len(), 16 * 16);
@@ -2169,12 +2074,34 @@ mod tests {
                     scale,
                 )
                 .unwrap();
-                let prepared = PreparedSurface {
-                    surface: &surface,
-                    chart: FaceChart::Torus {
-                        polar_major,
-                        radial_start: 0.,
-                    },
+                let vertices: Vec<_> = (0..32)
+                    .map(|i| {
+                        let angle = 2. * PI * i as f64 / 32.;
+                        let (major, minor) = if polar_major {
+                            (angle, PI * i as f64 / 31.)
+                        } else {
+                            (PI * i as f64 / 31., angle)
+                        };
+                        Vertex {
+                            pos: DVec3::new(
+                                scale * minor.sin(),
+                                (4. * scale + scale * minor.cos()) * major.sin(),
+                                (4. * scale + scale * minor.cos()) * major.cos(),
+                            ),
+                            norm: DVec3::zeros(),
+                            color: DVec3::zeros(),
+                        }
+                    })
+                    .collect();
+                let prepared = surface
+                    .prepare(&vertices, &[], true, 0., false)
+                    .unwrap();
+                let FaceChart::Torus {
+                    polar_major,
+                    ..
+                } = prepared.chart
+                else {
+                    unreachable!()
                 };
                 let (base, radial_scale) = if polar_major {
                     (4. * scale, scale)
@@ -2226,8 +2153,6 @@ mod tests {
                     ],
                 ],
             )),
-            0.,
-            false,
         );
         assert!(matches!(surface, Surface::Plane { .. }));
         let mut vertices: Vec<_> = [(3.665, -3.75), (4.665, -3.75), (4.665, 3.42), (3.665, 3.42)]
@@ -2238,14 +2163,15 @@ mod tests {
                 color: DVec3::zeros(),
             })
             .collect();
+        let prepared = surface.prepare(&[], &[], true, 0., false).unwrap();
         let mut points: Vec<_> = vertices
             .iter()
             .map(|v| {
-                let uv = surface.lower(v.pos).unwrap();
+                let uv = prepared.lower(v.pos).unwrap();
                 (uv.x, uv.y)
             })
             .collect();
-        surface.add_steiner_points(&mut points, &mut vertices);
+        prepared.add_steiner_points(&mut points, &mut vertices);
         assert_eq!(
             vertices.len(),
             4,
@@ -2288,7 +2214,7 @@ mod tests {
             control_points,
         ));
 
-        let normal = Surface::surf_normal(DVec2::new(0.5, 1.1), &sampled);
+        let normal = PreparedSurface::surf_normal(DVec2::new(0.5, 1.1), &sampled);
 
         assert!(normal.norm() > 0.99);
         assert!(normal.y.abs() > 0.99);
@@ -2336,7 +2262,9 @@ mod tests {
         mut vertices: Vec<Vertex>,
         edges: Vec<(usize, usize)>,
     ) {
-        let prepared = surface.prepare(&vertices, &edges, true).unwrap();
+        let prepared = surface
+            .prepare(&vertices, &edges, true, 0., false)
+            .unwrap();
         let mut points = prepared.lower_verts(&vertices).unwrap();
         for (vertex, &(u, v)) in vertices.iter().zip(&points) {
             let raised = prepared.raise(DVec2::new(u, v)).unwrap();

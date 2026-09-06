@@ -982,7 +982,7 @@ fn advanced_face(
         .values()
         .any(|&(forward, reverse)| forward > 0 && reverse > 0);
     let surf = crate::timing::time("face:get_surface", || {
-        get_surface(s, face_geometry, &boundary_points, uncertainty, has_seam)
+        get_surface(s, face_geometry, &boundary_points)
     })?;
 
     // Opposite uses of the same topological edge are seams, not trims.
@@ -1000,7 +1000,13 @@ fn advanced_face(
 
     // Add curvature samples before constraint insertion. The CDT subdivides
     // constraints at existing vertices, including samples exactly on an edge.
-    let prepared = surf.prepare(&mesh.verts[v_start..], &edges, same_sense)?;
+    let prepared = surf.prepare(
+        &mesh.verts[v_start..],
+        &edges,
+        same_sense,
+        uncertainty,
+        has_seam,
+    )?;
     let mut pts = crate::timing::time("face:lower_verts", || {
         prepared.lower_verts(&mesh.verts[v_start..])
     })?;
@@ -1195,7 +1201,6 @@ fn extrusion_surface(
     curve: HomogeneousCurve,
     vector: DVec3,
     boundary: &[DVec3],
-    uncertainty: f64,
 ) -> Result<Surface, Error> {
     let denominator = vector.norm_squared();
     if denominator == 0.0 {
@@ -1242,18 +1247,13 @@ fn extrusion_surface(
         KnotVector::from_multiplicities(1, &[range.0, range.1], &[2, 2]),
         controls,
     );
-    Ok(Surface::new_nurbs(
-        SampledSurface::new(surface),
-        uncertainty,
-        false,
-    ))
+    Ok(Surface::new_nurbs(SampledSurface::new(surface)))
 }
 
 fn revolution_surface(
     curve: HomogeneousCurve,
     origin: DVec3,
     axis: DVec3,
-    uncertainty: f64,
 ) -> Result<Surface, Error> {
     if axis.norm_squared() == 0.0 {
         return Err(Error::InvalidGeometry("zero revolution axis"));
@@ -1286,11 +1286,7 @@ fn revolution_surface(
     let circle_knots =
         KnotVector::from_multiplicities(2, &[0.0, 0.25, 0.5, 0.75, 1.0], &[3, 2, 2, 2, 3]);
     let surface = NURBSSurface::new(false, curve.open, circle_knots, curve.knots, controls);
-    Ok(Surface::new_nurbs(
-        SampledSurface::new(surface),
-        uncertainty,
-        false,
-    ))
+    Ok(Surface::new_nurbs(SampledSurface::new(surface)))
 }
 
 fn spline_surface(
@@ -1344,8 +1340,6 @@ fn get_surface(
     s: &StepFile,
     surf: ap214::Surface,
     boundary: &[DVec3],
-    uncertainty: f64,
-    has_seam: bool,
 ) -> Result<Surface, Error> {
     match &s[surf] {
         Entity::CylindricalSurface(c) => {
@@ -1409,7 +1403,6 @@ fn get_surface(
                 homogeneous_curve(s, e.swept_curve)?,
                 vector,
                 boundary,
-                uncertainty,
             )
         }
         Entity::SurfaceOfRevolution(r) => {
@@ -1427,7 +1420,6 @@ fn get_surface(
                 homogeneous_curve(s, r.swept_curve)?,
                 origin,
                 axis,
-                uncertainty,
             )
         }
         Entity::BSplineSurfaceWithKnots(b) => {
@@ -1441,11 +1433,7 @@ fn get_surface(
                 .collect();
 
             let surf = spline_surface(b, control_points_list)?;
-            Ok(Surface::new_nurbs(
-                SampledSurface::new(surf),
-                uncertainty,
-                has_seam,
-            ))
+            Ok(Surface::new_nurbs(SampledSurface::new(surf)))
         }
         Entity::ComplexEntity(v) if v.len() == 2 => {
             let bspline = if let Entity::BSplineSurfaceWithKnots(b) = &v[0] {
@@ -1473,11 +1461,7 @@ fn get_surface(
                 .collect();
 
             let surf = spline_surface(bspline, control_points_list)?;
-            Ok(Surface::new_nurbs(
-                SampledSurface::new(surf),
-                uncertainty,
-                has_seam,
-            ))
+            Ok(Surface::new_nurbs(SampledSurface::new(surf)))
         }
         e => {
             warn!("Could not get surface from {:?}", e);
@@ -2379,8 +2363,8 @@ mod tests {
             );
             let flat = StepFile::strip_flatten(text.as_bytes()).unwrap();
             let step = StepFile::parse(&flat).unwrap();
-            let surface = get_surface(&step, Id::new(5), &[], 0., false).unwrap();
-            let mut verts: Vec<_> = [0.5_f64, 0.7, 0.9]
+            let surface = get_surface(&step, Id::new(5), &[]).unwrap();
+            let verts: Vec<_> = [0.5_f64, 0.7, 0.9]
                 .iter()
                 .map(|&u| {
                     let radius = 1.0 + 2.0 * v.cos();
@@ -2391,7 +2375,7 @@ mod tests {
                     }
                 })
                 .collect();
-            let prepared = surface.prepare(&verts, &[], true).unwrap();
+            let prepared = surface.prepare(&verts, &[], true, 0., false).unwrap();
             let uv = prepared.lower_verts(&verts).unwrap();
             for (i, u) in [0.5_f64, 0.7, 0.9].iter().enumerate() {
                 let expected = DVec3::new(v.cos() * u.cos(), v.cos() * u.sin(), v.sin());
@@ -2441,17 +2425,19 @@ mod tests {
                 knots: KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
                 control_points: vec![DVec4::new(0., radius, 0., 1.), DVec4::new(1., 1., 0., 1.)],
             };
-            let surface =
-                revolution_surface(curve, DVec3::zeros(), DVec3::x(), uncertainty).unwrap();
-            let crate::surface::FaceChart::Spline(crate::surface::SplineChart::Polar {
-                angular,
-                origin: chart_origin,
-                ..
-            }) = surface.test_chart()
-            else {
-                panic!("expected polar spline chart")
+            let surface = revolution_surface(curve, DVec3::zeros(), DVec3::x()).unwrap();
+            let Surface::NURBS { surf } = &surface else {
+                panic!("expected NURBS surface")
             };
-            assert_eq!(chart_origin[1 - angular], origin);
+            let prepared = surface
+                .prepare(&[], &[], true, uncertainty, false)
+                .unwrap();
+            if origin < surf.surf.min_v() {
+                assert!(prepared.raise(DVec2::zeros()).is_none());
+            } else {
+                let expected = surf.surf.point(DVec2::new(surf.surf.min_u(), origin));
+                assert!((prepared.raise(DVec2::zeros()).unwrap() - expected).norm() < 1e-14);
+            }
         }
     }
 
@@ -2462,7 +2448,7 @@ mod tests {
             DVec3::new(-10.0, -10.0, -10.0),
             DVec3::new(10.0, 10.0, 10.0),
         ];
-        let surface = nurbs(extrusion_surface(test_curve(true), vector, &boundary, 0.).unwrap());
+        let surface = nurbs(extrusion_surface(test_curve(true), vector, &boundary).unwrap());
         let uv = glm::DVec2::new(0.4, 0.3);
         let basis = (DVec3::new(2.0, -1.0, 0.5) * 0.6 + DVec3::new(3.0, 1.0, 2.0) * 0.8) / 1.4;
         assert!((surface.surf.point(uv) - (basis + vector * uv.y)).norm() < 1e-12);
@@ -2475,7 +2461,7 @@ mod tests {
     fn exact_revolution_points_and_normal_about_skew_axis() {
         let origin = DVec3::new(-0.5, 0.25, 1.0);
         let axis = DVec3::new(1.0, 2.0, -1.0).normalize();
-        let surface = nurbs(revolution_surface(test_curve(false), origin, axis, 0.).unwrap());
+        let surface = nurbs(revolution_surface(test_curve(false), origin, axis).unwrap());
         let uv = glm::DVec2::new(0.125, 0.4);
         let p = DVec3::new(2.0, -1.0, 0.5) * 0.6 + DVec3::new(3.0, 1.0, 2.0) * 0.4;
         let axial = origin + axis * (p - origin).dot(&axis);
