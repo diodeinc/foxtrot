@@ -35,6 +35,12 @@ python3 -m http.server --directory deploy # or the simple server of your choice
 Then, open the local server's URL (typically `127.0.0.1:8000`)
 and select a sample file from the list.
 
+The deploy directory links to the generated `pkg/wasm.js` and
+`pkg/wasm_bg.wasm`; rebuild them after Rust changes. The worker transfers a
+`Float32Array` plus completion and source-identified failure records, rather
+than treating a partial mesh as a successful conversion. Partial-load warnings
+remain visible when the camera moves.
+
 ## Subsystems
 - `cdt`: Constrained Delaunay triangulation (standalone)
 - `express`: Parser for EXPRESS schemas files and a matching code generation
@@ -142,7 +148,7 @@ The manifest records relative paths, sizes, and SHA-256 hashes, so duplicate
 basenames cannot collide and replay rejects changed inputs. A fixed seed repeats
 selection for an unchanged corpus; use the manifest to freeze it as the library
 grows. Comparisons require the same selected paths and contents, report changed
-face/triangle counts and increased error/warning counts, and reject incompatible
+face/triangle counts and increased tessellation failures, and reject incompatible
 benchmark settings when timing is gated. Counts changing is a review signal,
 not necessarily a bug. Any current functional failure still fails the run even
 if it existed in the baseline. The old thread-based `regression_test` executable

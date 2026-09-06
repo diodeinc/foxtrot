@@ -1,5 +1,81 @@
 # Würth and KiCad STEP repair worklog
 
+## Architecture refactors — 2026-09-06
+
+Implemented the approved sequence: face-local construction, structured outcomes,
+then immutable surfaces with explicit face-chart preparation. Each logic change
+has its own local commit on `wurth-kicad-step-repairs`; no compatibility shims,
+geometry fallback, tolerance relaxation, or new tessellation dependency is added.
+
+- Faces build into a reusable local mesh and append only after success. Failed
+  faces cannot leak vertices or affect the following face's indices. Removed
+  obsolete global offsets and the whole-torus combine/truncate dance.
+- Every final vertex receives its face normal and color after topology finishes,
+  including constructed constraint intersections. Boundary positions do not
+  move. A crossing-face regression checks color, normals and reversed winding;
+  failed-before/after-success cases check atomic publication.
+- `Stats.failures` is the source of truth for completion and derived counts.
+  Records identify the STEP entity, surface when available, category and reason;
+  deterministic sorting survives parallel shape traversal. Native worker schema
+  2 distinguishes rejected input from process crashes and partial tessellation.
+  The harness no longer counts log lines or accepts legacy STL-only workers.
+- Native, GUI and browser consumers receive the structured diagnostics. Browser
+  geometry remains a transferred `Float32Array`, not JSON numbers. Partial
+  warnings survive camera movement; error text uses `textContent`; diagnostic
+  STL conversion refuses to silently export partial results.
+- `PreparedSurface` borrows immutable `Surface` geometry and privately owns its
+  face chart. Preparation takes trims, orientation, source uncertainty and seam
+  evidence; projection, sampling and normal evaluation use that prepared chart.
+  Removed mutable preparation state, premature attribute writes and test-only
+  compatibility methods. Tests prepare actual surfaces, including independent
+  opposite spherical-face charts over shared geometry.
+
+Integration verification:
+- `cargo test --release --workspace`: 141 tests pass, including doc tests.
+  The final local-offset cleanup also passes all 54 triangulate library tests;
+  `cargo test --release -p triangulate --example corpus_worker` passes its test.
+- Python harness and geometry tests: 21 pass. Release native worker build and
+  actual `wasm32-unknown-unknown` release build pass. Matching wasm-bindgen
+  0.2.128 generates the demo wrapper and binary; no generated binary is committed.
+- Real browser testing finds and fixes an initialization race: install the
+  message handler immediately and await one initialization promise per request.
+  The binary URL is explicit and the deploy symlink matches its generated name.
+  An immediate request to a new worker returns schema 2, a real Float32Array,
+  and the connector's precise face #13017 / surface #25 diagnostic.
+- Complete, partial, rejected-input and recovery loads execute in Three.js.
+  Mouse-drag orbit preserves the partial warning; both selectors are enabled
+  after rejection. Screenshots are inspected under `.amp/in/artifacts/architecture-*`.
+  Coilcraft before/after inspection confirms coarse faceting and dark patches
+  already exist in the baseline; this is not a claim of visually correct meshes.
+- Against the frozen pre-chart `local/outcomes-worker`, final oriented triangle
+  records are byte-identical for Coilcraft 2222SQ-131, a DSUB-15 socket and the
+  unresolved Würth connector. Comparison preserves winding, normals, colors and
+  multiplicity while ignoring nondeterministic triangle order. Evidence:
+  `local/architecture-buffer-comparison.json`.
+
+The final full replay uses frozen `local/architecture-worker`, the exact scan-22
+manifests, four processes, one Rayon thread per process, a 60-second per-file
+timeout and `--meshes none`. Würth completes before KiCad starts. Reports and
+per-file diagnostics live in `local/architecture-{wurth,kicad}/`.
+
+Full replay result: all 7,328 Würth and all 7,251 KiCad inputs complete.
+Würth has 7,318 accepted, seven partial tessellations and three input rejections;
+KiCad has 7,251 accepted. There are no new processing failures. The three former
+parser "crashes" now correctly report `input_error`. Exact input path/hash sets,
+triangle/face/shell counts, f64 degenerates and browser degenerates/nonfinite
+counts match scan 22. Finalized attributes reduce zero-normal vertex uses on
+1,232 Würth and 832 KiCad models, with no increases. Only the seven partial
+Würth meshes change vertex counts: failed-face scratch vertices are no longer
+published (two connector vertices and 28 per invalid transformer). Detailed
+comparison: `local/architecture-comparison.json`.
+
+Outstanding processing scope is unchanged: nine previously confirmed invalid
+sources need no support; WR-TBL 691404910001B face #13017 / surface #25 still
+has a completely cancelling boundary and remains unresolved, not proven invalid.
+The existing local geometry/shading quality issues remain separate from
+processing acceptance. No claim of watertightness or complete visual correctness
+is made by this full replay.
+
 ## Branch cleanup review — 2026-09-06
 
 Reviewed the complete branch diff against `origin/master` (this repository has
