@@ -91,7 +91,13 @@ fn main() {
         let data = std::fs::read(input).expect("Could not open file");
         let flat = StepFile::strip_flatten(&data).expect("Could not preprocess STEP file");
         let step = StepFile::parse(&flat).expect("Could not parse STEP file");
-        let (mesh, _stats) = triangulate(&step);
+        let (mesh, stats) = triangulate(&step);
+        if !stats.is_complete() {
+            eprintln!("Loaded partial mesh; {} entities failed:", stats.failures.len());
+            for failure in &stats.failures {
+                eprintln!("  #{} {:?}: {}", failure.entity_id, failure.kind, failure.message);
+            }
+        }
         mesh
     });
 

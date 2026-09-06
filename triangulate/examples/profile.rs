@@ -41,7 +41,7 @@ fn main() {
     let t3 = Instant::now();
     eprintln!("triangulate:   {:.3}s ({} verts, {} tris; shells={} faces={} errors={} panics={}) [rss {:.0} MB]",
         (t3 - t2).as_secs_f64(), mesh.verts.len(), mesh.triangles.len(),
-        stats.num_shells, stats.num_faces, stats.num_errors, stats.num_panics,
+        stats.num_shells, stats.num_faces, stats.num_errors(), stats.num_panics(),
         peak_rss_mb());
 
     let tess = triangulate::colored_mesh::group_mesh_by_color(&mesh)

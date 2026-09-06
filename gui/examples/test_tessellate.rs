@@ -28,7 +28,7 @@ fn main() {
     let (mesh, stats) = triangulate(&step);
 
     eprintln!("Faces: {}, Errors: {}, Panics: {}, Triangles: {}, Vertices: {}",
-        stats.num_faces, stats.num_errors, stats.num_panics,
+        stats.num_faces, stats.num_errors(), stats.num_panics(),
         mesh.triangles.len(), mesh.verts.len());
 
     if !mesh.verts.is_empty() {

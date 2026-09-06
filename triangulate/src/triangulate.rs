@@ -15,7 +15,7 @@ use crate::{
     Error,
     curve::Curve,
     mesh, mesh::{Mesh, Triangle},
-    stats::Stats,
+    stats::{FailureKind, Stats, TessellationFailure},
     surface::Surface
 };
 use nurbs::{SampledCurve, SampledSurface, NURBSSurface, KnotVector};
@@ -610,12 +610,12 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
 
     info!("num_shells: {}", stats.num_shells);
     info!("num_faces: {}", stats.num_faces);
-    info!("num_errors: {}", stats.num_errors);
-    info!("num_panics: {}", stats.num_panics);
-    if stats.num_errors > 0 || stats.num_panics > 0 {
+    info!("num_errors: {}", stats.num_errors());
+    info!("num_panics: {}", stats.num_panics());
+    if !stats.is_complete() {
         warn!(
             "triangulation finished with {} face errors and {} panics",
-            stats.num_errors, stats.num_panics
+            stats.num_errors(), stats.num_panics()
         );
     }
     (mesh, stats)
@@ -734,7 +734,10 @@ fn shell(
     };
     let Some((faces, orientation)) = data else {
         error!("Invalid shell or oriented shell element {:?}", c);
-        stats.num_errors += 1;
+        stats.failures.push(TessellationFailure {
+            entity_id: c.0, surface_id: None, kind: FailureKind::InvalidEntity,
+            message: "invalid shell or oriented shell element".into(),
+        });
         return;
     };
     let v_start = mesh.verts.len();
@@ -747,8 +750,22 @@ fn shell(
         match advanced_face(s, *face, &mut scratch, styled_item_colors, default_color, uncertainty) {
             Ok(()) => mesh.append(&mut scratch),
             Err(err) => {
-                if err == Error::TriangulationPanic { stats.num_panics += 1; }
-                else { stats.num_errors += 1; }
+                let surface_id = match &s[*face] {
+                    Entity::AdvancedFace(f) => Some(f.face_geometry.0),
+                    Entity::FaceSurface(f) => Some(f.face_geometry.0),
+                    _ => None,
+                };
+                let kind = match err {
+                    Error::TriangulationPanic => FailureKind::Panic,
+                    Error::UnknownSurfaceType | Error::UnknownCurveType | Error::ClosedSurface
+                        | Error::SelfIntersectingSurface | Error::ClosedCurve
+                        | Error::SelfIntersectingCurve => FailureKind::Unsupported,
+                    Error::InvalidStepEntity(_) | Error::MissingStepField(_) => FailureKind::InvalidEntity,
+                    _ => FailureKind::Geometry,
+                };
+                stats.failures.push(TessellationFailure {
+                    entity_id: face.0, surface_id, kind, message: err.to_string(),
+                });
                 debug!("Failed to triangulate face #{}: {}", face.0, err);
             }
         }
@@ -1576,7 +1593,7 @@ mod tests {
             let flat = StepFile::strip_flatten(text.as_bytes()).unwrap();
             let step = StepFile::parse(&flat).unwrap();
             let (mesh, stats) = triangulate(&step);
-            assert_eq!((stats.num_faces, stats.num_errors), (2, 1));
+            assert_eq!((stats.num_faces, stats.num_errors()), (2, 1));
             assert_eq!((mesh.verts.len(), mesh.triangles.len()), (1024, 2048));
             assert!(mesh.triangles.iter().all(|t| t.verts.iter().all(|&i| i < 1024)));
         }
@@ -1609,7 +1626,7 @@ mod tests {
         let flat = StepFile::strip_flatten(text).unwrap();
         let step = StepFile::parse(&flat).unwrap();
         let (mesh, stats) = triangulate(&step);
-        assert_eq!((stats.num_shells, stats.num_faces, stats.num_errors), (2, 2, 0));
+        assert_eq!((stats.num_shells, stats.num_faces, stats.num_errors()), (2, 2, 0));
         let mut volume = 0.;
         for t in &mesh.triangles {
             let [a, b, c] = [t.verts.x, t.verts.y, t.verts.z]
@@ -1898,7 +1915,7 @@ mod tests {
         }
         let (mesh, stats) = triangulate(&step);
         assert!(stats.num_faces > 0);
-        assert_eq!(stats.num_errors, stats.num_faces);
+        assert_eq!(stats.num_errors(), stats.num_faces);
         assert!(mesh.triangles.is_empty());
     }
 
@@ -2022,8 +2039,8 @@ mod tests {
 
             assert_eq!(stats.num_shells, 1, "{shell_type}");
             assert_eq!(stats.num_faces, 1, "{shell_type}");
-            assert_eq!(stats.num_errors, 1, "{shell_type}");
-            assert_eq!(stats.num_panics, 0, "{shell_type}");
+            assert_eq!(stats.num_errors(), 1, "{shell_type}");
+            assert_eq!(stats.num_panics(), 0, "{shell_type}");
             assert!(mesh.triangles.is_empty(), "{}", shell_type);
         }
     }
@@ -2083,8 +2100,8 @@ END-ISO-10303-21;
         let (mesh, stats) = triangulate(&step);
 
         assert_eq!(stats.num_faces, 1);
-        assert_eq!(stats.num_errors, 0);
-        assert_eq!(stats.num_panics, 0);
+        assert_eq!(stats.num_errors(), 0);
+        assert_eq!(stats.num_panics(), 0);
         assert_eq!(mesh.triangles.len(), 2);
         assert_eq!(mesh.verts.len(), 4);
     }

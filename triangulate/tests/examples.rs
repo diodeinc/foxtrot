@@ -14,7 +14,7 @@ fn checked_in_models_tessellate_without_errors() {
 
         assert!(!mesh.triangles.is_empty(), "{} produced no triangles", name);
         assert!(stats.num_faces > 0, "{} contained no faces", name);
-        assert_eq!(stats.num_errors, 0, "{} had tessellation errors", name);
-        assert_eq!(stats.num_panics, 0, "{} had tessellation panics", name);
+        assert_eq!(stats.num_errors(), 0, "{} had tessellation errors", name);
+        assert_eq!(stats.num_panics(), 0, "{} had tessellation panics", name);
     }
 }

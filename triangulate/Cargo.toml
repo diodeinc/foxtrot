@@ -14,6 +14,8 @@ nalgebra-glm = "0.21"
 rayon = { version = "1.5", optional = true }
 robust = "1"
 thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [features]
 parallel = ["rayon", "step/parallel"]
