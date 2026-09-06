@@ -1,8 +1,89 @@
 # Würth and KiCad STEP repair worklog
 
-## Current checkpoint — 2026-09-05
+## Browser-first checkpoint — 2026-09-06
 
-This section is the current status; the dated investigation below is history.
+The user clarified the product target: good-looking Three.js meshes, not
+lossless CAD topology or world-coordinate STL. No glTF export is needed.
+Acceptance now exercises the actual centered f32 position/normal/color buffer;
+f64 geometry remains the computational source of truth. Nothing is deleted,
+merged or perturbed to make diagnostics pass.
+
+| Full browser scan 22 | Würth | KiCad |
+| --- | ---: | ---: |
+| Inputs processed | 7,328 | 7,251 |
+| Browser-buffer acceptance | 7,318 | 7,251 |
+| Processing/input failures | 10 | 0 |
+| Models flagged for quality review | 1,562 | 849 |
+| Models with collapsed browser triangles | 289 | 21 |
+| Models with zero-normal vertices | 1,417 | 843 |
+| Models with f64 degenerate triangles | 4 | 2 |
+
+Quality categories overlap. These are diagnostic counts, not counts of visible
+bugs. The 350 previous invalid-mesh results are **reclassified**, not fixed.
+All source path/hash sets and the frozen worker digest are verified; triangle,
+face, error, panic and f64-degenerate counts match pass 21 exactly. All Würth
+files finish before KiCad starts. Reported tessellation errors, nonfinite
+attribute buffers, empty meshes and entirely collapsed meshes fail acceptance;
+unreported omissions still require geometric or visual review.
+
+**Current evidence:** `.amp/in/artifacts/browser22/{summary,wurth,kicad}.json`.
+The corpus-specific `*-review-manifest.json` files preserve source hashes for
+focused replay. `ok` is not visual certification. Screenshots cover DSUB,
+axial and air-core inductors using the production Three.js scene module and
+the exact shared browser buffer generated natively. The WASM wrapper passes
+host `cargo check`; its deployed prebuilt wasm file is not rebuilt in this orb.
+
+**Outstanding real work:**
+- Nine confirmed invalid Würth inputs remain correctly rejected; the terminal
+  block WR-TBL691404910001B's canceled trim remains unresolved.
+- Crossing-created vertices have zero normals and are never assigned normals
+  in face finalization. This is a concrete shading bug. The 2,260 zero-normal
+  model flags also include singular-surface fallbacks; not all are attributed
+  to that one path. Coilcraft 2222SQ-131 has 639 zero-normal vertex uses out of
+  8,592 and visibly poor faceting/dark patches; a comparative repair is needed
+  to separate geometry defects from normal defects.
+- Six models retain f64 degeneracies (DSUB61803729321, CMB-XS744821110,
+  CMBHC-S, CMBNiZn-S, Bourns L39.4/W20.3 and L41.9/W20.3). Chart crossings and
+  inadequate interior sampling remain genuine geometric risks, not STL issues.
+- Browser collapse alone is now review evidence. The normal-sized axial
+  Fastron inductor looks intact from the side with both bent leads visible;
+  another viewing angle hides one lead, illustrating why one screenshot
+  cannot establish missing geometry. DSUB has suspicious dark slivers that
+  remain review items. There is no corpus-wide visual or area-equivalence claim.
+
+**Simplification and iteration tooling:** shared `Mesh::to_triangle_buffer`
+removes duplicate browser centering code and fixes the z-bounds bug. Bounds use
+referenced vertices, avoiding unused tessellation samples changing framing.
+The obsolete 352-line thread-based regression runner and unused `glob` dev
+dependency are removed. One process-isolated harness remains; old frozen
+workers retain explicitly labeled legacy acceptance for reproducibility.
+`--meshes none` avoids all STL export/readback while preserving browser
+diagnostics. Every new report emits a replayable `review-manifest.json` and
+sorts quality-flagged results ahead of unflagged successes. The worker can
+optionally emit the exact browser binary buffer for direct Three.js repros.
+
+**Verification:** 137 workspace tests and 21 Python harness/geometry tests pass.
+Browser buffer capture is byte-identical to the rendered native probe. The
+no-STL path preserves counts and area within summation roundoff. On one DSUB
+file, three invocations take 4.62 seconds with STL versus 2.49 seconds without
+(1.86x wall-speedup); this is not a corpus-wide benchmark. Evidence:
+`.amp/in/artifacts/browser22/iteration-benchmark.json`. Full scan 22 uses the
+earlier frozen browser worker with STL diagnostics, unchanged during its run;
+later no-STL tooling does not alter mesh conversion or acceptance.
+
+Completed scan logs larger than 16 KiB are compressed and their decompressed
+SHA-256 values verified before removing raw copies. The 12,200 operations
+recover 2,648,179,043 bytes; inventory: `local/browser22-log-compression.json`.
+Those log paths now end in `.log.gz`. Approximately 11 GiB is free. Temporary
+browser-probe source and preview service are removed/stopped; the production
+worker's optional buffer capture replaces the probe. Review screenshots remain.
+
+Changes are committed separately on `wurth-kicad-step-repairs`; this round is
+not pushed. The previously pushed checkpoint remains unchanged remotely.
+
+## Historical strict-STL checkpoint — 2026-09-05
+
+This section records the old strict-STL methodology; it is not current acceptance.
 The task has expanded from assessment to fundamental repairs of both corpora,
 with one local commit per logic change. No push or merge is authorized.
 
