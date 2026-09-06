@@ -4,26 +4,28 @@ use std::time::Instant;
 use serde::Serialize;
 use step::step_file::StepFile;
 use triangulate::triangulate::triangulate;
-use triangulate::stats::TessellationFailure;
+use triangulate::stats::{Completion, TessellationFailure};
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum WorkerOutcome {
+    InputError { schema: u32, message: String },
+    Ok(WorkerReport),
+}
 
 #[derive(Serialize)]
 struct WorkerReport {
     schema: u32,
-    status: &'static str,
-    message: Option<String>,
     read_ms: f64, parse_ms: f64, triangulate_ms: f64, export_ms: f64,
     triangles: usize, vertices: usize, faces: usize, shells: usize,
-    completion: &'static str,
+    completion: Completion,
     failures: Vec<TessellationFailure>,
     degenerate_f64: usize, browser_nonfinite: usize, browser_triangles: usize,
     browser_degenerate: usize, browser_zero_normals: usize,
 }
 
-fn write_input_error(path: &str, read_ms: f64, message: String) -> Result<(), Box<dyn std::error::Error>> {
-    let report = WorkerReport { schema: 2, status: "input_error", message: Some(message), read_ms,
-        parse_ms: 0., triangulate_ms: 0., export_ms: 0., triangles: 0, vertices: 0,
-        faces: 0, shells: 0, completion: "failed", failures: vec![], degenerate_f64: 0,
-        browser_nonfinite: 0, browser_triangles: 0, browser_degenerate: 0, browser_zero_normals: 0 };
+fn write_input_error(path: &str, message: String) -> Result<(), Box<dyn std::error::Error>> {
+    let report = WorkerOutcome::InputError { schema: 2, message };
     std::fs::write(path, serde_json::to_vec_pretty(&report)?)?;
     Ok(())
 }
@@ -45,19 +47,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     let start = Instant::now();
-    let data = match std::fs::read(&args[1]) {
-        Ok(data) => data,
-        Err(e) => return write_input_error(&args[2], 0., e.to_string()),
-    };
+    let data = std::fs::read(&args[1])?;
     let read_ms = start.elapsed().as_secs_f64() * 1000.0;
     let start = Instant::now();
     let flat = match StepFile::strip_flatten(&data) {
         Ok(flat) => flat,
-        Err(e) => return write_input_error(&args[2], read_ms, e.to_string()),
+        Err(e) => return write_input_error(&args[2], e.to_string()),
     };
     let step = match StepFile::parse(&flat) {
         Ok(step) => step,
-        Err(e) => return write_input_error(&args[2], read_ms, e.to_string()),
+        Err(e) => return write_input_error(&args[2], e.to_string()),
     };
     let parse_ms = start.elapsed().as_secs_f64() * 1000.0;
     let start = Instant::now();
@@ -91,13 +90,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::write(path, browser.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>())?;
     }
     let export_ms = start.elapsed().as_secs_f64() * 1000.0;
-    let report = WorkerReport { schema: 2, status: "ok", message: None, read_ms, parse_ms,
+    let report = WorkerReport { schema: 2, read_ms, parse_ms,
         triangulate_ms, export_ms, triangles: mesh.triangles.len(), vertices: mesh.verts.len(),
         faces: stats.num_faces, shells: stats.num_shells,
-        completion: if stats.is_complete() { "complete" } else { "partial" },
+        completion: stats.completion(),
         failures: stats.failures, degenerate_f64, browser_nonfinite,
         browser_triangles: browser.len() / 27, browser_degenerate, browser_zero_normals };
-    std::fs::write(&args[2], serde_json::to_vec_pretty(&report)?)?;
+    std::fs::write(&args[2], serde_json::to_vec_pretty(&WorkerOutcome::Ok(report))?)?;
     Ok(())
 }
 

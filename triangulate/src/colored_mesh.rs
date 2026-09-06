@@ -7,10 +7,8 @@
 
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use serde::{Deserialize, Serialize};
-
 use crate::mesh::Mesh;
-use crate::stats::{Stats, TessellationFailure};
+use crate::stats::Stats;
 use crate::triangulate::triangulate;
 
 // ---------------------------------------------------------------------------
@@ -74,30 +72,6 @@ impl ColoredSubmesh {
     }
 }
 
-/// Lightweight statistics from tessellation.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Completion { Complete, Partial }
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TessellationDiagnostics {
-    pub num_shells: usize,
-    pub num_faces: usize,
-    pub completion: Completion,
-    pub failures: Vec<TessellationFailure>,
-}
-
-impl From<&Stats> for TessellationDiagnostics {
-    fn from(s: &Stats) -> Self {
-        Self {
-            num_shells: s.num_shells,
-            num_faces: s.num_faces,
-            completion: if s.is_complete() { Completion::Complete } else { Completion::Partial },
-            failures: s.failures.clone(),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -108,15 +82,14 @@ impl From<&Stats> for TessellationDiagnostics {
 /// colour-bucketed geometry without pulling in the `step` crate directly.
 pub fn tessellate_step_bytes(
     step_bytes: &[u8],
-) -> Result<(TessellatedMesh, TessellationDiagnostics), String> {
+) -> Result<(TessellatedMesh, Stats), String> {
     let flattened = step::step_file::StepFile::strip_flatten(step_bytes)
         .map_err(|e| e.to_string())?;
     let step = step::step_file::StepFile::parse(&flattened)
         .map_err(|e| e.to_string())?;
     let (mesh, stats) = triangulate(&step);
-    let diag = TessellationDiagnostics::from(&stats);
     let tess = group_mesh_by_color(&mesh)?;
-    Ok((tess, diag))
+    Ok((tess, stats))
 }
 
 /// Group an already-triangulated `Mesh` into per-colour sub-meshes.

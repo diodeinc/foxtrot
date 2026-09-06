@@ -26,15 +26,13 @@ pub fn tessellate_step(data: String) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let (mesh, stats) = triangulate(&step);
     let buffer = mesh.to_triangle_buffer();
-    let out = js_sys::Object::new();
+    let out = serde_wasm_bindgen::to_value(&stats)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     js_sys::Reflect::set(&out, &"schema".into(), &2.into())?;
     js_sys::Reflect::set(&out, &"completion".into(),
-        &if stats.is_complete() { "complete" } else { "partial" }.into())?;
-    js_sys::Reflect::set(&out, &"numFaces".into(), &(stats.num_faces as f64).into())?;
-    js_sys::Reflect::set(&out, &"numShells".into(), &(stats.num_shells as f64).into())?;
-    js_sys::Reflect::set(&out, &"failures".into(),
-        &serde_wasm_bindgen::to_value(&stats.failures).map_err(|e| JsValue::from_str(&e.to_string()))?)?;
+        &serde_wasm_bindgen::to_value(&stats.completion())
+            .map_err(|e| JsValue::from_str(&e.to_string()))?)?;
     // Keep geometry in a typed array; never serialize millions of JS numbers.
     js_sys::Reflect::set(&out, &"triangles".into(), &js_sys::Float32Array::from(buffer.as_slice()))?;
-    Ok(out.into())
+    Ok(out)
 }

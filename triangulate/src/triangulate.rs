@@ -583,7 +583,7 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                 (mesh, stats)
             });
 
-    let (mesh, stats) = {
+    let (mesh, mut stats) = {
         #[cfg(feature = "rayon")]
         { mesh_fold.reduce(empty,
                 |a, b| (Mesh::combine(a.0, b.0), Stats::combine(a.1, b.1))) }
@@ -608,6 +608,8 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
         }
     }
 
+    // Parallel shape traversal must not randomize diagnostic records.
+    stats.failures.sort_by_key(|f| (f.entity_id, f.surface_id));
     info!("num_shells: {}", stats.num_shells);
     info!("num_faces: {}", stats.num_faces);
     info!("num_errors: {}", stats.num_errors());

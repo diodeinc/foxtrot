@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Completion { Complete, Partial }
+
 /// Stable, source-identified reason why part of a model was not tessellated.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -37,6 +41,9 @@ impl Stats {
     }
 
     pub fn is_complete(&self) -> bool { self.failures.is_empty() }
+    pub fn completion(&self) -> Completion {
+        if self.is_complete() { Completion::Complete } else { Completion::Partial }
+    }
     pub fn num_errors(&self) -> usize {
         self.failures.iter().filter(|f| f.kind != FailureKind::Panic).count()
     }
