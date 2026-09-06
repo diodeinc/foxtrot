@@ -918,7 +918,6 @@ fn advanced_face(
     let mut unwrap_ranges = Vec::new();
     let mut boundary_points = Vec::new();
     let mut edge_uses = HashMap::new();
-    let v_start = mesh.verts.len();
     let mut num_pts = 0;
     for b in bounds {
         let (bound_contours, edge_loop_len) =
@@ -992,24 +991,15 @@ fn advanced_face(
         .all(|&(forward, reverse)| forward == reverse)
     {
         if let Some(full) = surf.untrimmed_mesh(face_color, same_sense) {
-            mesh.verts.truncate(v_start);
-            *mesh = Mesh::combine(std::mem::take(mesh), full);
+            *mesh = full;
             return Ok(());
         }
     }
 
     // Add curvature samples before constraint insertion. The CDT subdivides
     // constraints at existing vertices, including samples exactly on an edge.
-    let prepared = surf.prepare(
-        &mesh.verts[v_start..],
-        &edges,
-        same_sense,
-        uncertainty,
-        has_seam,
-    )?;
-    let mut pts = crate::timing::time("face:lower_verts", || {
-        prepared.lower_verts(&mesh.verts[v_start..])
-    })?;
+    let prepared = surf.prepare(&mesh.verts, &edges, same_sense, uncertainty, has_seam)?;
+    let mut pts = crate::timing::time("face:lower_verts", || prepared.lower_verts(&mesh.verts))?;
     crate::timing::time("face:unwrap_periodic", || {
         prepared.unwrap_periodic(&mut pts, &edges, &unwrap_ranges)
     });
@@ -1020,7 +1010,7 @@ fn advanced_face(
     }
     let mut constraints: Vec<_> = edges.iter().map(|&(a, b)| (a, b, true)).collect();
     crate::timing::time("face:resolve_crossing_edges", || {
-        resolve_crossing_edges(&mut pts, &mut constraints, &mut mesh.verts, v_start)
+        resolve_crossing_edges(&mut pts, &mut constraints, &mut mesh.verts)
     });
     let bonus_points = pts.len();
     crate::timing::time("face:add_steiner_points", || {
@@ -1336,11 +1326,7 @@ fn spline_surface(
     ))
 }
 
-fn get_surface(
-    s: &StepFile,
-    surf: ap214::Surface,
-    boundary: &[DVec3],
-) -> Result<Surface, Error> {
+fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3]) -> Result<Surface, Error> {
     match &s[surf] {
         Entity::CylindricalSurface(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position)?;
@@ -1399,11 +1385,7 @@ fn get_surface(
                 .entity(e.extrusion_axis)
                 .ok_or(Error::InvalidStepEntity("Vector"))?;
             let vector = direction(s, v.orientation)?.normalize() * v.magnitude.0;
-            extrusion_surface(
-                homogeneous_curve(s, e.swept_curve)?,
-                vector,
-                boundary,
-            )
+            extrusion_surface(homogeneous_curve(s, e.swept_curve)?, vector, boundary)
         }
         Entity::SurfaceOfRevolution(r) => {
             let placement = s
@@ -1416,11 +1398,7 @@ fn get_surface(
                     .axis
                     .ok_or(Error::MissingStepField("Axis1Placement.axis"))?,
             )?;
-            revolution_surface(
-                homogeneous_curve(s, r.swept_curve)?,
-                origin,
-                axis,
-            )
+            revolution_surface(homogeneous_curve(s, r.swept_curve)?, origin, axis)
         }
         Entity::BSplineSurfaceWithKnots(b) => {
             let control_points_list = control_points_2d(s, &b.control_points_list)?
@@ -1756,7 +1734,6 @@ fn resolve_crossing_edges(
     pts: &mut Vec<(f64, f64)>,
     edges: &mut Vec<(usize, usize, bool)>,
     verts: &mut Vec<mesh::Vertex>,
-    v_start: usize,
 ) {
     let key = |(x, y): (f64, f64)| {
         let bits = |v: f64| if v == 0.0 { 0 } else { v.to_bits() };
@@ -1819,8 +1796,8 @@ fn resolve_crossing_edges(
                     };
                     let (pa, pb) = (pts[a], pts[b]);
                     let p = (pa.0 + (pb.0 - pa.0) * f, pa.1 + (pb.1 - pa.1) * f);
-                    let va = verts[v_start + a];
-                    let vb = verts[v_start + b];
+                    let va = verts[a];
+                    let vb = verts[b];
                     let pos = va.pos + (vb.pos - va.pos) * f;
                     // A rounded construction at one incident endpoint is
                     // that vertex, not a zero-length geometric child edge.
@@ -2103,7 +2080,7 @@ mod tests {
                 color: DVec3::zeros(),
             })
             .collect();
-        resolve_crossing_edges(&mut pts, &mut edges, &mut verts, 0);
+        resolve_crossing_edges(&mut pts, &mut edges, &mut verts);
         assert_eq!(pts.len(), 44 + 121);
         assert_eq!(edges.len(), 22 * 12);
         let mut cdt = cdt::Triangulation::new_with_constraints(&pts, edges).unwrap();
@@ -2130,7 +2107,7 @@ mod tests {
                     color: DVec3::zeros(),
                 })
                 .collect();
-            resolve_crossing_edges(&mut pts, &mut edges, &mut verts, 0);
+            resolve_crossing_edges(&mut pts, &mut edges, &mut verts);
             assert_eq!(pts.len(), 8);
             assert!(verts[6..].iter().all(|v| v.pos.z == 5.));
             let mut cdt = cdt::Triangulation::new_with_constraints(&pts, edges).unwrap();
@@ -2155,7 +2132,7 @@ mod tests {
                         color: DVec3::zeros(),
                     })
                     .collect();
-                resolve_crossing_edges(&mut pts, &mut edges, &mut verts, 0);
+                resolve_crossing_edges(&mut pts, &mut edges, &mut verts);
                 assert_eq!(pts.len(), 5);
                 assert_eq!(pts[4].0, 0.1);
                 assert_eq!((verts[4].pos.x, verts[4].pos.y), (0.1, 0.2));
@@ -2175,13 +2152,11 @@ mod tests {
                 norm: DVec3::zeros(),
                 color: DVec3::zeros(),
             };
-            // Exercise face-local indices inside a mesh with prior vertices.
-            let mut verts = vec![vertex(-1., -1.)];
-            verts.extend(pts.iter().map(|&(x, y)| vertex(x, y)));
+            let mut verts: Vec<_> = pts.iter().map(|&(x, y)| vertex(x, y)).collect();
             if collapsed_edge {
-                verts[2] = verts[1];
+                verts[1] = verts[0];
             }
-            resolve_crossing_edges(&mut pts, &mut edges, &mut verts, 1);
+            resolve_crossing_edges(&mut pts, &mut edges, &mut verts);
             if collapsed_edge {
                 // Coincident endpoints do not identify a unique chart
                 // representative: retain the seam/pole parameter split.
@@ -2189,7 +2164,7 @@ mod tests {
                 assert_eq!(pts[4], (0.1, 1e-20));
             } else {
                 assert_eq!(pts.len(), 4);
-                assert_eq!(verts.len(), 5);
+                assert_eq!(verts.len(), 4);
                 assert_eq!(edges, vec![(0, 1, true), (2, 0, false), (0, 3, false)]);
             }
         }
@@ -2429,9 +2404,7 @@ mod tests {
             let Surface::NURBS { surf } = &surface else {
                 panic!("expected NURBS surface")
             };
-            let prepared = surface
-                .prepare(&[], &[], true, uncertainty, false)
-                .unwrap();
+            let prepared = surface.prepare(&[], &[], true, uncertainty, false).unwrap();
             if origin < surf.surf.min_v() {
                 assert!(prepared.raise(DVec2::zeros()).is_none());
             } else {
