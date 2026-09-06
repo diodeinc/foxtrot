@@ -41,13 +41,16 @@ impl Mesh {
         }).collect()
     }
 
-    // Combine two triangulations with an associative binary operator
-    // (why yes, this _is_ a monoid)
-    pub fn combine(mut a: Self, b: Self) -> Self {
-        let dv = a.verts.len().try_into().expect("too many triangles");
-        a.verts.extend(b.verts);
-        a.triangles.extend(b.triangles.into_iter()
+    /// Append a completed local mesh, retaining its allocations for reuse.
+    pub fn append(&mut self, other: &mut Self) {
+        let dv = self.verts.len().try_into().expect("too many vertices");
+        self.verts.append(&mut other.verts);
+        self.triangles.extend(other.triangles.drain(..)
             .map(|t| Triangle { verts: t.verts.add_scalar(dv) }));
+    }
+
+    pub fn combine(mut a: Self, mut b: Self) -> Self {
+        a.append(&mut b);
         a
     }
 

@@ -739,21 +739,18 @@ fn shell(
     };
     let v_start = mesh.verts.len();
     let t_start = mesh.triangles.len();
+    let mut scratch = Mesh::default();
     for face in faces {
-        if let Err(err) = advanced_face(
-            s,
-            *face,
-            mesh,
-            stats,
-            styled_item_colors,
-            default_color,
-            uncertainty,
-        ) {
-            // Per-face failures are common on large boards and summarised
-            // once at the end of triangulate(); keep the per-face detail off
-            // the console (console logging is expensive in wasm workers).
-            stats.num_errors += 1;
-            debug!("Failed to triangulate {:?}: {}", s[*face], err);
+        scratch.verts.clear();
+        scratch.triangles.clear();
+        stats.num_faces += 1;
+        match advanced_face(s, *face, &mut scratch, styled_item_colors, default_color, uncertainty) {
+            Ok(()) => mesh.append(&mut scratch),
+            Err(err) => {
+                if err == Error::TriangulationPanic { stats.num_panics += 1; }
+                else { stats.num_errors += 1; }
+                debug!("Failed to triangulate face #{}: {}", face.0, err);
+            }
         }
     }
     // conditional_reverse acts on face orientation, not face-set order.
@@ -771,7 +768,6 @@ fn advanced_face(
     s: &StepFile,
     f: Face,
     mesh: &mut Mesh,
-    stats: &mut Stats,
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
     uncertainty: f64,
@@ -784,11 +780,9 @@ fn advanced_face(
         _ => return Err(Error::InvalidStepEntity("FaceSurface")),
     };
     let face_color = styled_item_colors.get(&f.0).copied().unwrap_or(default_color);
-    stats.num_faces += 1;
     info!("triangulating face {} (geometry {})", f.0, face_geometry.0);
 
-    // This is the starting point at which we insert new vertices
-    let offset = mesh.verts.len();
+    debug_assert!(mesh.verts.is_empty() && mesh.triangles.is_empty());
 
     // For each contour, project from 3D down to the surface, then
     // start collecting them as constrained edges for triangulation
@@ -909,38 +903,16 @@ fn advanced_face(
         }
         Ok(t)
     })));
-    match result {
-        Err(_panic) => {
-            warn!("face {}: panicked during CDT triangulation, skipping face", face_id);
-            stats.num_panics += 1;
-        },
-        Ok(Ok(t)) => {
-            let triangle_start = mesh.triangles.len();
-            for (a, b, c) in t.triangles() {
-                let a = (a + offset) as u32;
-                let b = (b + offset) as u32;
-                let c = (c + offset) as u32;
-                mesh.triangles.push(Triangle { verts:
-                    if same_sense {
-                        U32Vec3::new(a, b, c)
-                    } else {
-                        U32Vec3::new(a, c, b)
-                    }
-                });
-            }
-            if mesh.triangles.len() == triangle_start {
-                debug!("Got error while triangulating {}: empty face tessellation", face_id);
-                stats.num_errors += 1;
-            }
-        },
-        Ok(Err(e)) => {
-            debug!(
-                "Got error while triangulating {}: {:?}",
-                face_geometry.0,
-                e
-            );
-            stats.num_errors += 1;
-        },
+    let t = result.map_err(|_| Error::TriangulationPanic)??;
+    for (a, b, c) in t.triangles() {
+        mesh.triangles.push(Triangle { verts: if same_sense {
+            U32Vec3::new(a as u32, b as u32, c as u32)
+        } else {
+            U32Vec3::new(a as u32, c as u32, b as u32)
+        }});
+    }
+    if mesh.triangles.is_empty() {
+        return Err(Error::InvalidGeometry("empty face tessellation"));
     }
     info!("face {} post-cdt: applying colors/normals ({} verts from v_start)",
           face_id, mesh.verts.len() - v_start);
@@ -1551,6 +1523,33 @@ mod tests {
     use nurbs::AbstractSurface;
 
     #[test]
+    fn failed_faces_do_not_publish_vertices_or_corrupt_following_faces() {
+        for faces in ["#9,#10", "#10,#9"] {
+            let text = format!("ISO-10303-21;HEADER;ENDSEC;DATA;
+                #1=CARTESIAN_POINT('',(5.,0.,0.));
+                #2=DIRECTION('',(0.,0.,1.));
+                #3=DIRECTION('',(1.,0.,0.));
+                #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+                #5=VERTEX_POINT('',#1);
+                #6=VERTEX_LOOP('',#5);
+                #7=FACE_BOUND('',#6,.T.);
+                #8=TOROIDAL_SURFACE('',#4,4.,1.);
+                #9=ADVANCED_FACE('',(#7),#8,.T.);
+                #10=ADVANCED_FACE('',(#7),#11,.T.);
+                #11=PLANE('',#4);
+                #12=CLOSED_SHELL('',({faces}));
+                #13=MANIFOLD_SOLID_BREP('',#12);
+                ENDSEC;END-ISO-10303-21;");
+            let flat = StepFile::strip_flatten(text.as_bytes()).unwrap();
+            let step = StepFile::parse(&flat).unwrap();
+            let (mesh, stats) = triangulate(&step);
+            assert_eq!((stats.num_faces, stats.num_errors), (2, 1));
+            assert_eq!((mesh.verts.len(), mesh.triangles.len()), (1024, 2048));
+            assert!(mesh.triangles.iter().all(|t| t.verts.iter().all(|&i| i < 1024)));
+        }
+    }
+
+    #[test]
     fn brep_voids_include_cavity_faces_with_reversed_normals_and_volume() {
         let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
             #1=CARTESIAN_POINT('',(0.,0.,0.));
@@ -1623,7 +1622,7 @@ mod tests {
             let flat = StepFile::strip_flatten(text.as_bytes()).unwrap();
             let step = StepFile::parse(&flat).unwrap();
             let mut mesh = Mesh::default();
-            advanced_face(&step, Id::new(19), &mut mesh, &mut Stats::default(),
+            advanced_face(&step, Id::new(19), &mut mesh,
                 &HashMap::new(), DVec3::zeros(), 0.).unwrap();
             assert_eq!(mesh.verts.len(), 1024);
             assert_eq!(mesh.triangles.len(), 2048);

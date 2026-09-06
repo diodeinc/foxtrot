@@ -29,6 +29,9 @@ pub enum Error {
     #[error("Triangulation panicked")]
     TriangulationPanic,
 
+    #[error("{0}")]
+    Cdt(#[from] cdt::Error),
+
     #[error("Could not convert into a Surface")]
     UnknownSurfaceType,
 
