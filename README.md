@@ -153,14 +153,15 @@ of importing its basename-keyed JSON.
 
 Each new output directory contains:
 
-- `report.md`: failures first, then slow models, with links to diagnostics.
+- `report.md`: failures and quality-review cases first, with links to diagnostics.
 - `results.json`: machine-readable report and baseline, including geometry metrics.
 - `manifest.json`: exact replayable selection, with input hashes.
+- `review-manifest.json`: replayable failures and quality-review cases.
 - `progress.jsonl`: flushed completed results; per-case results also survive interruption.
 - `cases/<path-hash>/`: per-invocation logs/backtraces, worker metrics, a reproduction
-  command in `result.json`, and binary STL meshes. Failed meshes are retained by
-  default; `--meshes all` or `--compare` retains successful meshes too, so baseline
-  changes remain inspectable. Inputs are not copied.
+  command in `result.json`, and any requested binary STL meshes. Failed meshes are
+  retained by default; `--meshes none` writes no STL, while `--meshes all` or
+  `--compare` retains successful meshes too. Inputs are not copied.
 
 ```sh
 # Recheck just failures, with verbose Rust diagnostics and saved meshes.
