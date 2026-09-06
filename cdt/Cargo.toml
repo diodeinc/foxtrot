@@ -12,12 +12,8 @@ keywords = ["graphics", "triangulation", "delaunay"]
 categories = ["graphics", "mathematics", "algorithms"]
 
 [dependencies]
-log = "0.4"
 spade = "=2.15.1"
 thiserror = "2"
-
-[features]
-long-indexes = []
 
 [dev-dependencies]
 clap = "2.33"

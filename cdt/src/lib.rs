@@ -32,10 +32,8 @@ for t in triangles {
 }
 ```
 
-# Crate features
-By default, the library uses `u32` indexes for internal data structures,
-to improve performance.  If you are planning to triangulate more than 500M
-points in a single pass, you should enable the `long-indexes` feature.
+Triangulation uses Spade internally and preserves original input indices,
+including when duplicate coordinates share a vertex.
 */
 
 #![warn(missing_docs)]
@@ -50,11 +48,6 @@ type Point = (f64, f64);
 /// Single error type for this library
 #[derive(thiserror::Error, Debug, Eq, PartialEq)]
 pub enum Error {
-    /// Indicates that a fixed edge is perfectly intersected by a point, which
-    /// is not allowed.  The variable is the index of the erroneous point.
-    #[error("Point is located on a fixed edge but is not its endpoint")]
-    PointOnFixedEdge(usize),
-
     /// Indicates that [`Triangulation::step`] has been called after
     /// triangulation has been completed
     #[error("There are no more points left to triangulate")]
@@ -68,9 +61,9 @@ pub enum Error {
     #[error("input cannot be empty")]
     EmptyInput,
 
-    /// Returned when the input contains invalid floating-point values (which
-    /// would break comparisons)
-    #[error("input cannot contain NaN or infinity")]
+    /// Returned for nonfinite coordinates or a dynamic range that cannot fit
+    /// within the predicate bounds using a uniform binary scale.
+    #[error("input coordinates are nonfinite or exceed the predicate range")]
     InvalidInput,
 
     /// Returned when edge indexes are out-of-bounds in the points array, or
@@ -90,13 +83,7 @@ pub enum Error {
     #[error("could not find initial seed")]
     CannotInitialize,
 
-    /// This indicates a logic error in the crate, but it happens occasionally
-    #[error("escaped wedge when searching fixed edge")]
-    WedgeEscape,
-
-    /// A half-edge invariant was violated (corrupt mesh state).  This
-    /// replaces assertions that would panic and is safe to skip on wasm
-    /// where catch_unwind is unavailable.
+    /// The face traversal did not reach every face in the triangulation.
     #[error("half-edge invariant violation")]
     HalfEdgeInvariant,
 }
