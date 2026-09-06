@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 
 use nalgebra_glm as glm;
-use glm::{DVec3, DVec4, DMat4, U32Vec3};
+use glm::{DVec2, DVec3, DVec4, DMat4, U32Vec3};
 use log::{debug, error, info, warn};
 
 #[cfg(feature = "rayon")]
@@ -914,16 +914,11 @@ fn advanced_face(
     if mesh.triangles.is_empty() {
         return Err(Error::InvalidGeometry("empty face tessellation"));
     }
-    info!("face {} post-cdt: applying colors/normals ({} verts from v_start)",
-          face_id, mesh.verts.len() - v_start);
-    for v in &mut mesh.verts[v_start..] {
+    // Every vertex, including constructed intersections, receives attributes
+    // only after topology is complete. Never move the boundary positions.
+    for (v, &(u, w)) in mesh.verts.iter_mut().zip(&pts) {
         v.color = face_color;
-    }
-    // Flip normals of new vertices, depending on the same_sense flag
-    if !same_sense {
-        for v in &mut mesh.verts[v_start..] {
-            v.norm = -v.norm;
-        }
+        v.norm = surf.normal(v.pos, DVec2::new(u, w)) * if same_sense { 1. } else { -1. };
     }
     info!("face {} done", face_id);
     Ok(())
@@ -1521,6 +1516,44 @@ fn resolve_crossing_edges(
 mod tests {
     use super::*;
     use nurbs::AbstractSurface;
+
+    #[test]
+    fn crossing_vertices_receive_face_normals_and_color() {
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(0.,0.,0.));
+            #2=CARTESIAN_POINT('',(2.,2.,0.));
+            #3=CARTESIAN_POINT('',(0.,2.,0.));
+            #4=CARTESIAN_POINT('',(2.,0.,0.));
+            #5=DIRECTION('',(0.,0.,1.));
+            #6=DIRECTION('',(1.,0.,0.));
+            #7=AXIS2_PLACEMENT_3D('',#1,#5,#6);
+            #8=PLANE('',#7);
+            #11=VERTEX_POINT('',#1);#12=VERTEX_POINT('',#2);
+            #13=VERTEX_POINT('',#3);#14=VERTEX_POINT('',#4);
+            #21=DIRECTION('',(1.,1.,0.));#22=DIRECTION('',(-1.,0.,0.));
+            #23=DIRECTION('',(1.,-1.,0.));
+            #31=VECTOR('',#21,1.);#32=VECTOR('',#22,1.);#33=VECTOR('',#23,1.);
+            #41=LINE('',#1,#31);#42=LINE('',#2,#32);
+            #43=LINE('',#3,#33);#44=LINE('',#4,#32);
+            #51=EDGE_CURVE('',#11,#12,#41,.T.);#52=EDGE_CURVE('',#12,#13,#42,.T.);
+            #53=EDGE_CURVE('',#13,#14,#43,.T.);#54=EDGE_CURVE('',#14,#11,#44,.T.);
+            #61=ORIENTED_EDGE('',*,*,#51,.T.);#62=ORIENTED_EDGE('',*,*,#52,.T.);
+            #63=ORIENTED_EDGE('',*,*,#53,.T.);#64=ORIENTED_EDGE('',*,*,#54,.T.);
+            #70=EDGE_LOOP('',(#61,#62,#63,#64));#71=FACE_BOUND('',#70,.T.);
+            #72=ADVANCED_FACE('',(#71),#8,.F.);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let mut mesh = Mesh::default();
+        let color = DVec3::new(0.2, 0.4, 0.6);
+        advanced_face(&step, Id::new(72), &mut mesh, &HashMap::new(), color, 0.).unwrap();
+        assert!(mesh.verts.iter().any(|v| v.pos == DVec3::new(1., 1., 0.)));
+        assert!(mesh.verts.iter().all(|v| v.norm == -DVec3::z() && v.color == color));
+        for t in &mesh.triangles {
+            let [a,b,c] = [t.verts.x,t.verts.y,t.verts.z].map(|i| mesh.verts[i as usize].pos);
+            assert!((b-a).cross(&(c-a)).z < 0.);
+        }
+    }
 
     #[test]
     fn failed_faces_do_not_publish_vertices_or_corrupt_following_faces() {
