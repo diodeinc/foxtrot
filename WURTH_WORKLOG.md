@@ -1,5 +1,50 @@
 # Würth and KiCad STEP repair worklog
 
+## Branch cleanup review — 2026-09-06
+
+Reviewed the complete branch diff against `origin/master` (this repository has
+no `main` branch), covering CDT replacement, STEP parsing and call sites,
+NURBS evaluation/projection, surface charts and face construction, browser
+conversion, corpus tooling, tests and documentation. Invalid STEP inputs do
+not need compatibility handling, per the user's latest decision. The nine
+confirmed invalid sources are not repair work; the unresolved connector trim
+and previously documented shading/geometry defects are not claimed fixed.
+
+Cleanup changes, committed independently:
+- Share the factored squared-distance comparison used by curve/surface
+  projection, preserving operation order and convergence safeguards.
+- Remove the unused browser-area metric and its validation requirement;
+  retain all acceptance and quality diagnostics and legacy report reading.
+- Correct README descriptions of buffer-only runs and review manifests.
+- Remove CDT's unused logging dependency, no-op `long-indexes` feature, and
+  never-emitted legacy `PointOnFixedEdge`/`WedgeEscape` errors. These removed
+  public names have no repository consumers. Correct predicate-range errors.
+- Reuse curve knot conversion and surface construction for STEP splines;
+  surface-construction diagnostics now name surface types, not curve types.
+- Derive periodic unwrapping directly from Cartesian chart data, reusing its
+  stored scale instead of recomputing it and separately excluding polar charts.
+- Remove the stale member-level `cdt/Cargo.lock`: Cargo resolves this member
+  through the root workspace, and repository policy ignores generated locks.
+
+Verification: `cargo test --release --workspace` passes all 137 tests;
+`python3 -m unittest discover -s scripts -p 'test_corpus*.py'` passes 21;
+release worker build and WASM host `cargo check --release` pass. The worker's
+targeted unit test also passes. No numerical tolerances or mesh acceptance
+rules are loosened. No new dependency or geometry fallback is added.
+
+Replay 24 covers 70 Würth files followed by 56 KiCad files: a hash-selected
+sample plus every remaining failure, every f64-degenerate case and high
+zero-normal-count models. Status and all retained geometry/quality counts
+match scan 22 exactly (60 Würth ok, 10 unchanged failures; all 56 KiCad ok).
+Evidence: `local/cleanup24-{wurth,kicad}/results.json` and
+`local/cleanup24-comparison.json`; frozen worker `local/cleanup-worker24`.
+Three difficult representative browser buffers have byte-identical oriented
+triangle records after sorting triangles and cyclically rotating their vertex
+records, retaining winding, normals, colors and multiplicity. Raw buffer order
+varies even between unchanged-worker runs; it is not an equality guarantee.
+Evidence: `local/cleanup24-buffer-comparison.json`. This is a targeted cleanup
+replay, not a new full-corpus scan or visual certification. Changes remain local.
+
 ## Remaining processing failures — replay 23, 2026-09-06
 
 Replayed every non-ok input from browser scan 22 with the unchanged
