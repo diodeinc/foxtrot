@@ -1,5 +1,51 @@
 # Würth and KiCad STEP repair worklog
 
+## Remaining processing failures — replay 23, 2026-09-06
+
+Replayed every non-ok input from browser scan 22 with the unchanged
+`local/browser-fast-worker`, `--meshes none --jobs 4 --threads 1 --timeout 60`
+and `RUST_LOG=triangulate=debug`. Command:
+
+```
+python3 scripts/corpus.py local/wurth/3dmodels --worker local/browser-fast-worker --rerun local/wurth-repair-browser22/results.json --meshes none --jobs 4 --threads 1 --timeout 60 --output local/remaining-processing23
+```
+
+Result: **all ten failures reproduce**, seven `tessellation_error` and three
+`crash` labels. The latter are controlled `StepParseError` returns, not process
+panics. No geometry or acceptance logic changes in this investigation.
+`local/remaining-processing23/results.json` preserves hashes, reproduction
+commands and per-case logs. KiCad has no remaining processing failures in the
+complete scan 22; it is not needlessly rerun for this read-only investigation.
+
+Root causes and disposition:
+
+- WE-CMANC-M 7848031002 and WE-CMBNC-TypeM 7448031002 contain Parasolid, not
+  STEP. They require correctly exported STEP sources or a separate Parasolid
+  importer; loosening the STEP parser cannot recover their geometry.
+- WE-RFI-0402 references undefined surface #0 from face #707. The replay
+  confirms that exact reference error. There is no supplied surface to mesh.
+- The six EE13 transformer variants listed in browser22/wurth.json each fail
+  on surface #36. Their equal 0.127 radii violate
+  [DEGENERATE_TOROIDAL_SURFACE WR1](https://www.steptools.com/stds/stp_aim/html/t_degenerate_toroidal_surface.html):
+  `major_radius < minor_radius`. Supporting their horn-torus limit would be an
+  explicit nonconforming-input repair policy, not a spec-correctness fix.
+- WR-TBL 691404910001B face #13017, surface #25, bound #12195 remains
+  unresolved, **not proved invalid**. Rechecked its curve sampling, bounded
+  inverses, projection convergence and exact-coordinate retrace cancellation
+  against the existing high-precision source analysis. Curve #827's bounded
+  nearest-point trim is zero; #828 moves only 8.13e-14 mm. The topological
+  vertices are 1.99e-8 mm apart and about 7e-7 mm off the surface, within the
+  source's 0.005 mm uncertainty. The tiny nonzero high-precision UV area is
+  that of our endpoint-replaced polyline, not independent evidence of the
+  intended source trim. More precision or samples do not resolve that
+  ambiguity. Source uncertainty alone does not authorize deleting topology.
+
+No solver contract violation has been established for the last case. Keep
+the cancellation error rather than dropping the face or manufacturing a
+triangle. Remaining decisions require corrected sources or explicit agreement
+to best-effort, visibly diagnosed nonconforming/under-resolved geometry
+handling. Such handling must not count omissions as fully successful meshes.
+
 ## Browser-first checkpoint — 2026-09-06
 
 The user clarified the product target: good-looking Three.js meshes, not
