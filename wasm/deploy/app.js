@@ -4,7 +4,7 @@ import * as SCENE from './scene.js';
 
 const worker = new Worker("worker.js");
 const setStatus = function(s) {
-    document.getElementById("status").innerHTML = s;
+    document.getElementById("status").textContent = s;
     loadTimeShowing = false;
 };
 let startTime, loadTimeShowing = false;
@@ -17,7 +17,7 @@ SCENE.addCameraCallback(function () {
 worker.onmessage = function(e) {
     const outcome = e.data;
     if (outcome.completion === "failed") {
-        setStatus("Could not read STEP: " + outcome.failures[0].message);
+        setStatus("Could not process STEP: " + outcome.failures[0].message);
         fileSelector.disabled = false;
         exampleSelector.disabled = false;
         return;
@@ -30,9 +30,10 @@ worker.onmessage = function(e) {
     const now = d.getTime();
     const dt_sec = (now - startTime) / 1000.0;
     const suffix = outcome.completion === "partial"
-        ? " (partial: " + outcome.failures.length + " failed faces)" : "";
+        ? " (partial: " + outcome.failures.length + " failed entities)" : "";
     setStatus("Loaded in " + dt_sec.toPrecision(3) + " sec" + suffix);
-    loadTimeShowing = true;
+    // Camera movement may clear the timing, never a partial-model warning.
+    loadTimeShowing = outcome.completion === "complete";
     if (targetAxis) {
         if (targetAxis == "X") {
             SCENE.axisX();

@@ -11,7 +11,7 @@ async function run() {
             postMessage(outcome, [outcome.triangles.buffer]);
         } catch (error) {
             postMessage({schema: 2, completion: "failed", failures: [{
-                kind: "input_error", message: String(error)
+                kind: "execution_error", message: String(error)
             }]});
         }
     }
