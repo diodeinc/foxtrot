@@ -1,5 +1,17 @@
 # Würth and KiCad STEP repair worklog
 
+### Do not infer periods from thin extrusions
+
+The last capacitor regression, WCAP-AI3H-P10D25L51 surface 10902, was assigned
+two periods although STEP declares a linear open u direction. Its endpoint
+iso-curves coincide within uncertainty because the whole extrusion is thin,
+not because it closes. This produced a full-period chart edge between almost
+identical XYZ points, which no boundary subdivision could approximate.
+Require resolved interior variation (including rational basis variation)
+before inferring closure. The control-net regression and 110 NURBS/triangulation
+tests pass; the capacitor now completes. Evidence:
+`local/cohort-regular-capacitor`, `/tmp/cohort-regular-tests.log`.
+
 ### Preserve small curved trims
 
 Keep degree + 1 samples per polynomial trim span and at least three samples

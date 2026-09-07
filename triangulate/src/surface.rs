@@ -150,11 +150,10 @@ impl Surface {
     }
 
     fn spline_chart(surf: &SampledSurface<4>, uncertainty: f64, has_seam: bool) -> SplineChart {
+        let inferred_closed = |axis| has_seam && surf.surf.rational_direction_is_closed(axis, uncertainty);
         let periodic = [
-            !surf.surf.u_open
-                || (has_seam && surf.surf.rational_boundaries_coincide(0, uncertainty)),
-            !surf.surf.v_open
-                || (has_seam && surf.surf.rational_boundaries_coincide(1, uncertainty)),
+            !surf.surf.u_open || inferred_closed(0),
+            !surf.surf.v_open || inferred_closed(1),
         ];
         let bounds = [
             DVec2::new(surf.surf.min_u(), surf.surf.min_v()),

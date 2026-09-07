@@ -157,6 +157,20 @@ impl<const D: usize> NDBSplineSurface<D> {
         })
     }
 
+    /// A regular closed direction needs more than coincident endpoints.
+    /// Exclude a control-net extrusion contained within source uncertainty;
+    /// identifying its ends would turn a thin strip into an artificial loop.
+    pub fn rational_direction_is_closed(&self, parameter: usize, uncertainty: f64) -> bool {
+        if !self.rational_boundaries_coincide(parameter, uncertainty) { return false; }
+        let w = D-1;
+        self.control_points.iter().enumerate().any(|(u,row)| row.iter().enumerate().any(|(v,p)| {
+            let reference = if parameter == 0 { self.control_points[0][v] } else { self.control_points[u][0] };
+            let anchor = if parameter == 0 { self.control_points[u][0] } else { self.control_points[0][v] };
+            p[w]/anchor[w] != reference[w]/self.control_points[0][0][w]
+                || (0..w).fold(0.0_f64, |distance,i| distance.hypot(p[i]/p[w]-reference[i]/reference[w])) > uncertainty
+        }))
+    }
+
     fn boundary_controls(&self, parameter: usize, value: f64) -> Vec<TVec<f64, D>> {
         match parameter {
             0 => {
@@ -436,6 +450,21 @@ mod tests {
             assert!(!surface.rational_boundary_is_point(1, 0., scale * 0.5));
             assert!(surface.rational_boundary_is_point(1, 0., scale));
         }
+    }
+
+    #[test]
+    fn coincident_extrusion_ends_do_not_imply_a_period() {
+        let knots = || KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]);
+        let row = vec![DVec4::new(0.,0.,0.,1.), DVec4::new(0.,1.,0.,1.), DVec4::new(0.,0.,1.,1.)];
+        let mut surface = NDBSplineSurface::new(true,true,knots(),knots(),vec![row.clone(),row.clone(),row]);
+        for p in &mut surface.control_points[2] { p.x = 1e-12; }
+        assert!(surface.rational_boundaries_coincide(0,1e-8));
+        assert!(!surface.rational_direction_is_closed(0,1e-8));
+        surface.control_points[1][1].x = 1.;
+        assert!(surface.rational_direction_is_closed(0,1e-8));
+        surface.control_points[1][1].x = 0.;
+        surface.control_points[1][1] *= 2.;
+        assert!(surface.rational_direction_is_closed(0,1e-8));
     }
 
     #[test]
