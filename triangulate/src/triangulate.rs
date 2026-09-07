@@ -1008,9 +1008,11 @@ fn advanced_face(
     // constraints at existing vertices, including samples exactly on an edge.
     let prepared = surf.prepare(&mesh.verts, &edges, same_sense, uncertainty, has_seam)?;
     let mut pts = crate::timing::time("face:lower_verts", || prepared.lower_verts(&mesh.verts))?;
-    crate::timing::time("face:unwrap_periodic", || {
-        prepared.unwrap_periodic(&mut pts, &edges, &unwrap_ranges)
-    });
+    if !prepared.cut_periodic(&mut pts, &mut edges, &mut mesh.verts, tolerance)? {
+        crate::timing::time("face:unwrap_periodic", || {
+            prepared.unwrap_periodic(&mut pts, &edges, &unwrap_ranges)
+        });
+    }
     let had_boundary = !edges.is_empty();
     cancel_retraced_edges(&pts, &mut edges);
     if had_boundary && edges.is_empty() {
@@ -2416,7 +2418,7 @@ mod tests {
             };
             let prepared = surface.prepare(&[], &[], true, uncertainty, false).unwrap();
             if origin < surf.surf.min_v() {
-                assert!(prepared.raise(DVec2::zeros()).is_none());
+                assert!(prepared.raise(DVec2::zeros()).unwrap().yz().norm() > 0.);
             } else {
                 let expected = surf.surf.point(DVec2::new(surf.surf.min_u(), origin));
                 assert!((prepared.raise(DVec2::zeros()).unwrap() - expected).norm() < 1e-14);

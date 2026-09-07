@@ -1,5 +1,25 @@
 # Würth and KiCad STEP repair worklog
 
+### Cut regular periodic patches in native parameters
+
+The polar annulus chart couples circumferential chord error to the other
+parameter; on the 46-turn CRD spring it jumps across many polynomial spans.
+Regular singly periodic patches now use a native strip. Clip trim segments
+at a cut inside the largest vertex-free gap, preserve original endpoints,
+pair odd-degree seam ports, and sample constructed seams by knot span.
+Only genuine collapsed poles retain polar charts. Curvature seeds use native
+knot spans and periodic copies inside the face's strip, not a fixed chart grid.
+
+The rejected internal lattice constraints, native-polar midpoint averaging,
+chart-Jacobian edge ranking, and unconditional Cartesian seam experiment are
+not retained. Native averaging moved pole spokes off their parent edges;
+the internal grid also introduced unnecessary trim intersections. The final
+combined candidate passes all 53 targeted processing regressions and all 143
+workspace library tests. The unchanged 56-file OCCT replay is 55 pass / one
+mismatch (Coilcraft 2222SQ-161, invalid source; not claimed fixed).
+Evidence: `local/cohort-clean-{regressions,oracle}`. Full processing sweeps
+run Würth then KiCad with the frozen `local/cohort-clean-worker`.
+
 ### Keep torus cuts away from trim vertices
 
 Place the radial angular cut in the middle of the unused angular gap rather

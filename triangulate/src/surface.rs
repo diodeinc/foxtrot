@@ -13,6 +13,7 @@ use nurbs::{AbstractSurface, SampledSurface};
 pub enum SplineChart {
     Cartesian {
         v_scale: f64,
+        periods: [Option<f64>;2],
     },
     Polar {
         angular: usize,
@@ -23,9 +24,20 @@ pub enum SplineChart {
 }
 
 impl SplineChart {
+    fn periods(&self) -> [Option<f64>;2] {
+        match *self {
+            Self::Cartesian { periods,.. } => periods,
+            Self::Polar { angular,scale,bounds,.. } => {
+                let mut periods = [None,None];
+                periods[angular] = (scale[angular] == bounds[1][angular]-bounds[0][angular]).then_some(scale[angular]);
+                periods
+            }
+        }
+    }
+
     fn lower(&self, raw: DVec2) -> DVec2 {
         match *self {
-            Self::Cartesian { v_scale } => DVec2::new(raw.x, raw.y * v_scale),
+            Self::Cartesian { v_scale,.. } => DVec2::new(raw.x, raw.y * v_scale),
             Self::Polar {
                 angular,
                 origin,
@@ -46,7 +58,7 @@ impl SplineChart {
 
     fn raw(&self, mapped: DVec2) -> Option<DVec2> {
         match *self {
-            Self::Cartesian { v_scale } => Some(DVec2::new(mapped.x, mapped.y / v_scale)),
+            Self::Cartesian { v_scale,.. } => Some(DVec2::new(mapped.x, mapped.y / v_scale)),
             Self::Polar {
                 angular,
                 origin,
@@ -174,7 +186,7 @@ impl Surface {
                 let max_point =
                     surf.surf
                         .rational_boundary_is_point(radial, bounds[1][radial], pole_tolerance);
-                if (min_point && max_point) || (!periodic[angular] && !min_point && !max_point) {
+                if min_point == max_point {
                     return None;
                 }
                 let mut origin = bounds[0];
@@ -182,8 +194,6 @@ impl Surface {
                 if max_point {
                     origin[radial] = bounds[1][radial];
                     scale[radial] = -scale[radial];
-                } else if !min_point {
-                    origin[radial] -= scale[radial];
                 }
                 // A bounded sector occupies a half disk: its angular ends stay
                 // distinct, but every parameter at the collapsed edge is the pole.
@@ -199,6 +209,7 @@ impl Surface {
             })
             .unwrap_or_else(|| SplineChart::Cartesian {
                 v_scale: surf.surf.aspect_ratio(),
+                periods: [0,1].map(|axis| periodic[axis].then_some(bounds[1][axis]-bounds[0][axis])),
             })
     }
 
@@ -489,13 +500,13 @@ impl PreparedSurface<'_> {
                     raw.x,
                     surf.surf.min_u(),
                     surf.surf.max_u(),
-                    surf.surf.u_open,
+                    chart.periods()[0].is_none(),
                 ),
                 Self::spline_parameter(
                     raw.y,
                     surf.surf.min_v(),
                     surf.surf.max_v(),
-                    surf.surf.v_open,
+                    chart.periods()[1].is_none(),
                 ),
             )
         })
@@ -903,6 +914,112 @@ impl PreparedSurface<'_> {
         true
     }
 
+    /// Cut a singly periodic regular patch into its native parameter strip.
+    /// Clip each trim edge into that strip, then pair odd-degree seam vertices
+    /// to close the contours. This handles winding loops without bending a
+    /// long swept parameter direction into the radius of an annulus.
+    pub fn cut_periodic(&self, pts: &mut Vec<(f64,f64)>, edges: &mut Vec<(usize,usize)>, verts: &mut Vec<Vertex>, tolerance: f64) -> Result<bool,Error> {
+        let (Surface::NURBS { surf }, FaceChart::Spline(SplineChart::Cartesian { v_scale, periods })) = (self.surface,&self.chart) else { return Ok(false); };
+        let axis = match periods { [Some(_),None] => 0, [None,Some(_)] => 1, _ => return Ok(false) };
+        let scale = if axis == 0 { 1. } else { *v_scale };
+        let period = periods[axis].unwrap()*scale;
+        let mut angles: Vec<_> = pts.iter().map(|&p| Self::uv_coord(p,axis)*2.*PI/period).collect();
+        let (start,span) = Self::smallest_circular_arc(&mut angles);
+        let min = (start-(2.*PI-span)*0.5)*period/(2.*PI);
+        let max = min+period;
+        let mut points = Vec::new();
+        let mut vertices = Vec::new();
+        let mut divided = Vec::new();
+        let mut indices = std::collections::HashMap::new();
+        for &(a,b) in edges.iter() {
+            let mut p = DVec2::new(pts[a].0,pts[a].1);
+            let mut q = DVec2::new(pts[b].0,pts[b].1);
+            p[axis] = min+(p[axis]-min).rem_euclid(period);
+            q[axis] = Self::unwrap_near(q[axis],p[axis],period);
+            for shift in [-period,0.,period] {
+                let start = p[axis]+shift;
+                let delta = q[axis]-p[axis];
+                let (lo,hi) = if delta == 0. {
+                    if start < min || start > max { continue; }
+                    (0.,1.)
+                } else {
+                    let t0 = (min-start)/delta;
+                    let t1 = (max-start)/delta;
+                    (t0.min(t1).max(0.),t0.max(t1).min(1.))
+                };
+                if lo >= hi { continue; }
+                let mut ends = [0;2];
+                for (end,t) in [lo,hi].iter().copied().enumerate() {
+                    let mut uv = p+(q-p)*t;
+                    uv[axis] = (start+delta*t).clamp(min,max);
+                    if t == 0. || t == 1. {
+                        let source = if t == 0. { a } else { b };
+                        let at_max = uv[axis] > min+period*0.5;
+                        uv = DVec2::new(pts[source].0,pts[source].1);
+                        uv[axis] = min+(uv[axis]-min).rem_euclid(period);
+                        if uv[axis] == min && at_max { uv[axis] = max; }
+                    } else {
+                        uv[axis] = if (uv[axis]-min).abs() < (uv[axis]-max).abs() { min } else { max };
+                    }
+                    let key = (if uv.x == 0. { 0 } else { uv.x.to_bits() },if uv.y == 0. { 0 } else { uv.y.to_bits() });
+                    ends[end] = *indices.entry(key).or_insert_with(|| {
+                        let index = points.len();
+                        points.push((uv.x,uv.y));
+                        vertices.push(Vertex { pos: verts[a].pos+(verts[b].pos-verts[a].pos)*t, ..verts[a] });
+                        index
+                    });
+                }
+                if ends[0] != ends[1] { divided.push((ends[0],ends[1])); }
+            }
+        }
+        let mut odd = vec![false;points.len()];
+        for &(a,b) in &divided { odd[a] ^= true; odd[b] ^= true; }
+        for side in [min,max] {
+            let mut ports: Vec<_> = (0..odd.len()).filter(|&i| odd[i] && Self::uv_coord(points[i],axis) == side).collect();
+            ports.sort_by(|&a,&b| Self::uv_coord(points[a],1-axis).total_cmp(&Self::uv_coord(points[b],1-axis)));
+            if ports.len()%2 != 0 { return Err(Error::InvalidGeometry("unpaired periodic trim")); }
+            for pair in ports.chunks_exact(2) {
+                let radial = 1-axis;
+                let at = |t| { let mut uv = DVec2::zeros(); uv[axis] = side; uv[radial] = t; uv };
+                let start = Self::uv_coord(points[pair[0]],radial);
+                let end = Self::uv_coord(points[pair[1]],radial);
+                let knots = if radial == 0 { &surf.surf.u_knots } else { &surf.surf.v_knots };
+                let radial_scale = if radial == 0 { 1. } else { *v_scale };
+                let mut cuts = vec![start];
+                cuts.extend((0..knots.len()).map(|i| knots[i]*radial_scale).filter(|&t| t > start && t < end));
+                cuts.push(end);
+                cuts.dedup();
+                let mut pending: Vec<_> = cuts.windows(2).map(|w| (w[0],w[1])).rev().collect();
+                let mut last = pair[0];
+                while let Some((a,b)) = pending.pop() {
+                    let pa = self.raise(at(a)).ok_or(Error::CouldNotLower)?;
+                    let pb = self.raise(at(b)).ok_or(Error::CouldNotLower)?;
+                    if [0.25,0.5,0.75].iter().any(|&t| {
+                        self.raise(at(a+(b-a)*t)).map_or(true, |p| (p-(pa+(pb-pa)*t)).norm() > tolerance)
+                    }) {
+                        let m = a+(b-a)*0.5;
+                        if m == a || m == b { return Err(Error::InvalidGeometry("periodic seam resolution exhausted")); }
+                        pending.push((m,b)); pending.push((a,m));
+                    } else {
+                        let next = if b == end { pair[1] } else {
+                            let next = points.len();
+                            let uv = at(b);
+                            points.push((uv.x,uv.y));
+                            vertices.push(Vertex { pos: pb, ..vertices[pair[0]] });
+                            next
+                        };
+                        divided.push((last,next));
+                        last = next;
+                    }
+                }
+            }
+        }
+        *pts = points;
+        *verts = vertices;
+        *edges = divided;
+        Ok(true)
+    }
+
     /// Unwrap periodic UV coordinates along each boundary loop.
     ///
     /// STEP files often describe periodic NURBS surfaces (for example,
@@ -918,14 +1035,12 @@ impl PreparedSurface<'_> {
         edges: &[(usize, usize)],
         ranges: &[(usize, usize, bool)],
     ) {
-        let (Surface::NURBS { surf, .. }, FaceChart::Spline(SplineChart::Cartesian { v_scale })) =
-            (self.surface, &self.chart)
+        let FaceChart::Spline(SplineChart::Cartesian { v_scale,periods }) = &self.chart
         else {
             return;
         };
         let periods = [
-            (!surf.surf.u_open).then(|| surf.surf.max_u() - surf.surf.min_u()),
-            (!surf.surf.v_open).then(|| (surf.surf.max_v() - surf.surf.min_v()) * v_scale),
+            periods[0], periods[1].map(|p| p*v_scale),
         ];
 
         for &(start_edge, end_edge, single_edge_bound) in ranges {
@@ -1115,21 +1230,38 @@ impl PreparedSurface<'_> {
         surf: &SampledSurface<4>,
         chart: &SplineChart,
     ) {
-        const SAMPLES: usize = 16;
-
+        // Seed each polynomial piece in its native parameters. A chart-space
+        // grid can alias an arbitrary number of knot spans or revolutions.
+        let samples = |knots: &nurbs::KnotVector| {
+            let mut out = Vec::new();
+            for span in knots.degree()..knots.len()-knots.degree()-1 {
+                let (a,b) = (knots[span],knots[span+1]);
+                if a == b { continue; }
+                for i in 0..=knots.degree() {
+                    out.push(a+(b-a)*(i as f64/(knots.degree()+1) as f64));
+                }
+            }
+            out.push(knots.max_t());
+            out
+        };
+        let us = samples(&surf.surf.u_knots);
+        let vs = samples(&surf.surf.v_knots);
         let (xmin, xmax, ymin, ymax) = Self::bbox(pts);
-        for x in 0..SAMPLES {
-            let x_frac = (x as f64 + 1.0) / (SAMPLES as f64 + 1.0);
-            let projected_u = x_frac * xmax + (1.0 - x_frac) * xmin;
-            for y in 0..SAMPLES {
-                let y_frac = (y as f64 + 1.0) / (SAMPLES as f64 + 1.0);
-                let projected_v = y_frac * ymax + (1.0 - y_frac) * ymin;
-                let projected = DVec2::new(projected_u, projected_v);
-                let Some(raw_uv) = Self::spline_raw(surf, chart, projected) else {
-                    continue;
-                };
+        for &u in &us {
+            for &v in &vs {
+                let raw_uv = DVec2::new(u,v);
+                let mut projected = chart.lower(raw_uv);
+                if let SplineChart::Cartesian { v_scale,periods } = chart {
+                    for (axis,period) in [periods[0],periods[1].map(|p|p*v_scale)].iter().enumerate() {
+                        if let Some(period) = period {
+                            let min = [xmin,ymin][axis];
+                            projected[axis] = min+(projected[axis]-min).rem_euclid(*period);
+                        }
+                    }
+                }
+                if projected.x < xmin || projected.x > xmax || projected.y < ymin || projected.y > ymax { continue; }
                 let pos = surf.surf.point(raw_uv);
-                pts.push((projected_u, projected_v));
+                pts.push((projected.x, projected.y));
                 verts.push(Vertex {
                     pos,
                     norm: DVec3::zeros(),
@@ -1160,8 +1292,7 @@ impl PreparedSurface<'_> {
 
         match (self.surface, &self.chart) {
             (Surface::NURBS { surf, .. }, FaceChart::Spline(chart)) => {
-                self.add_spline_steiner_points(pts, verts, surf, chart);
-                return;
+                return self.add_spline_steiner_points(pts, verts, surf, chart);
             }
             _ => (),
         }
@@ -1359,7 +1490,7 @@ mod tests {
         let closed = closed.prepare(&[], &[], true, 1e-10, true).unwrap();
         assert!(matches!(
             closed.chart,
-            FaceChart::Spline(SplineChart::Polar { angular: 0, .. })
+            FaceChart::Spline(SplineChart::Cartesian { periods: [Some(4.), None], .. })
         ));
     }
 
@@ -1927,10 +2058,10 @@ mod tests {
                     )),
                 );
                 let prepared = surface.prepare(&[], &[], true, 0., false).unwrap();
-                assert!(matches!(
+                assert_eq!(matches!(
                     prepared.chart,
                     FaceChart::Spline(SplineChart::Polar { .. })
-                ));
+                ), pole.is_some());
                 let mut vertices = Vec::new();
                 let mut edges = Vec::new();
                 let radii = if pole.is_some() {
@@ -1943,8 +2074,15 @@ mod tests {
                     for i in 0..64 {
                         let angle = (if ring == 0 { 1. } else { -1. }) * 2. * PI * i as f64 / 64.;
                         let uv = DVec2::new(radius * angle.cos(), radius * angle.sin());
+                        let pos = if pole.is_some() { prepared.raise(uv).unwrap() } else {
+                            let Surface::NURBS { surf } = &surface else { unreachable!() };
+                            let mut raw = DVec2::zeros();
+                            raw[periodic] = i as f64/16.;
+                            raw[1-periodic] = if ring == 0 { 1. } else { 0. };
+                            surf.surf.point(raw)
+                        };
                         vertices.push(Vertex {
-                            pos: prepared.raise(uv).unwrap(),
+                            pos,
                             norm: DVec3::zeros(),
                             color: DVec3::zeros(),
                         });
@@ -1959,6 +2097,7 @@ mod tests {
                     });
                 }
                 let mut points = prepared.lower_verts(&vertices).unwrap();
+                prepared.cut_periodic(&mut points, &mut edges, &mut vertices, 0.01).unwrap();
                 prepared.add_steiner_points(&mut points, &mut vertices);
                 let mut t = cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
                 t.run().unwrap();
@@ -2045,8 +2184,10 @@ mod tests {
         let prepared = surface.prepare(&[], &[], true, 0., false).unwrap();
         prepared.add_steiner_points(&mut points, &mut vertices);
 
-        assert_eq!(points.len(), 4 + 16 * 16);
-        assert_eq!(vertices.len(), 16 * 16);
+        assert_eq!(points.len(), 4 + vertices.len());
+        assert!(vertices.iter().any(|v| v.pos.x > 0. && v.pos.x < 2.
+            && v.pos.y > 0. && v.pos.y < 2.));
+        assert!(vertices.iter().all(|v| (v.pos.z - 0.25*v.pos.x*v.pos.y).abs() < 1e-12));
         assert!(
             vertices.iter().all(|vertex| vertex.norm == DVec3::zeros()),
             "sampling must leave final attributes to face finalization"
