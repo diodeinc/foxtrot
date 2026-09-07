@@ -106,6 +106,33 @@ class MeshMetricsTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("OCP"), "optional OCCT dependency not installed")
 class ReferenceCompletenessTests(unittest.TestCase):
+    def test_invalid_transferred_shape_is_rejected_before_meshing(self):
+        from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon
+        from OCP.IFSelect import IFSelect_RetDone
+        from OCP.gp import gp_Dir, gp_Pln, gp_Pnt
+
+        wire = BRepBuilderAPI_MakePolygon()
+        for x, y in [(0, 0), (2, 2), (2, 0), (0, 2)]:
+            wire.Add(gp_Pnt(x, y, 0))
+        wire.Close()
+        # A genuine self-intersecting face; exercise OCCT's validity checker.
+        face = BRepBuilderAPI_MakeFace(
+            gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), wire.Wire(), True
+        ).Face()
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch("OCP.STEPControl.STEPControl_Reader") as factory, \
+                mock.patch("OCP.BRepMesh.BRepMesh_IncrementalMesh") as mesher:
+            reader = factory.return_value
+            reader.ReadFile.return_value = IFSelect_RetDone
+            reader.TransferRoots.return_value = reader.NbRootsForTransfer.return_value = 1
+            reader.NbShapes.return_value = 1
+            reader.OneShape.return_value = face
+            output = Path(directory) / "invalid.stl"
+            with self.assertRaisesRegex(RuntimeError, "transferred shape as invalid"):
+                corpus_geometry.step_to_stl("invalid.step", output)
+            mesher.assert_not_called()
+            self.assertFalse(output.exists())
+
     def test_reference_requires_every_source_face_to_be_meshed(self):
         from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
         from OCP.IFSelect import IFSelect_RetDone

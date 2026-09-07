@@ -278,6 +278,7 @@ def step_to_stl(
     """Convert STEP to binary STL with OCCT, scaling STEP units to millimeters."""
     try:
         from OCP.BRep import BRep_Tool
+        from OCP.BRepCheck import BRepCheck_Analyzer
         from OCP.BRepMesh import BRepMesh_IncrementalMesh
         from OCP.IFSelect import IFSelect_RetDone
         from OCP.Interface import Interface_Static
@@ -305,6 +306,8 @@ def step_to_stl(
     ):
         raise RuntimeError(f"OCCT did not transfer every STEP root: {input_path}")
     shape = reader.OneShape()
+    if not BRepCheck_Analyzer(shape).IsValid():
+        raise RuntimeError(f"OCCT rejects the transferred shape as invalid: {input_path}")
     # Reference chords are finer than the default 0.1 mm comparison tolerance.
     # Corpus jobs own concurrency. OCCT's internal pool otherwise fans a single
     # reference out across the machine, regardless of the worker thread limit.

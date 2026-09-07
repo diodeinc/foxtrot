@@ -197,8 +197,14 @@ local/occt-env/bin/python scripts/corpus.py examples --occt \
 ```
 
 OCCT independently reads STEP and emits a millimeter-scale STL with 0.01 mm
-linear and 0.1 rad angular deflection. Every transferred face must have triangles;
+linear and 0.1 rad angular deflection. The transferred shape must pass OCCT's
+`BRepCheck_Analyzer` before meshing. Every transferred face must have triangles;
 a partial reference is retained for diagnosis but rejected for comparison.
+Models OCCT rejects or cannot completely tessellate are outside the repair
+corpus: retain their diagnostics and omit them from the active replay manifest,
+rather than counting them as Foxtrot passes. A timeout or tool-installation error
+alone is not an established model rejection. OCCT validity describes its
+transferred shape, not a proof of original STEP conformance.
 In addition to bounds and area, the harness compares **bidirectional sampled
 point-to-triangle distances** using libigl's native AABB hierarchy. Mesh transport
 is memory-mapped and only one target hierarchy exists at a time. libigl is an

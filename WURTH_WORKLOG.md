@@ -2,6 +2,46 @@
 
 ## Oracle cohort 2 — 2026-09-07
 
+### Apply the OCCT-supported corpus policy
+
+The user explicitly excludes models OCCT rejects or cannot fully tessellate
+from the repair corpus. Add `BRepCheck_Analyzer(shape).IsValid()` immediately
+after STEP transfer, before reference meshing. Preserve oracle errors as errors;
+exclude their inputs through the active replay manifest, never turn them into
+native passes. Tool-installation failures and resource timeouts alone are not
+evidence that a model is unsupported. This supersedes the earlier requirement
+to investigate native discrepancies against incomplete references.
+
+Recheck all 17 current sources sequentially, verifying their SHA-256s. Reuse
+the retained completeness diagnostics rather than retessellating references.
+The eligibility audit takes 20.81 s and peaks at 440,164 KiB RSS. Eight inputs
+leave the active cohort:
+
+- Invalid transferred OCCT shape: Bourns3299X, CMB-XS744821120, RSTV471006268143.
+- Incomplete OCCT tessellation: Murata1400, RSTV471NS03268640,
+  RSTV471NS04268540, LANMX749600000.
+- Previously proved original STEP schema violation: CMBNC7448052502. Its
+  transferred OCCT shape passes validity; do not misreport it as OCCT-invalid.
+
+CMB-XS previously passed the numerical oracle and is excluded consistently too.
+No original STEP files or historical reports are deleted or rewritten.
+`local/cohort2-eligibility/eligibility.json` records each decision, hash and OCCT
+package version; `excluded-manifest.json` preserves the eight excluded inputs.
+The active `local/cohort2-eligibility/manifest.json` contains nine inputs:
+five existing passes (PD3-TypeL, HCFT, all three FI parts) and four remaining
+mismatches (both AIG8 capacitors, TBL691308330002, CHK EI48). All nine have valid
+OCCT shapes and retained complete references. No active native processing
+failure remains; the four geometric mismatches still require investigation.
+Use this active manifest for subsequent cohort replays instead of the frozen
+17-case baseline manifest. The baseline remains available for before views.
+
+`PYTHONPATH=scripts OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+local/occt-venv/bin/python -m unittest scripts/test_corpus_geometry.py
+scripts/test_corpus.py`: 28 tests pass. The new regression uses a genuine
+self-intersecting face and OCCT's real analyzer, and verifies rejection before
+meshing or STL output. The existing valid-box/completeness test still passes.
+Review export: `.amp/in/artifacts/cohort2-eligibility.json`.
+
 ### Reject the CMBNC strip experiment; confirm a source schema violation
 
 A face-coverage-selected strip cutter clears both CMBNC processing errors, but
