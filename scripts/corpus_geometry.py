@@ -306,7 +306,9 @@ def step_to_stl(
         raise RuntimeError(f"OCCT did not transfer every STEP root: {input_path}")
     shape = reader.OneShape()
     # Reference chords are finer than the default 0.1 mm comparison tolerance.
-    BRepMesh_IncrementalMesh(shape, 0.01, False, 0.1, True)
+    # Corpus jobs own concurrency. OCCT's internal pool otherwise fans a single
+    # reference out across the machine, regardless of the worker thread limit.
+    BRepMesh_IncrementalMesh(shape, 0.01, False, 0.1, False)
     # StlAPI can successfully write a partial mesh. Never use one as an oracle:
     # a missing reference face falsely implicates correct native geometry.
     missing = []

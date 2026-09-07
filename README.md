@@ -204,6 +204,9 @@ point-to-triangle distances** using libigl's native AABB hierarchy. Mesh transpo
 is memory-mapped and only one target hierarchy exists at a time. libigl is an
 optional offline-tool dependency, not linked into the Rust or browser code.
 Use `--jobs 1` for large models: OCCT reference generation can itself be expensive.
+OCCT meshing runs serially within each job; it does not create another parallel
+meshing pool. Reuse retained reference meshes with `compare_meshes` when iterating
+on native geometry, rather than regenerating unchanged references for each trial.
 Foxtrot → OCCT detects extra/displaced surfaces; OCCT → Foxtrot
 detects missing surfaces. There is no alignment, rescaling, mesh repair or vertex
 correspondence: different triangulations can represent the same surface.

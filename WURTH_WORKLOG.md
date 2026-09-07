@@ -2,6 +2,43 @@
 
 ## Oracle cohort 2 — 2026-09-07
 
+### Resource checkpoint and complete 17-case replay
+
+The bounded-oracle replay finishes all 17 cases with one job and one native
+thread: six pass, four oracle mismatches, two native processing failures and
+five incomplete-reference errors. All three FI models now pass. The three
+previous reference timeouts (PD3-TypeL, CMB-XS, HCFT) finish and pass. No omitted
+reference face is reclassified as an invalid source or a native fix.
+Evidence: `local/cohort2-bounded-oracle/{results.json,report.md}`. Wall time is
+615.38 s, peak child RSS 3,053,132 KiB; this includes OCCT reference generation,
+not just the bounded comparison. After completion, system used memory is about
+1.2 GiB and available memory about 30 GiB.
+
+OCCT's internal parallel mesher bypassed the harness's native thread setting.
+Disable that nested meshing pool; corpus jobs own concurrency. Serial HCFT
+reference generation takes 286 s and 1,574,528 KiB peak RSS, and `cmp` confirms
+the 4,354,716-triangle STL is byte-identical to the retained parallel reference.
+This intentionally trades wall time for predictable single-job resource use:
+the earlier parallel conversion plus comparison took 183.6 s. It is not a
+measurement of parallel conversion alone or a claim of a universal memory cap.
+The 27 Python tests pass. Reuse complete retained reference meshes for native
+fix trials; do not regenerate OCCT unnecessarily. Evidence logs:
+`local/cohort2-resource-{serial-hcft,tests}.log`.
+
+Remove 1.8 GiB of regenerable `target/debug/incremental` cache with no Cargo
+build running; disk free space rises to 9.6 GiB. Inputs, baseline meshes,
+reports and frozen workers remain. Future builds use one build job and disable
+incremental output where appropriate.
+
+A targeted native CMBNC replay peaks at 120,712 KiB and takes 20 s. Its boundary
+failures occur with only 177/170 points, not at the million-point resource cap.
+The endpoints are spatially adjacent at roundoff, but their chart coordinates
+differ by exactly one full v period on a doubly periodic revolution surface.
+The existing singly-periodic cutter skips these faces; subdivision cannot
+repair that topological seam. This is an RCA lead, not a completed fix.
+Temporary instrumentation is removed. Evidence:
+`local/cohort2-resource-bound-diagnostic.{json,log}`.
+
 ### Bound proximity-query memory and replace the Python spatial index
 
 Replace Trimesh/rtree proximity with libigl's native float64 point-to-triangle
