@@ -1020,12 +1020,12 @@ fn advanced_face(
     }
     prepared.refine_boundary(&mut pts, &mut edges, &mut mesh.verts, tolerance)?;
     let mut constraints: Vec<_> = edges.iter().map(|&(a, b)| (a, b, true)).collect();
-    crate::timing::time("face:resolve_crossing_edges", || {
-        resolve_crossing_edges(&mut pts, &mut constraints, &mut mesh.verts)
-    });
     let bonus_points = pts.len();
     crate::timing::time("face:add_steiner_points", || {
         prepared.add_steiner_points(&mut pts, &mut mesh.verts)
+    });
+    crate::timing::time("face:resolve_crossing_edges", || {
+        resolve_crossing_edges(&mut pts, &mut constraints, &mut mesh.verts)
     });
     let face_id = face_geometry.0;
     let n_steiner = pts.len() - bonus_points;
@@ -1041,11 +1041,9 @@ fn advanced_face(
         eprintln!("DUMP_FACE {}: pts={:?}", face_id, pts);
         eprintln!("DUMP_FACE {}: constraints={:?}", face_id, constraints);
     }
-    // Preserve per-face panic diagnostics without mutating the input on error.
     let result = crate::timing::time("face:cdt", || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut t =
-                cdt::Triangulation::new_with_constraints(&pts, constraints.iter().copied())?;
+            let mut t = cdt::Triangulation::new_with_constraints(&pts, constraints.iter().copied())?;
             if let Err(e) = t.run() {
                 if let Some(dir) = save_debug_svg_dir() {
                     let filename = format!("{}/err{}.svg", dir, face_id);
@@ -1059,7 +1057,82 @@ fn advanced_face(
         }))
     });
     let t = result.map_err(|_| Error::TriangulationPanic)??;
-    for (a, b, c) in t.triangles() {
+    let mut triangles: Vec<_> = t.triangles().map(|(a,b,c)| [a,b,c]).collect();
+    let edge_key = |a: usize,b: usize| (a.min(b),a.max(b));
+    let mut uses = HashMap::new();
+    for &[a,b,c] in &triangles {
+        for (a,b) in [(a,b),(b,c),(c,a)] { *uses.entry(edge_key(a,b)).or_insert(0) += 1; }
+    }
+    let boundary: HashSet<_> = uses.into_iter().filter_map(|(edge,count)| (count == 1).then_some(edge)).collect();
+    // Refine in spatial geometry, without rerunning a chart-metric CDT that
+    // repeatedly reconnects long spatial edges on highly stretched charts.
+    // Shared edge midpoints and a subdivision table keep the mesh conforming.
+    const SPLITS: [&[[usize;3]];8] = [
+        &[[0,1,2]], &[[0,3,2],[3,1,2]], &[[1,4,0],[4,2,0]],
+        &[[3,1,4],[0,3,2],[3,4,2]], &[[2,5,1],[5,0,1]],
+        &[[0,3,5],[3,1,2],[3,2,5]], &[[2,5,4],[0,1,5],[1,4,5]],
+        &[[0,3,5],[3,1,4],[5,4,2],[3,4,5]],
+    ];
+    let mut surface_positions: Vec<_> = pts.iter().zip(&mesh.verts)
+        .map(|(&(u,v), vertex)| prepared.raise(DVec2::new(u,v)).unwrap_or(vertex.pos)).collect();
+    let mut rounds = 0;
+    loop {
+        let mut splits = HashMap::new();
+        let mut centers = HashMap::new();
+        let mut pending = Vec::new();
+        for (index, &[a,b,c]) in triangles.iter().enumerate() {
+            let samples = [a,b,c].map(|i| (DVec2::new(pts[i].0,pts[i].1),1./3.));
+            let Some((uv,pos)) = prepared.sample(&samples) else { continue; };
+            let center = (surface_positions[a] + surface_positions[b] + surface_positions[c]) / 3.;
+            // This is a refinement probe, not a certified maximum error bound.
+            let deviation = prepared.deviation(center, uv, pos);
+            if deviation > tolerance {
+                let mut interior = false;
+                for (a,b) in [(a,b),(b,c),(c,a)] {
+                    if boundary.contains(&edge_key(a,b)) { continue; }
+                    interior = true;
+                    splits.entry(edge_key(a,b)).or_insert_with(|| {
+                        let samples = [a,b].map(|i| (DVec2::new(pts[i].0,pts[i].1),0.5));
+                        let (uv,pos) = prepared.sample(&samples).unwrap_or((
+                            (samples[0].0+samples[1].0)*0.5,
+                            (surface_positions[a]+surface_positions[b])*0.5));
+                        let i = pts.len()+pending.len();
+                        pending.push((uv,pos));
+                        i
+                    });
+                }
+                if !interior {
+                    centers.insert(index,pts.len()+pending.len());
+                    pending.push((uv,pos));
+                }
+            }
+        }
+        if pending.is_empty() { break; }
+        rounds += 1;
+        if rounds == 32 || pts.len() + pending.len() > 1_000_000 {
+            return Err(Error::InvalidGeometry("surface approximation did not converge"));
+        }
+        for (uv, pos) in pending {
+            pts.push((uv.x, uv.y));
+            surface_positions.push(pos);
+            mesh.verts.push(mesh::Vertex { pos, norm: DVec3::zeros(), color: face_color });
+        }
+        let mut next = Vec::new();
+        for (index, &[a,b,c]) in triangles.iter().enumerate() {
+            if let Some(&center) = centers.get(&index) {
+                next.extend([[a,b,center],[b,c,center],[c,a,center]]);
+                continue;
+            }
+            let mut nodes = [a,b,c,0,0,0];
+            let mut mask = 0;
+            for (i,(a,b)) in [(a,b),(b,c),(c,a)].iter().copied().enumerate() {
+                if let Some(&mid) = splits.get(&edge_key(a,b)) { nodes[3+i] = mid; mask |= 1<<i; }
+            }
+            next.extend(SPLITS[mask].iter().map(|t| t.map(|i| nodes[i])));
+        }
+        triangles = next;
+    }
+    for [a, b, c] in triangles {
         mesh.triangles.push(Triangle {
             verts: if same_sense {
                 U32Vec3::new(a as u32, b as u32, c as u32)
@@ -2200,6 +2273,38 @@ mod tests {
         let mut edges = vec![(0, 3), (5, 4)];
         cancel_retraced_edges(&pts, &mut edges);
         assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn hemisphere_refines_interior_curvature_to_the_physical_budget() {
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(0.,0.,0.));
+            #2=DIRECTION('',(0.,0.,1.));
+            #3=DIRECTION('',(1.,0.,0.));
+            #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+            #5=SPHERICAL_SURFACE('',#4,5.);
+            #6=CIRCLE('',#4,5.);
+            #7=CARTESIAN_POINT('',(5.,0.,0.));
+            #8=VERTEX_POINT('',#7);
+            #9=EDGE_CURVE('',#8,#8,#6,.T.);
+            #10=ORIENTED_EDGE('',*,*,#9,.T.);
+            #11=EDGE_LOOP('',(#10));
+            #12=FACE_OUTER_BOUND('',#11,.T.);
+            #13=ADVANCED_FACE('',(#12),#5,.T.);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let mut previous = 0;
+        for tolerance in [0.04,0.01] {
+            let mut mesh = Mesh::default();
+            advanced_face(&step, Id::new(13), &mut mesh, &HashMap::new(), DVec3::zeros(), 0., tolerance).unwrap();
+            assert!(mesh.triangles.len() > previous);
+            previous = mesh.triangles.len();
+            for t in &mesh.triangles {
+                let p = t.verts.iter().map(|&i| mesh.verts[i as usize].pos).sum::<DVec3>() / 3.;
+                assert!(5.-p.norm() < 2.*tolerance);
+            }
+        }
     }
 
     #[test]

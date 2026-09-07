@@ -1,5 +1,23 @@
 # Würth and KiCad STEP repair worklog
 
+### Refine curved face interiors with conforming subdivision
+
+Use one CDT, then shared edge midpoints and an eight-entry subdivision table.
+Split every free edge of a failing triangle rather than ranking edges in a
+distorted metric. The latter left long skinny children unresolved after 32
+rounds; subdividing all free edges clears the remaining CIRCM12 cap and large
+capacitor regressions. Affine chart interpolation preserves parent partitions;
+native-polar averaging did not. Local surface projection measures geometric
+distance without counting tangential parameter distortion, and keeps the
+sample itself as a feasible distance bound. Source offsets remain separate.
+
+The hemisphere regression checks actual interior deflection, not triangle
+counts. All 143 workspace library tests and all 53 targeted processing cases
+pass. OCCT remains 55 pass / one invalid-source mismatch out of 56; all eleven
+original OCCT-valid failures and four invalid Coilcraft variants now agree at
+the unchanged comparison thresholds. This is sampled agreement, not a proof
+of topology or exact geometry. Full sweep and report bookkeeping follows.
+
 ### Resolve trim chart curvature without moving source chords
 
 Subdivide a trim chord when its lifted chart segment departs from the lifted

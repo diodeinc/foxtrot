@@ -749,6 +749,29 @@ impl PreparedSurface<'_> {
         crate::timing::time(name, || self.lower_verts_inner(verts))
     }
 
+    /// Subdivision must partition the parent chart triangle. Interpolating
+    /// native polar parameters instead moves midpoints off their parent edges
+    /// and can create a winding triangle that never contracts to the pole.
+    pub fn sample(&self, points: &[(DVec2,f64)]) -> Option<(DVec2,DVec3)> {
+        let uv = points.iter().map(|&(p,w)| p*w).sum();
+        self.raise(uv).map(|p| (uv,p))
+    }
+
+    /// Distance to a feasible surface point, using the parameter sample as
+    /// a local projection seed. Tangential parameter distortion is not mesh
+    /// error; only spatial distance should drive subdivision.
+    pub fn deviation(&self, point: DVec3, uv: DVec2, sample: DVec3) -> f64 {
+        if let (Surface::NURBS { surf }, FaceChart::Spline(chart)) = (self.surface, &self.chart) {
+            if let Some(raw) = Self::spline_raw(surf, chart, uv) {
+                if let Some(closest) = surf.uv_from_point_newtons_method(point, raw) {
+                    return (surf.surf.point(closest) - point).norm().min((sample-point).norm());
+                }
+            }
+            return (sample - point).norm();
+        }
+        (sample-point).dot(&self.normal(sample,uv)).abs()
+    }
+
     /// Preserve spatial edge chords while resolving their nonlinear chart image.
     /// Interior refinement cannot fix a constraint drawn through the wrong
     /// surface region (for example, a polar diameter instead of a rim arc).
