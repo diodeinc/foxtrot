@@ -456,13 +456,13 @@ impl Surface {
                 let (minor_start, minor_span) =
                     PreparedSurface::smallest_circular_arc(&mut minor_angles);
                 let polar_major = major_span >= minor_span;
+                let (start, span) = if polar_major { (minor_start, minor_span) }
+                    else { (major_start, major_span) };
                 FaceChart::Torus {
                     polar_major,
-                    radial_start: if polar_major {
-                        minor_start
-                    } else {
-                        major_start
-                    },
+                    // Put the cut inside the unused angular gap, not directly
+                    // on a boundary that projection roundoff can cross.
+                    radial_start: (start - (2.*PI-span)*0.5).rem_euclid(2.*PI),
                 }
             }
             Surface::NURBS { surf } => {
@@ -552,33 +552,7 @@ impl PreparedSurface<'_> {
                 if major_radius.abs() < EPSILON || minor_radius.abs() < EPSILON {
                     return Err(Error::InvalidGeometry("torus has a zero radius"));
                 }
-                let p = mat_i * p_;
-                /*
-                         ^ Y
-                         |
-                    /---------\
-                   /     |     \
-                   |   -----   |
-                   |   | O |- -|- - >Z
-                   |   -----   |
-                   \           /
-                    \---------/
-
-                    (X axis points into the screen)
-                */
-                let major_angle = p.y.atan2(p.z);
-
-                // Rotate the point so that it's got Y = 0, so we can calculate
-                // the minor angle
-                let z = DVec3::new(0.0, major_angle.sin(), major_angle.cos());
-                let new_mat =
-                    Surface::make_rigid_transform(z, DVec3::new(1.0, 0.0, 0.0), z * *major_radius);
-                let new_mat_i = new_mat
-                    .try_inverse()
-                    .ok_or(Error::SingularTransform("torus lowering transform"))?;
-                let new_p = new_mat_i * DVec4::new(p.x, p.y, p.z, 1.0);
-
-                let minor_angle = new_p.x.atan2(new_p.z);
+                let (major_angle, minor_angle) = Self::torus_angles(*mat_i, p, *major_radius)?;
 
                 // Keep the boundary's wider periodic direction as the polar
                 // coordinate, so full rings stay closed without an artificial

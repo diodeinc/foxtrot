@@ -1,5 +1,13 @@
 # Würth and KiCad STEP repair worklog
 
+### Keep torus cuts away from trim vertices
+
+Place the radial angular cut in the middle of the unused angular gap rather
+than on a trim vertex, where projection roundoff can cross it. Lowering now
+reuses the same angle extraction as chart preparation, removing the duplicate
+matrix path. This resolves the USB torus seam regression. The 143 workspace
+tests and the targeted USB replay pass (`local/cohort-clean-regressions`).
+
 ### Condition cylindrical sliver charts by physical scale
 
 Use the larger of axial extent and radius as the cylinder chart's axial scale.
