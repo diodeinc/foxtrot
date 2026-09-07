@@ -472,6 +472,13 @@ fn detect_length_scale_fallback(s: &StepFile) -> f64 {
 }
 
 pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
+    let mut scale = detect_length_scale_to_mm(s);
+    if (scale - 1.0).abs() < 1e-10 {
+        scale = detect_length_scale_fallback(s);
+    }
+    // Physical mesh approximation budget in native coordinates, distinct
+    // from the source's geometric uncertainty.
+    let tolerance = 0.01 / scale;
     let styled_item_colors: HashMap<usize, DVec3> = s
         .0
         .iter()
@@ -574,6 +581,7 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                     &styled_item_colors,
                     default_color,
                     shape.uncertainty,
+                    tolerance,
                 ),
                 Entity::ShellBasedSurfaceModel(b) => {
                     for v in &b.sbsm_boundary {
@@ -585,6 +593,7 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                             &styled_item_colors,
                             default_color,
                             shape.uncertainty,
+                            tolerance,
                         );
                     }
                 }
@@ -599,6 +608,7 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                             &styled_item_colors,
                             default_color,
                             shape.uncertainty,
+                            tolerance,
                         );
                     }
                 }
@@ -661,11 +671,6 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
     };
 
     // Scale coordinates to millimeters based on the STEP file's length unit
-    info!("all faces done, detecting length scale...");
-    let mut scale = detect_length_scale_to_mm(s);
-    if (scale - 1.0).abs() < 1e-10 {
-        scale = detect_length_scale_fallback(s);
-    }
     info!("length scale: {}", scale);
     let mut mesh = mesh;
     if (scale - 1.0).abs() > 1e-10 {
@@ -807,6 +812,7 @@ fn shell(
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
     uncertainty: f64,
+    tolerance: f64,
 ) {
     let data = match &s[c] {
         Entity::ClosedShell(shell) => Some((&shell.cfs_faces, true)),
@@ -845,6 +851,7 @@ fn shell(
             styled_item_colors,
             default_color,
             uncertainty,
+            tolerance,
         ) {
             Ok(()) => mesh.append(&mut scratch),
             Err(err) => {
@@ -896,6 +903,7 @@ fn advanced_face(
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
     uncertainty: f64,
+    tolerance: f64,
 ) -> Result<(), Error> {
     // Closed shells may legally reference either ADVANCED_FACE or the more
     // general FACE_SURFACE; OCCT/KiCad translate both through FaceSurface.
@@ -921,7 +929,7 @@ fn advanced_face(
     let mut num_pts = 0;
     for b in bounds {
         let (bound_contours, edge_loop_len) =
-            crate::timing::time("face:face_bound", || face_bound(s, *b, &mut edge_uses))?;
+            crate::timing::time("face:face_bound", || face_bound(s, *b, &mut edge_uses, tolerance))?;
         boundary_points.extend_from_slice(&bound_contours);
 
         match bound_contours.len() {
@@ -1463,6 +1471,7 @@ fn face_bound(
     s: &StepFile,
     b: FaceBound,
     edge_uses: &mut HashMap<usize, (usize, usize)>,
+    tolerance: f64,
 ) -> Result<(Vec<DVec3>, usize), Error> {
     let (bound, orientation) = match &s[b] {
         Entity::FaceBound(b) => (b.bound, b.orientation),
@@ -1482,7 +1491,7 @@ fn face_bound(
                     uses.1 += 1;
                 }
             }
-            let mut d = edge_loop(s, &e.edge_list)?;
+            let mut d = edge_loop(s, &e.edge_list, tolerance)?;
             if !orientation {
                 d.reverse()
             }
@@ -1493,7 +1502,7 @@ fn face_bound(
     }
 }
 
-fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge]) -> Result<Vec<DVec3>, Error> {
+fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge], tolerance: f64) -> Result<Vec<DVec3>, Error> {
     let mut out = Vec::new();
     for (i, e) in edge_list.iter().enumerate() {
         // Remove the last item from the list, since it's the beginning
@@ -1504,13 +1513,13 @@ fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge]) -> Result<Vec<DVec3>, Err
         let edge = s
             .entity(*e)
             .ok_or(Error::InvalidStepEntity("OrientedEdge"))?;
-        let o = edge_curve(s, edge.edge_element.cast(), edge.orientation)?;
+        let o = edge_curve(s, edge.edge_element.cast(), edge.orientation, tolerance)?;
         out.extend(o.into_iter());
     }
     Ok(out)
 }
 
-fn edge_curve(s: &StepFile, e: EdgeCurve, orientation: bool) -> Result<Vec<DVec3>, Error> {
+fn edge_curve(s: &StepFile, e: EdgeCurve, orientation: bool, tolerance: f64) -> Result<Vec<DVec3>, Error> {
     let edge_curve = s.entity(e).ok_or(Error::InvalidStepEntity("EdgeCurve"))?;
     let curve = curve(s, edge_curve, edge_curve.edge_geometry)?;
     let is_loop = edge_curve.edge_start == edge_curve.edge_end;
@@ -1518,7 +1527,7 @@ fn edge_curve(s: &StepFile, e: EdgeCurve, orientation: bool) -> Result<Vec<DVec3
     let v = vertex_point(s, edge_curve.edge_end)?;
     // EDGE_CURVE owns its discretization. ORIENTED_EDGE changes traversal
     // only: resampling backward creates numerically different seam geometry.
-    let mut points = curve.build(u, v, is_loop)?;
+    let mut points = curve.build(u, v, is_loop, tolerance)?;
     if !orientation {
         points.reverse();
     }
@@ -1883,7 +1892,7 @@ mod tests {
         let step = StepFile::parse(&flat).unwrap();
         let mut mesh = Mesh::default();
         let color = DVec3::new(0.2, 0.4, 0.6);
-        advanced_face(&step, Id::new(72), &mut mesh, &HashMap::new(), color, 0.).unwrap();
+        advanced_face(&step, Id::new(72), &mut mesh, &HashMap::new(), color, 0., 0.01).unwrap();
         assert!(mesh.verts.iter().any(|v| v.pos == DVec3::new(1., 1., 0.)));
         assert!(mesh
             .verts
@@ -2011,6 +2020,7 @@ mod tests {
                 &HashMap::new(),
                 DVec3::zeros(),
                 0.,
+                0.01,
             )
             .unwrap();
             assert_eq!(mesh.verts.len(), 1024);
@@ -2207,14 +2217,14 @@ mod tests {
             ENDSEC;END-ISO-10303-21;";
         let flat = StepFile::strip_flatten(text).unwrap();
         let step = StepFile::parse(&flat).unwrap();
-        let a = edge_curve(&step, Id::new(11), true).unwrap();
-        let b = edge_curve(&step, Id::new(12), false).unwrap();
+        let a = edge_curve(&step, Id::new(11), true, 0.01).unwrap();
+        let b = edge_curve(&step, Id::new(12), false, 0.01).unwrap();
         assert_eq!(a.len(), 4);
         assert_eq!(b.len(), 4);
         assert_eq!(a[0], b[0]);
         assert_eq!(a[3], b[3]);
-        assert_eq!(a[1], DVec3::new(0.375, -0.005, 0.));
-        assert_eq!(b[1], DVec3::new(0.375, 0.005, 0.));
+        assert!(a[1..3].iter().all(|p| p.y == -0.005));
+        assert!(b[1..3].iter().all(|p| p.y == 0.005));
     }
 
     #[test]
@@ -2240,8 +2250,8 @@ mod tests {
                     panic!()
                 };
                 edge.same_sense = sense;
-                let forward = edge_curve(&step, Id::new(id), true).unwrap();
-                let mut backward = edge_curve(&step, Id::new(id), false).unwrap();
+                let forward = edge_curve(&step, Id::new(id), true, 0.01).unwrap();
+                let mut backward = edge_curve(&step, Id::new(id), false, 0.01).unwrap();
                 backward.reverse();
                 assert_eq!(forward, backward);
             }

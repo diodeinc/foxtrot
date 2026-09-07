@@ -101,6 +101,10 @@ impl<const N: usize> SampledCurve<N>
         !self.curve.open
     }
 
+    pub fn polyline_with_tolerance(&self, ranges: &[(f64, f64)], tolerance: f64) -> Option<Vec<DVec3>> {
+        self.curve.polyline_with_tolerance(ranges, tolerance)
+    }
+
     pub fn u_from_point(&self, p: DVec3) -> Option<f64> {
         use ordered_float::OrderedFloat;
         let best_u = self.samples.iter()

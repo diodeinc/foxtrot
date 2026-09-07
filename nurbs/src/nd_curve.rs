@@ -66,6 +66,44 @@ impl<const D: usize> NDBSplineCurve<D> {
         self.knots.max_t()
     }
 
+    /// Bound chord deviation by the restricted positive-weight control hull,
+    /// rather than probing a few parameter values which can alias curvature.
+    pub fn polyline_with_tolerance(&self, ranges: &[(f64, f64)], tolerance: f64) -> Option<Vec<nalgebra_glm::DVec3>> {
+        let mut result = Vec::new();
+        for &(start, end) in ranges {
+            let mut cells = Vec::new();
+            for span in self.knots.degree()..self.knots.len()-self.knots.degree()-1 {
+                let a = self.knots[span].max(start.min(end));
+                let b = self.knots[span+1].min(start.max(end));
+                if a < b { cells.push((span,a,b)); }
+            }
+            if start > end { cells.reverse(); }
+            for (span,a,b) in cells {
+                let mut controls = bezier_controls(&self.knots, &self.control_points, span, a, b);
+                if start > end { controls.reverse(); }
+                if result.is_empty() { result.push(cartesian(controls[0])); }
+                let mut queue = vec![controls];
+                while let Some(controls) = queue.pop() {
+                    if D == 4 && controls.iter().any(|p| p[3] <= 0.) { return None; }
+                    let a = cartesian(controls[0]);
+                    let b = cartesian(*controls.last().unwrap());
+                    let edge = b-a;
+                    let length2 = edge.norm_squared();
+                    let error = controls.iter().copied().map(cartesian).map(|p| {
+                        let t = if length2 == 0. { 0. } else { ((p-a).dot(&edge)/length2).clamp(0.,1.) };
+                        (p-a-t*edge).norm()
+                    }).fold(0., f64::max);
+                    if error <= tolerance { result.push(b); }
+                    else {
+                        let [left,right] = split_bezier(&controls);
+                        queue.push(right); queue.push(left);
+                    }
+                }
+            }
+        }
+        Some(result)
+    }
+
     /// Sufficient structural test for a C1 periodic cut: repeated controls
     /// and a translated knot sequence, with simple knots at both cut ends.
     /// Geometric closedness alone does not imply a smooth periodic seam.

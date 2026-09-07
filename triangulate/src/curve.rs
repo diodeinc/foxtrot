@@ -5,10 +5,6 @@ use crate::Error;
 use nurbs::{AbstractCurve, NDBSplineCurve, SampledCurve};
 use crate::surface::Surface;
 
-const BSPLINE_POINTS_PER_KNOT: usize = 8;
-const ELLIPSE_SAMPLES_PER_REV: usize = 32;
-const CONIC_MAX_DEPTH: usize = 20;
-
 // Remove only vertices whose deletion leaves the represented 3D polyline
 // exactly unchanged. In particular, preserve corners and collinear reversals.
 fn simplify_polyline(points: &mut Vec<DVec3>) {
@@ -117,7 +113,7 @@ impl Curve {
     }
 
     fn curve_points<const N: usize>(u: DVec3, v: DVec3, curve: &SampledCurve<N>,
-                                     is_loop: bool, dir: bool) -> Result<Vec<DVec3>, Error>
+                                     is_loop: bool, dir: bool, tolerance: f64) -> Result<Vec<DVec3>, Error>
         where NDBSplineCurve<N>: AbstractCurve
     {
         let t_start = curve.u_from_point(u)
@@ -141,14 +137,17 @@ impl Curve {
         if wraps {
             ranges.retain(|&(a, b)| a != b);
         }
-        let mut c = curve.as_polyline(&ranges, BSPLINE_POINTS_PER_KNOT);
+        let mut c = curve.polyline_with_tolerance(&ranges, tolerance)
+            .ok_or(Error::InvalidGeometry("nonpositive rational curve weight"))?;
         if c.is_empty() {
             return Err(Error::InvalidGeometry("curve polyline is empty"));
         }
-        c[0] = u;
-        if let Some(last) = c.last_mut() {
-            *last = v;
-        }
+        // Keep resolved curve/vertex offsets: distinct edges can share the
+        // same topological endpoints (for example the two sides of a sliver).
+        let displaced = |a: DVec3, b: DVec3|
+            (a-b).norm() > 64. * f64::EPSILON * (a.norm()+b.norm());
+        if displaced(c[0], u) { c.insert(0,u); } else { c[0] = u; }
+        if displaced(*c.last().unwrap(), v) { c.push(v); } else { *c.last_mut().unwrap() = v; }
         // Shared STEP vertices may differ from the curve within source
         // tolerance. Their replacement introduces bends which must participate
         // in reduction, even when the underlying spline is exactly straight.
@@ -156,10 +155,10 @@ impl Curve {
         Ok(c)
     }
 
-    pub fn build(&self, u: DVec3, v: DVec3, is_loop: bool) -> Result<Vec<DVec3>, Error> {
+    pub fn build(&self, u: DVec3, v: DVec3, is_loop: bool, tolerance: f64) -> Result<Vec<DVec3>, Error> {
         match self {
-            Self::BSplineCurveWithKnots { curve, dir } => Self::curve_points(u, v, curve, is_loop, *dir),
-            Self::NURBSCurve { curve, dir } => Self::curve_points(u, v, curve, is_loop, *dir),
+            Self::BSplineCurveWithKnots { curve, dir } => Self::curve_points(u, v, curve, is_loop, *dir, tolerance),
+            Self::NURBSCurve { curve, dir } => Self::curve_points(u, v, curve, is_loop, *dir, tolerance),
             Self::OpenConic { plane_from_world, world_from_plane, hyperbola } => {
                 let local = |p: DVec3| plane_from_world * DVec4::new(p.x, p.y, p.z, 1.0);
                 let a = local(u);
@@ -181,30 +180,27 @@ impl Curve {
                     };
                     glm::vec4_to_vec3(&(world_from_plane * p))
                 };
-                let tangent = |t: f64| {
+                let second_derivative = |t: f64| {
                     let p = if *hyperbola {
-                        DVec4::new(t.sinh(), t.cosh(), 0.0, 0.0)
+                        DVec4::new(t.cosh(), t.sinh(), 0.0, 0.0)
                     } else {
-                        DVec4::new(2.0 * t, 1.0, 0.0, 0.0)
+                        DVec4::new(2.0, 0.0, 0.0, 0.0)
                     };
-                    glm::normalize(&glm::vec4_to_vec3(&(world_from_plane * p)))
+                    glm::vec4_to_vec3(&(world_from_plane * p)).norm()
                 };
-                let max_angle = 2.0 * std::f64::consts::PI / ELLIPSE_SAMPLES_PER_REV as f64;
                 let mut parameters = vec![t0];
-                fn subdivide<F: Fn(f64) -> DVec3>(
-                    out: &mut Vec<f64>, tangent: &F, a: f64, b: f64,
-                    max_angle: f64, depth: usize,
-                ) {
-                    let angle = tangent(a).dot(&tangent(b)).clamp(-1.0, 1.0).acos();
-                    if angle > max_angle && depth < CONIC_MAX_DEPTH {
-                        let m = (a + b) * 0.5;
-                        subdivide(out, tangent, a, m, max_angle, depth + 1);
-                        subdivide(out, tangent, m, b, max_angle, depth + 1);
+                let mut pending = vec![(t0,t1)];
+                while let Some((a,b)) = pending.pop() {
+                    let bound = second_derivative(a).max(second_derivative(b)) * (b-a).powi(2) / 8.;
+                    if !bound.is_finite() { return Err(Error::InvalidGeometry("nonfinite conic bound")); }
+                    if bound > tolerance {
+                        let m = (a+b)*0.5;
+                        if m == a || m == b { return Err(Error::InvalidGeometry("conic resolution exhausted")); }
+                        pending.push((m,b)); pending.push((a,m));
                     } else {
-                        out.push(b);
+                        parameters.push(b);
                     }
                 }
-                subdivide(&mut parameters, &tangent, t0, t1, max_angle, 0);
                 let mut out: Vec<_> = parameters.into_iter().map(eval).collect();
                 out[0] = u;
                 *out.last_mut().unwrap() = v;
@@ -236,9 +232,12 @@ impl Curve {
                     v_ang -= PI2;
                 }
 
-                let count = 4.max(
-                    (ELLIPSE_SAMPLES_PER_REV as f64 * (u_ang - v_ang).abs() /
-                    (2.0 * std::f64::consts::PI)).round() as usize);
+                // Linear interpolation error <= max|C''| * delta² / 8.
+                // For this ellipse max|C''| is its larger semiaxis.
+                let radius = world_from_eplane.column(0).xyz().norm()
+                    .max(world_from_eplane.column(1).xyz().norm());
+                let max_angle = (8. * tolerance / radius).sqrt().min(std::f64::consts::FRAC_PI_2);
+                let count = ((u_ang-v_ang).abs()/max_angle).ceil() as usize + 1;
 
                 let mut out_world = vec![u];
                 // Walk around the circle, using the true positions for start
@@ -264,21 +263,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn chord_budget_scales_with_radius_and_does_not_alias_spline_inflections() {
+        let tolerance = 0.01;
+        for radius in [0.1, 2.5, 7.5, 100.] {
+            let circle = Curve::new_circle(DVec3::zeros(), DVec3::z(), DVec3::x(), radius, true, true).unwrap();
+            let points = circle.build(DVec3::x()*radius, DVec3::x()*radius, true, tolerance).unwrap();
+            for edge in points.windows(2) {
+                assert!(radius - ((edge[0]+edge[1])*0.5).norm() <= tolerance);
+            }
+        }
+        let curve = NDBSplineCurve::new(true,
+            nurbs::KnotVector::from_multiplicities(3, &[0.,1.], &[4,4]),
+            vec![DVec3::zeros(), DVec3::new(1.,3.,0.), DVec3::new(2.,-3.,0.), DVec3::new(3.,0.,0.)]);
+        let points = curve.polyline_with_tolerance(&[(0.,1.)], tolerance).unwrap();
+        for i in 0..=1000 {
+            let p = curve.point(i as f64/1000.);
+            let distance = points.windows(2).map(|e| {
+                let d = e[1]-e[0];
+                (p-e[0]-d*((p-e[0]).dot(&d)/d.norm_squared()).clamp(0.,1.)).norm()
+            }).fold(f64::INFINITY, f64::min);
+            assert!(distance <= tolerance);
+        }
+    }
+
+    #[test]
     fn closed_spline_trims_follow_edge_sense_and_start_at_the_vertex() {
         let curve = SampledCurve::new(NDBSplineCurve::new(false,
             nurbs::KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),
             vec![DVec3::zeros(), DVec3::x(), DVec3::new(1., 1., 0.), DVec3::y(), DVec3::zeros()]));
         let a = DVec3::new(0.5, 0., 0.);
         let b = DVec3::new(0., 0.5, 0.);
-        let forward = Curve::curve_points(a, b, &curve, false, true).unwrap();
-        let reverse = Curve::curve_points(a, b, &curve, false, false).unwrap();
+        let forward = Curve::curve_points(a, b, &curve, false, true, 0.01).unwrap();
+        let reverse = Curve::curve_points(a, b, &curve, false, false, 0.01).unwrap();
         assert_eq!(forward, vec![a, DVec3::x(), DVec3::new(1., 1., 0.), DVec3::y(), b]);
         assert_eq!(reverse, vec![a, DVec3::zeros(), b]);
-        assert_eq!(Curve::curve_points(b, a, &curve, false, true).unwrap(),
+        assert_eq!(Curve::curve_points(b, a, &curve, false, true, 0.01).unwrap(),
             reverse.into_iter().rev().collect::<Vec<_>>());
-        let full = Curve::curve_points(a, a, &curve, true, true).unwrap();
+        let full = Curve::curve_points(a, a, &curve, true, true, 0.01).unwrap();
         assert_eq!(full, vec![a, DVec3::x(), DVec3::new(1., 1., 0.), DVec3::y(), DVec3::zeros(), a]);
-        assert_eq!(Curve::curve_points(a, a, &curve, true, false).unwrap(),
+        assert_eq!(Curve::curve_points(a, a, &curve, true, false, 0.01).unwrap(),
             full.into_iter().rev().collect::<Vec<_>>());
     }
 
@@ -305,7 +328,7 @@ mod tests {
             (0..4).map(|i| DVec3::new(i as f64, -0.107370820668693, 0.4)).collect());
         let endpoints = [curve.point(0.4), curve.point(0.40000001)];
         let points = Curve::curve_points(endpoints[0], endpoints[1],
-            &SampledCurve::new(curve), false, true).unwrap();
+            &SampledCurve::new(curve), false, true, 0.01).unwrap();
         assert_eq!(points, endpoints);
     }
 
@@ -317,9 +340,10 @@ mod tests {
                 (0..=degree).map(|i| DVec3::new(3. * i as f64 / degree as f64, 0., 0.)).collect()));
             let a = DVec3::new(0., 0.01, 0.);
             let b = DVec3::new(3., 0.01, 0.);
-            let points = Curve::curve_points(a, b, &curve, false, true).unwrap();
-            assert_eq!(points, vec![a, DVec3::new(0.375, 0., 0.), DVec3::new(2.625, 0., 0.), b]);
-            assert_eq!(Curve::curve_points(b, a, &curve, false, true).unwrap(),
+            let points = Curve::curve_points(a, b, &curve, false, true, 0.01).unwrap();
+            assert_eq!(points.first(), Some(&a));
+            assert_eq!(points.last(), Some(&b));
+            assert_eq!(Curve::curve_points(b, a, &curve, false, true, 0.01).unwrap(),
                 points.into_iter().rev().collect::<Vec<_>>());
         }
     }
@@ -338,18 +362,18 @@ mod tests {
         ).unwrap();
         let point = |t: f64| DVec3::new(3.0 + 0.5 * t.sinh(), 4.0, 5.0 + 2.0 * t.cosh());
 
-        let forward = curve.build(point(-1.0), point(1.5), false).unwrap();
+        let forward = curve.build(point(-1.0), point(1.5), false, 0.01).unwrap();
         assert!(forward.len() > 2);
         assert_near(forward[0], point(-1.0));
         assert_near(*forward.last().unwrap(), point(1.5));
 
-        let reverse = curve.build(point(1.5), point(-1.0), false).unwrap();
+        let reverse = curve.build(point(1.5), point(-1.0), false, 0.01).unwrap();
         assert_eq!(forward.len(), reverse.len());
         for (a, b) in forward.iter().zip(reverse.iter().rev()) {
             assert_near(*a, *b);
         }
 
-        assert!(curve.build(DVec3::new(3.0, 4.0, 3.0), point(1.0), false).is_err());
+        assert!(curve.build(DVec3::new(3.0, 4.0, 3.0), point(1.0), false, 0.01).is_err());
     }
 
     #[test]
@@ -362,9 +386,9 @@ mod tests {
         ).unwrap();
         let point = |t: f64| DVec3::new(1.0 + 4.0 * t, 2.0 - 2.0 * t * t, 3.0);
 
-        let forward = curve.build(point(-2.0), point(1.0), false).unwrap();
+        let forward = curve.build(point(-2.0), point(1.0), false, 0.01).unwrap();
         assert!(forward.len() > 2);
-        let reverse = curve.build(point(1.0), point(-2.0), false).unwrap();
+        let reverse = curve.build(point(1.0), point(-2.0), false, 0.01).unwrap();
         assert_eq!(forward.len(), reverse.len());
         for (a, b) in forward.iter().zip(reverse.iter().rev()) {
             assert_near(*a, *b);
