@@ -21,8 +21,14 @@ processing regressions. The original oracle replay remains 55 pass / one
 invalid-source mismatch (`local/cohort-trace6-*`). Independent OCCT checks of
 the two newly repaired MJ connectors and SMA connector all pass. HCF processing
 completes with 442,505 triangles; its reference contains roughly 2.5M triangles,
-so comparison exceeded the harness's 120 s limit and is rerunning against the
-retained meshes without repeating reference generation.
+so comparison exceeded the harness's 120 s limit. Comparing the retained meshes
+without repeating reference generation completes in 288 s and passes: maximum
+sampled distances 0.0402001 / 0.0163380 mm at the unchanged 0.1 mm threshold,
+10,000 area samples plus 10,000 face probes per direction. Bounds agree exactly;
+area differs by 0.0974%. Evidence: `local/cohort-hcf-oracle.json`. The original
+four-case harness report retains its timeout as historical evidence; the
+standalone comparison resolves it. All four additional models now pass sampled
+comparison. Neither that result nor the report certifies topology or shading.
 
 CMANC7848040382 is a separate source inconsistency, not a failed inverse solve.
 OCCT independently confirms source curve #10238 lies 0.0531–0.0650 mm away from
