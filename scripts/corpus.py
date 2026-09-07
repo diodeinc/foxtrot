@@ -621,7 +621,7 @@ def main(argv=None):
             "results": [],
             "changes": [],
         }
-        for package in ("cadquery-ocp", "trimesh", "numpy", "scipy", "rtree"):
+        for package in ("cadquery-ocp", "libigl", "numpy", "scipy"):
             try:
                 report[package.replace("-", "_")] = (
                     version(package) if args.occt else None

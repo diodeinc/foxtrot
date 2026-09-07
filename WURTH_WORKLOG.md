@@ -2,6 +2,31 @@
 
 ## Oracle cohort 2 — 2026-09-07
 
+### Bound proximity-query memory and replace the Python spatial index
+
+Replace Trimesh/rtree proximity with libigl's native float64 point-to-triangle
+AABB queries. Read STL transport through a memory map; compute areas in bounded
+blocks and build at most 262,144 target triangles into a BVH. Take the minimum
+over every target block. This is the same nearest-surface query, not a sampled
+target, simplified reference, or looser acceptance gate. libigl 2.6.3 is an
+optional offline dependency; Rust/browser dependencies are unchanged.
+
+On the retained large CMB-XS comparison, `/usr/bin/time -v` measures 8.82 s and
+660,016 KiB peak RSS (645 MiB). The old process was still running after six
+minutes at roughly 3.6 GiB RSS. An intermediate whole-mesh libigl BVH took
+10.22 s / 2,526,160 KiB; bounded BVHs remove that remaining memory spike.
+Blocked and whole-mesh libigl summaries agree within 1e-12 mm. All twelve
+retained cohort mismatch comparisons keep the same distance pass/fail result
+as Trimesh; maximum summary difference is 7.25e-9 mm. The first deliberately
+tight 1e-10 cross-backend assertion exposed tiny RMS differences, not changed
+acceptance or missing geometry; full parity evidence records the differences.
+
+27 Python tests pass, including a one-triangle-per-block regression that must
+find nearest points across all blocks. Evidence: `local/cohort2-bvh-*.json` and
+`/tmp/cohort2-bvh-{blocked,parity,tests}.log`. Documentation and dependency-version
+provenance now match the new backend. Continue large-case iteration with one
+worker; reference generation can still have its own memory cost.
+
 ### Condition spline charts in Cartesian distance per knot unit
 
 FI7447054 source face #206/surface #512 has a v range of only 0.00975204.

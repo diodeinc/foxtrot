@@ -127,7 +127,7 @@ class ReferenceCompletenessTests(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    all(importlib.util.find_spec(name) for name in ("trimesh", "scipy", "rtree")),
+    all(importlib.util.find_spec(name) for name in ("numpy", "igl")),
     "optional surface oracle dependencies not installed",
 )
 class SurfaceDistanceTests(unittest.TestCase):
@@ -147,6 +147,13 @@ class SurfaceDistanceTests(unittest.TestCase):
         self.assertLess(
             result["surface_distance"]["actual_to_reference"]["max_sampled_mm"], 1e-6
         )
+
+    def test_nearest_surface_is_preserved_across_single_triangle_batches(self):
+        with mock.patch.object(corpus_geometry, "_MESH_BLOCK_TRIANGLES", 1):
+            result = self.compare(TETRAHEDRON, TETRAHEDRON[::-1])
+        self.assertTrue(result["passed"])
+        for direction in ("actual_to_reference", "reference_to_actual"):
+            self.assertLess(result["surface_distance"][direction]["max_sampled_mm"], 1e-12)
 
     def test_displaced_interior_surface_evades_aggregate_checks(self):
         def panel(z):

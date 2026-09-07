@@ -16,6 +16,7 @@ import sys
 from typing import Any
 
 _TRIANGLE = struct.Struct("<12fH")
+_MESH_BLOCK_TRIANGLES = 262144
 
 
 def mesh_metrics(path: os.PathLike[str] | str) -> dict[str, Any]:
@@ -98,43 +99,60 @@ def surface_distances(actual_path, reference_path, samples, tolerance):
     """
     try:
         import numpy as np
-        import rtree  # noqa: F401 -- required by trimesh's triangle index
-        import scipy  # noqa: F401 -- required by trimesh proximity queries
-        import trimesh
+        import igl
     except ImportError as error:
         raise RuntimeError(
-            "surface comparison requires numpy, trimesh, scipy and rtree; "
-            "install with: python -m pip install trimesh scipy rtree"
+            "surface comparison requires numpy and libigl; "
+            "install with: python -m pip install libigl"
         ) from error
 
     def load(path):
-        mesh = trimesh.load_mesh(path, file_type="stl", process=False)
-        mesh.update_faces(mesh.area_faces > 0)
-        return mesh
+        # Keep transport data file-backed; temporary arrays and native BVHs
+        # are block-sized rather than proportional to the entire triangle soup.
+        records = np.memmap(path, mode="r", offset=84, dtype=np.dtype([
+            ("normal", "<f4", (3,)), ("vertices", "<f4", (3, 3)), ("attribute", "<u2")
+        ]))
+        triangles = records["vertices"]
+        areas = np.empty(len(triangles))
+        for start in range(0, len(triangles), _MESH_BLOCK_TRIANGLES):
+            block = triangles[start:start + _MESH_BLOCK_TRIANGLES].astype(np.float64)
+            areas[start:start + len(block)] = np.linalg.norm(
+                np.cross(block[:, 1] - block[:, 0], block[:, 2] - block[:, 0]), axis=1
+            ) * 0.5
+        faces = np.flatnonzero(areas > 0)
+        return triangles, faces, areas[faces]
 
     def directed(source, target):
+        source_triangles, source_faces, areas = source
         rng = np.random.default_rng(0)
         faces = rng.choice(
-            len(source.faces), samples, p=source.area_faces / source.area
+            len(source_faces), samples, p=areas / areas.sum()
         )
-        triangles = source.triangles[faces]
+        triangles = source_triangles[source_faces[faces]].astype(np.float64)
         root = np.sqrt(rng.random(samples))
         v = rng.random(samples)
         weights = np.column_stack((1 - root, root * (1 - v), root * v))
         points = np.einsum("ij,ijk->ik", weights, triangles)
         # Small faces can disappear in area sampling; probe their centroids too.
         probes = np.linspace(
-            0, len(source.faces) - 1, min(samples, len(source.faces)), dtype=int
+            0, len(source_faces) - 1, min(samples, len(source_faces)), dtype=int
         )
-        points = np.vstack((points, source.triangles_center[probes]))
-        distances, closest = [], []
-        for start in range(0, len(points), 256):
-            nearest, distance, _ = target.nearest.on_surface(
-                points[start : start + 256]
-            )
-            distances.extend(distance)
-            closest.extend(nearest)
-        distances = np.asarray(distances)
+        centroids = source_triangles[source_faces[probes]].astype(np.float64).mean(axis=1)
+        points = np.vstack((points, centroids))
+        target_triangles, target_faces, _ = target
+        squared = np.full(len(points), np.inf)
+        closest = np.empty_like(points)
+        # The minimum over disjoint batches is the minimum over the whole mesh.
+        # This bounds BVH memory without dropping geometry or changing samples.
+        for start in range(0, len(target_faces), _MESH_BLOCK_TRIANGLES):
+            indices = target_faces[start:start + _MESH_BLOCK_TRIANGLES]
+            vertices = target_triangles[indices].astype(np.float64).reshape(-1, 3)
+            faces = np.arange(len(vertices), dtype=np.int64).reshape(-1, 3)
+            candidate, _, nearest = igl.point_mesh_squared_distance(points, vertices, faces)
+            better = candidate < squared
+            squared[better] = candidate[better]
+            closest[better] = nearest[better]
+        distances = np.sqrt(squared)
         if not np.isfinite(distances).all():
             raise ValueError("nonfinite surface distance")
         worst = int(np.argmax(distances))
@@ -159,6 +177,7 @@ def surface_distances(actual_path, reference_path, samples, tolerance):
     forward, reverse = directed(actual, reference), directed(reference, actual)
     return {
         "method": "bidirectional_area_samples_and_face_centroids_to_triangles",
+        "proximity_backend": "libigl_aabb",
         "seed": 0,
         "tolerance_mm": tolerance,
         "actual_to_reference": forward,

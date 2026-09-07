@@ -191,15 +191,20 @@ concurrency or use OS/container limits for untrusted or very large inputs.
 
 ```sh
 python3 -m venv local/occt-env
-local/occt-env/bin/pip install cadquery-ocp trimesh scipy rtree
+local/occt-env/bin/pip install cadquery-ocp libigl
 local/occt-env/bin/python scripts/corpus.py examples --occt \
   --meshes all --output local/oracle
 ```
 
 OCCT independently reads STEP and emits a millimeter-scale STL with 0.01 mm
-linear and 0.1 rad angular deflection. In addition to bounds and area, the harness
-compares **bidirectional sampled point-to-triangle distances** using Trimesh's
-spatial index. Foxtrot → OCCT detects extra/displaced surfaces; OCCT → Foxtrot
+linear and 0.1 rad angular deflection. Every transferred face must have triangles;
+a partial reference is retained for diagnosis but rejected for comparison.
+In addition to bounds and area, the harness compares **bidirectional sampled
+point-to-triangle distances** using libigl's native AABB hierarchy. Mesh transport
+is memory-mapped and only one target hierarchy exists at a time. libigl is an
+optional offline-tool dependency, not linked into the Rust or browser code.
+Use `--jobs 1` for large models: OCCT reference generation can itself be expensive.
+Foxtrot → OCCT detects extra/displaced surfaces; OCCT → Foxtrot
 detects missing surfaces. There is no alignment, rescaling, mesh repair or vertex
 correspondence: different triangulations can represent the same surface.
 
