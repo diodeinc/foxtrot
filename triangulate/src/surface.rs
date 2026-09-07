@@ -119,7 +119,7 @@ pub(crate) enum FaceChart {
     Direct,
     Cylinder {
         z_min: f64,
-        z_max: f64,
+        axial_scale: f64,
     },
     Sphere {
         mat: DMat4,
@@ -391,7 +391,7 @@ impl Surface {
         has_seam: bool,
     ) -> Result<PreparedSurface<'a>, Error> {
         let chart = match self {
-            Surface::Cylinder { mat_i, .. } => {
+            Surface::Cylinder { mat_i, radius, .. } => {
                 if verts.is_empty() {
                     return Err(Error::InvalidGeometry("surface has no vertices"));
                 }
@@ -402,7 +402,11 @@ impl Surface {
                     z_min = z_min.min(p.z);
                     z_max = z_max.max(p.z);
                 }
-                FaceChart::Cylinder { z_min, z_max }
+                // Use the patch's spatial scale, not only its axial extent.
+                // A sub-tolerance axial sliver can have coplanar edge chords;
+                // that must not make the cylinder's chart singular.
+                let axial_scale = (z_max-z_min).max(*radius);
+                FaceChart::Cylinder { z_min, axial_scale }
             }
             Surface::Sphere { location, .. } => {
                 if verts.is_empty() {
@@ -519,19 +523,17 @@ impl PreparedSurface<'_> {
                 Ok(DVec2::new(-xy.x, xy.y))
             }
 
-            (Surface::Cylinder { mat_i, .. }, FaceChart::Cylinder { z_min, z_max }) => {
+            (Surface::Cylinder { mat_i, .. }, FaceChart::Cylinder { z_min, axial_scale }) => {
                 let p = mat_i * p_;
                 // We convert the Z coordinates to either add or subtract from
                 // the radius, so that we maintain the right topology (instead
                 // of doing something like theta-z coordinates, which wrap
                 // around awkwardly).
 
-                // Scale from radius=1 to radius=0.5 based on Z
-                let dz = z_max - z_min;
-                if dz.abs() < EPSILON {
+                if *axial_scale <= 0. {
                     return Err(Error::InvalidGeometry("cylinder has zero height"));
                 }
-                let z = (p.z - z_min) / dz;
+                let z = (p.z - z_min) / axial_scale;
                 let scale = 1.0 / (1.0 + z);
                 Ok(DVec2::new(p.x * scale, p.y * scale))
             }
@@ -974,6 +976,13 @@ impl PreparedSurface<'_> {
 
     pub fn raise(&self, uv: DVec2) -> Option<DVec3> {
         match (self.surface, &self.chart) {
+            (Surface::Cylinder { mat, radius, .. }, FaceChart::Cylinder { z_min, axial_scale }) => {
+                let r = uv.norm();
+                if r == 0. { return None; }
+                let xy = uv * (*radius / r);
+                let z = z_min + (radius/r - 1.)*axial_scale;
+                Some((mat * DVec4::new(xy.x, xy.y, z, 1.)).xyz())
+            }
             (Surface::Sphere { radius, .. }, FaceChart::Sphere { mat, .. }) => {
                 let angle = uv.norm();
                 if angle > PI {

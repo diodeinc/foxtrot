@@ -1,5 +1,14 @@
 # Würth and KiCad STEP repair worklog
 
+### Condition cylindrical sliver charts by physical scale
+
+Use the larger of axial extent and radius as the cylinder chart's axial scale.
+Sub-tolerance axial slivers can have coplanar edge chords without making the
+underlying cylinder singular. Store that scale explicitly and provide its
+inverse map for curvature refinement. The scale check no longer compares a
+length against an absolute machine epsilon. All 143 workspace library tests
+pass (`/tmp/cohort-clean-tests.log`).
+
 ### Do not infer periods from thin extrusions
 
 The last capacitor regression, WCAP-AI3H-P10D25L51 surface 10902, was assigned
