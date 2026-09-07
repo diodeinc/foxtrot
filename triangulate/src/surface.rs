@@ -171,6 +171,11 @@ pub(crate) enum FaceChart {
         polar_major: bool,
         radial_start: f64,
     },
+    TorusStrip {
+        periodic: usize,
+        cut: f64,
+        scale: DVec2,
+    },
     Spline(SplineChart),
 }
 
@@ -517,7 +522,10 @@ impl Surface {
                     crate::triangulate::cancel_retraced_edges(&canonical, &mut trims);
                     [polar_major, !polar_major].iter().copied().find_map(|polar_major| {
                         PreparedSurface::torus_cut(&angles, &trims, same_sense, polar_major)
-                            .map(|radial_start| FaceChart::Torus { polar_major, radial_start })
+                            .map(|cut| FaceChart::TorusStrip {
+                                periodic: usize::from(!polar_major), cut,
+                                scale: DVec2::new(*major_radius,-minor_radius),
+                            })
                     }).ok_or(Error::CouldNotLower)?
                 } else {
                     // Apple/lemon surfaces have poles and a restricted minor
@@ -569,6 +577,12 @@ impl PreparedSurface<'_> {
     fn lower(&self, p: DVec3) -> Result<DVec2, Error> {
         let p_ = DVec4::new(p.x, p.y, p.z, 1.0);
         match (self.surface, &self.chart) {
+            (Surface::Torus { mat_i,major_radius,.. }, FaceChart::TorusStrip { periodic,cut,scale }) => {
+                let (u,v) = Self::torus_angles(*mat_i,p,*major_radius)?;
+                let mut raw = DVec2::new(u,v);
+                raw[1-periodic] = Self::unwrap_from_start(raw[1-periodic],*cut);
+                Ok(raw.component_mul(scale))
+            }
             (
                 Surface::Plane {
                     coordinates,
@@ -913,10 +927,8 @@ impl PreparedSurface<'_> {
                 return Err(Error::InvalidGeometry("boundary chart approximation did not converge"));
             }
             let mut uv = self.lower(pos)?;
-            if let FaceChart::Spline(chart) = &self.chart {
-                for (axis, period) in chart.mapped_periods().iter().enumerate() {
-                    if let Some(period) = period { uv[axis] = Self::unwrap_near(uv[axis], (pa[axis]+pb[axis])*0.5, *period); }
-                }
+            for (axis, period) in self.mapped_periods().iter().enumerate() {
+                if let Some(period) = period { uv[axis] = Self::unwrap_near(uv[axis], (pa[axis]+pb[axis])*0.5, *period); }
             }
             let mid = pts.len();
             pts.push((uv.x, uv.y));
@@ -1127,13 +1139,24 @@ impl PreparedSurface<'_> {
         true
     }
 
+    fn mapped_periods(&self) -> [Option<f64>;2] {
+        match &self.chart {
+            FaceChart::Spline(chart) => chart.mapped_periods(),
+            FaceChart::TorusStrip { periodic,scale,.. } => {
+                let mut periods = [None,None];
+                periods[*periodic] = Some(2.*PI*scale[*periodic].abs());
+                periods
+            }
+            _ => [None,None],
+        }
+    }
+
     /// Cut a singly periodic regular patch into its native parameter strip.
     /// Clip each trim edge into that strip, then pair odd-degree seam vertices
     /// to close the contours. This handles winding loops without bending a
     /// long swept parameter direction into the radius of an annulus.
     pub fn cut_periodic(&self, pts: &mut Vec<(f64,f64)>, edges: &mut Vec<(usize,usize)>, verts: &mut Vec<Vertex>, tolerance: f64) -> Result<bool,Error> {
-        let (Surface::NURBS { surf }, FaceChart::Spline(chart)) = (self.surface,&self.chart) else { return Ok(false); };
-        let (axis,period) = match chart.mapped_periods() {
+        let (axis,period) = match self.mapped_periods() {
             [Some(period),None] => (0,period),
             [None,Some(period)] => (1,period),
             _ => return Ok(false),
@@ -1198,9 +1221,11 @@ impl PreparedSurface<'_> {
                 let at = |t| { let mut uv = DVec2::zeros(); uv[axis] = side; uv[radial] = t; uv };
                 let start = Self::uv_coord(points[pair[0]],radial);
                 let end = Self::uv_coord(points[pair[1]],radial);
-                let knots = [&surf.surf.u_knots,&surf.surf.v_knots][radial];
                 let mut cuts = vec![start];
-                cuts.extend((0..knots.len()).map(|i| chart.lower(DVec2::repeat(knots[i]))[radial]).filter(|&t| t > start && t < end));
+                if let (Surface::NURBS { surf }, FaceChart::Spline(chart)) = (self.surface,&self.chart) {
+                    let knots = [&surf.surf.u_knots,&surf.surf.v_knots][radial];
+                    cuts.extend((0..knots.len()).map(|i| chart.lower(DVec2::repeat(knots[i]))[radial]).filter(|&t| t > start && t < end));
+                }
                 cuts.push(end);
                 cuts.dedup();
                 let mut pending: Vec<_> = cuts.windows(2).map(|w| (w[0],w[1])).rev().collect();
@@ -1249,8 +1274,7 @@ impl PreparedSurface<'_> {
         edges: &[(usize, usize)],
         ranges: &[(usize, usize, bool)],
     ) {
-        let FaceChart::Spline(chart) = &self.chart else { return; };
-        let periods = chart.mapped_periods();
+        let periods = self.mapped_periods();
 
         for &(start_edge, end_edge, single_edge_bound) in ranges {
             if start_edge >= end_edge || end_edge > edges.len() {
@@ -1274,6 +1298,11 @@ impl PreparedSurface<'_> {
 
     pub fn raise(&self, uv: DVec2) -> Option<DVec3> {
         match (self.surface, &self.chart) {
+            (Surface::Torus { mat,major_radius,minor_radius,.. }, FaceChart::TorusStrip { scale,.. }) => {
+                let raw = uv.component_div(scale);
+                let radius = major_radius+minor_radius*raw.y.cos();
+                Some((mat*DVec4::new(minor_radius*raw.y.sin(),radius*raw.x.sin(),radius*raw.x.cos(),1.)).xyz())
+            }
             (Surface::Cylinder { mat, radius, .. }, FaceChart::Cylinder { z_min, axial_scale }) => {
                 let r = uv.norm();
                 if r == 0. { return None; }
@@ -1479,6 +1508,21 @@ impl PreparedSurface<'_> {
     }
 
     pub fn add_steiner_points(&self, pts: &mut Vec<(f64, f64)>, verts: &mut Vec<Vertex>) {
+        if let FaceChart::TorusStrip { scale,.. } = &self.chart {
+            let (xmin,xmax,ymin,ymax) = Self::bbox(pts);
+            let min = DVec2::new(xmin,ymin);
+            let span = DVec2::new(xmax-xmin,ymax-ymin);
+            let counts = [0,1].map(|axis| (span[axis]/scale[axis].abs()*32./(2.*PI)).ceil() as usize);
+            for i in 1..counts[0] {
+                for j in 1..counts[1] {
+                    let uv = min+span.component_mul(&DVec2::new(i as f64/counts[0] as f64,j as f64/counts[1] as f64));
+                    let pos = self.raise(uv).unwrap();
+                    pts.push((uv.x,uv.y));
+                    verts.push(Vertex { pos,norm: DVec3::zeros(),color: DVec3::zeros() });
+                }
+            }
+            return;
+        }
         if let (
             Surface::Torus {
                 major_radius,
@@ -1616,7 +1660,7 @@ impl PreparedSurface<'_> {
                     major_radius,
                     ..
                 },
-                FaceChart::Torus { .. },
+                FaceChart::Torus { .. } | FaceChart::TorusStrip { .. },
             ) => {
                 let p = (*mat_i * DVec4::new(p.x, p.y, p.z, 1.0)).xyz();
                 let major_angle = p.y.atan2(p.z);
@@ -2479,25 +2523,19 @@ mod tests {
                 .unwrap();
                 let prepared = PreparedSurface {
                     surface: &surface,
-                    chart: FaceChart::Torus { polar_major, radial_start: 0. },
+                    chart: FaceChart::TorusStrip {
+                        periodic: usize::from(!polar_major), cut: 0.,
+                        scale: DVec2::new(4.*scale,-scale),
+                    },
                     uncertainty: 0.,
                 };
-                let (base, radial_scale) = if polar_major {
-                    (4. * scale, scale)
-                } else {
-                    (scale, 4. * scale)
-                };
-                let mut points = Vec::new();
-                for radius in [base, base + PI * radial_scale] {
-                    for i in 0..32 {
-                        let angle = 2. * PI * i as f64 / 32.;
-                        points.push((radius * angle.cos(), radius * angle.sin()));
-                    }
-                }
+                let width = if polar_major { 8.*PI*scale } else { 4.*PI*scale };
+                let height = if polar_major { PI*scale } else { 2.*PI*scale };
+                let mut points = vec![(0.,0.),(width,0.),(width,-height),(0.,-height)];
                 prepared.add_steiner_points(&mut points, &mut Vec::new());
                 let mut angles: Vec<_> = points
                     .iter()
-                    .map(|&(x, y)| (x.hypot(y) - base) / radial_scale)
+                    .map(|&(x, y)| if polar_major { -y/scale } else { x/(4.*scale) })
                     .collect();
                 angles.sort_by(f64::total_cmp);
                 let gap = angles
@@ -2639,7 +2677,7 @@ mod tests {
     fn assert_band_tessellates(
         surface: Surface,
         mut vertices: Vec<Vertex>,
-        edges: Vec<(usize, usize)>,
+        mut edges: Vec<(usize, usize)>,
     ) {
         let prepared = surface
             .prepare(&vertices, &edges, true, 0., false)
@@ -2657,25 +2695,25 @@ mod tests {
                 "both toroidal charts must preserve outward surface orientation"
             );
         }
+        assert!(prepared.cut_periodic(&mut points,&mut edges,&mut vertices,0.01).unwrap());
         let boundary_len = points.len();
-        let radial_min = points
-            .iter()
-            .map(|(u, v)| u.hypot(*v))
-            .fold(f64::INFINITY, f64::min);
-        let radial_max = points
-            .iter()
-            .map(|(u, v)| u.hypot(*v))
-            .fold(f64::NEG_INFINITY, f64::max);
+        let (xmin,xmax,ymin,ymax) = PreparedSurface::bbox(&points);
         prepared.add_steiner_points(&mut points, &mut vertices);
         assert!(points.len() > boundary_len);
         assert_eq!(points.len(), vertices.len());
-        assert!(points[boundary_len..].iter().all(|(u, v)| {
-            let radius = u.hypot(*v);
-            radius > radial_min && radius < radial_max
-        }));
+        assert!(points[boundary_len..].iter().all(|&(u,v)| u>xmin && u<xmax && v>ymin && v<ymax));
         let mut triangulation = cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
         triangulation.run().unwrap();
         assert!(triangulation.triangles().next().is_some());
+        let mut area = 0.;
+        for (a,b,c) in triangulation.triangles() {
+            let [a,b,c] = [a,b,c].map(|i|DVec2::new(points[i].0,points[i].1));
+            area += ((b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x))*0.5;
+        }
+        // Two winding circles bound exactly one rectangular period. This
+        // checks seam closure and coverage, not unrefined facet-normal quality.
+        let expected = (xmax-xmin)*(ymax-ymin);
+        assert!((area-expected).abs() < 1e-10*expected);
     }
 
     fn test_torus() -> Surface {
@@ -2713,13 +2751,13 @@ mod tests {
         append_ring(&mut vertices,&mut edges,0.37+PI,false,true);
         let surface = test_torus();
         let prepared = surface.prepare(&vertices,&edges,true,0.,false).unwrap();
-        let FaceChart::Torus { radial_start: expected,.. } = prepared.chart else { unreachable!() };
+        let FaceChart::TorusStrip { cut: expected,.. } = prepared.chart else { unreachable!() };
         let start = vertices.len();
         vertices.extend([vertices[0].clone(),vertices[32].clone()]);
         edges.extend([(start,start+1),(start+1,start)]);
         let prepared = surface.prepare(&vertices,&edges,true,0.,true).unwrap();
-        let FaceChart::Torus { radial_start,.. } = prepared.chart else { unreachable!() };
-        assert_eq!(radial_start,expected);
+        let FaceChart::TorusStrip { cut,.. } = prepared.chart else { unreachable!() };
+        assert_eq!(cut,expected);
     }
 
     #[test]
@@ -2757,20 +2795,21 @@ mod tests {
                     let directed: Vec<_> = edges.iter().map(|&(a,b)| if reverse { (b,a) } else { (a,b) }).collect();
                     for same_sense in [true, false] {
                         let prepared = surface.prepare(&vertices, &directed, same_sense, 0., false).unwrap();
-                        let FaceChart::Torus { polar_major: selected, radial_start } = prepared.chart else { unreachable!() };
-                        assert_eq!(selected, polar_major);
+                        let FaceChart::TorusStrip { periodic,cut,scale } = prepared.chart else { unreachable!() };
+                        assert_eq!(periodic == 0, polar_major);
+                        let radial = 1-periodic;
                         let complement = reverse == same_sense;
-                        assert_eq!((radial_start-start).rem_euclid(2.*PI) < width, complement);
+                        assert_eq!((cut-start).rem_euclid(2.*PI) < width, complement);
                         let points = prepared.lower_verts(&vertices).unwrap();
-                        let radii: Vec<_> = points.iter().map(|&(x,y)| x.hypot(y)).collect();
-                        let min = radii.iter().copied().fold(f64::INFINITY, f64::min);
-                        let max = radii.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                        let scale = if polar_major { 0.1 } else { 4.9 };
+                        let values: Vec<_> = points.iter().map(|&(x,y)| [x,y][radial]).collect();
+                        let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+                        let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                         let expected = if complement { 2.*PI-width } else { width };
-                        assert!(((max-min)/scale-expected).abs() < 1e-10);
-                        // The middle of the annulus must raise into the intended
+                        assert!(((max-min)/scale[radial].abs()-expected).abs() < 1e-10);
+                        // The middle of the strip must raise into the intended
                         // source interval, not merely roundtrip its shared bounds.
-                        let p = prepared.raise(DVec2::new((min+max)*0.5, 0.)).unwrap();
+                        let mut middle = DVec2::zeros(); middle[radial] = (min+max)*0.5;
+                        let p = prepared.raise(middle).unwrap();
                         let angle = if polar_major { p.x.atan2(p.y.hypot(p.z)-4.9) } else { p.y.atan2(p.z) };
                         assert_eq!((angle-start).rem_euclid(2.*PI) < width, !complement);
                     }
@@ -2780,7 +2819,7 @@ mod tests {
     }
 
     #[test]
-    fn full_major_toroidal_band_has_non_crossing_annular_contours() {
+    fn full_major_toroidal_band_covers_its_periodic_strip_once() {
         let mut vertices = Vec::new();
         let mut edges = Vec::new();
         append_ring(&mut vertices, &mut edges, 1.2, true, false);
@@ -2789,7 +2828,7 @@ mod tests {
     }
 
     #[test]
-    fn full_minor_toroidal_band_uses_the_other_annular_chart() {
+    fn full_minor_toroidal_band_covers_its_periodic_strip_once() {
         let mut vertices = Vec::new();
         let mut edges = Vec::new();
         append_ring(&mut vertices, &mut edges, 1.2, false, false);

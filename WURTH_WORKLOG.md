@@ -2,6 +2,29 @@
 
 ## Oracle cohort 3 — 2026-09-07
 
+### Use intrinsic strips for regular tori
+
+The remaining WPCC area excess comes from an ill-conditioned annulus: a
+0.56 mm minor circle is mapped around a chart radius over 100 mm. Positive
+UV winding does not prevent folded spatial facets under this nonlinear map.
+Use scaled angular coordinates and the existing periodic spline seam cutter
+instead. Share mapped-period data across boundary refinement and cutting;
+sample both intrinsic angular directions without an absolute chart-unit grid.
+
+WPCC-760308100110's area excess drops from 659.12 to 2.669 mm² and its sampled
+distances are 0.02420/0.01820 mm. All 12 WPCC models, CAIR-1340 and RSTV now
+pass the retained-reference comparison. The LED pole is still unresolved at
+this checkpoint. Evidence: `local/cohort3/strip-after`. All 151 release
+library tests pass. The 348-input native replay completes 346 models, with
+only the existing LED and source-invalid EE13 errors; no status regressions.
+
+Correct the earlier TBL inference below: OCCT splits a source planar face;
+the apparent extra caps were not invented faces. Exact STEP topology instead
+proves that distinct bounds share vertices/tangencies, violating FACE IP2/IP3.
+Exclude the three TBL-691309310006/008/012 sources on that evidence, not on
+transfer healing alone. Evidence: `local/cohort3/tbl-family-exclusions.json`
+and `tbl-shell-rca/exact-geometry.json`.
+
 ### Measure torus chord error against its meridian
 
 Residual WPCC-760308100110 has correct reverse coverage but folded/excess
