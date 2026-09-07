@@ -1,5 +1,26 @@
 # Würth and KiCad STEP repair worklog
 
+### Give bounded two-pole splines a lens chart
+
+MJ615016137621 surfaces 250/251/253/255 have two collapsed ends. One is exact;
+the other differs by approximately 1e-14 in decimal STEP controls. The polar
+chart stretches that second pole around its rim, so refinement keeps bisecting
+an already sub-ULP spatial chord while the chart still spans a large angle.
+
+A convex lens chart collapses both ends and stays invertible in the interior.
+Classification admits coordinate roundoff at the opposite end of an established
+pole, not the potentially much larger source uncertainty. Original spatial
+boundary vertices remain unchanged. The analytic regression exercises both
+parameter orientations, interior inverse maps, and the near-collapsed trim.
+The valid connector now completes (`local/cohort-lens-mj`). All 144 workspace
+library tests pass; the combined 56-file oracle replay remains 55 pass / one
+invalid-source mismatch (`local/cohort-lens-oracle`).
+
+The complete pre-fix KiCad replay is also finished: 7,245 ok / 6 tessellation
+errors out of 7,251. Both obsolete experimental full sweeps are stopped through
+their systemd workload scopes; their completed per-case evidence is retained.
+Current replay resources are reserved for the accepted fixes and open failures.
+
 ### Full replay exposes refinement regressions; preserve red owners
 
 The committed `cohort-clean-worker` completes all 7,328 Würth inputs with

@@ -21,12 +21,17 @@ pub enum SplineChart {
         scale: DVec2,
         bounds: [DVec2; 2],
     },
+    Lens {
+        radial: usize,
+        bounds: [DVec2; 2],
+    },
 }
 
 impl SplineChart {
     fn periods(&self) -> [Option<f64>;2] {
         match *self {
             Self::Cartesian { periods,.. } => periods,
+            Self::Lens { .. } => [None,None],
             Self::Polar { angular,scale,bounds,.. } => {
                 let mut periods = [None,None];
                 periods[angular] = (scale[angular] == bounds[1][angular]-bounds[0][angular]).then_some(scale[angular]);
@@ -38,6 +43,11 @@ impl SplineChart {
     fn lower(&self, raw: DVec2) -> DVec2 {
         match *self {
             Self::Cartesian { v_scale,.. } => DVec2::new(raw.x, raw.y * v_scale),
+            Self::Lens { radial,bounds } => {
+                let mut p = (raw-bounds[0]).component_div(&(bounds[1]-bounds[0]));
+                p[1-radial] = (2.*p[1-radial]-1.) * 4.*p[radial]*(1.-p[radial]);
+                p
+            }
             Self::Polar {
                 angular,
                 origin,
@@ -59,6 +69,17 @@ impl SplineChart {
     fn raw(&self, mapped: DVec2) -> Option<DVec2> {
         match *self {
             Self::Cartesian { v_scale,.. } => Some(DVec2::new(mapped.x, mapped.y / v_scale)),
+            Self::Lens { radial,bounds } => {
+                let t = mapped[radial];
+                if !(0. ..=1.).contains(&t) { return None; }
+                let width = 4.*t*(1.-t);
+                if width == 0. && mapped[1-radial] != 0. { return None; }
+                let s = if width == 0. { 0.5 } else { (mapped[1-radial]/width+1.)*0.5 };
+                if s < -8.*EPSILON || s > 1.+8.*EPSILON { return None; }
+                let mut p = mapped;
+                p[1-radial] = s.clamp(0.,1.);
+                Some(bounds[0]+p.component_mul(&(bounds[1]-bounds[0])))
+            }
             Self::Polar {
                 angular,
                 origin,
@@ -186,6 +207,16 @@ impl Surface {
                 let max_point =
                     surf.surf
                         .rational_boundary_is_point(radial, bounds[1][radial], pole_tolerance);
+                // A bounded patch with two collapsed ends is a lens, not a
+                // polar disk with the second pole stretched around its rim.
+                // Include only coordinate roundoff at the opposite end of an
+                // established pole; source uncertainty must not erase a strip.
+                let roundoff = 8.*EPSILON*(surf.surf.point(bounds[0]).norm()+surf.surf.point(bounds[1]).norm());
+                if !periodic[angular] && (min_point || max_point)
+                    && surf.surf.rational_boundary_is_point(radial,bounds[0][radial],roundoff)
+                    && surf.surf.rational_boundary_is_point(radial,bounds[1][radial],roundoff) {
+                    return Some(SplineChart::Lens { radial,bounds });
+                }
                 if min_point == max_point {
                     return None;
                 }
@@ -1988,6 +2019,48 @@ mod tests {
             (a - b).norm() > 0.5,
             "a short edge must retain distinct chart ends"
         );
+    }
+
+    #[test]
+    fn two_pole_spline_chart_preserves_the_boundary_at_both_ends() {
+        for radial in [0,1] {
+            let mut controls = vec![
+                vec![DVec4::new(10.,10.,0.,1.);2],
+                vec![DVec4::new(11.,9.,1.,1.),DVec4::new(11.,11.,1.,1.)],
+                vec![DVec4::new(12.,10.,0.,1.),DVec4::new(12.,10.+1e-14,0.,1.)],
+            ];
+            let mut knots = [
+                KnotVector::from_multiplicities(2,&[0.,1.],&[3,3]),
+                KnotVector::from_multiplicities(1,&[0.,1.],&[2,2]),
+            ];
+            if radial == 1 {
+                controls = (0..2).map(|j| controls.iter().map(|row|row[j]).collect()).collect();
+                knots.swap(0,1);
+            }
+            let [u,v] = knots;
+            let sampled = SampledSurface::new(NURBSSurface::new(true,true,u,v,controls));
+            let chart = Surface::spline_chart(&sampled,0.,false);
+            assert!(matches!(chart,SplineChart::Lens { .. }));
+            for t in [0.1,0.5,0.9] {
+                for s in [0.,0.25,1.] {
+                    let raw = if radial == 0 { DVec2::new(t,s) } else { DVec2::new(s,t) };
+                    assert!((chart.raw(chart.lower(raw)).unwrap()-raw).norm() < 1e-14);
+                }
+            }
+            let mut raw = DVec2::repeat(1.);
+            raw[1-radial] = 1./7.;
+            let a = sampled.surf.point(raw);
+            raw[1-radial] = 0.25;
+            let b = sampled.surf.point(raw);
+            let surface = Surface::new_nurbs(sampled);
+            let mut verts = [a,b].map(|pos| Vertex { pos,norm:DVec3::zeros(),color:DVec3::zeros() }).to_vec();
+            let mut edges = vec![(0,1)];
+            let prepared = surface.prepare(&verts,&edges,true,0.,false).unwrap();
+            let mut pts = prepared.lower_verts(&verts).unwrap();
+            prepared.refine_boundary(&mut pts,&mut edges,&mut verts,0.01).unwrap();
+            assert_eq!(verts.len(),2);
+            assert_eq!([verts[0].pos,verts[1].pos],[a,b]);
+        }
     }
 
     #[test]
