@@ -1,5 +1,19 @@
 # Würth and KiCad STEP repair worklog
 
+### Balanced inverse subdivision
+
+The CIRCM12-643210100404 timeout localizes before surface 19948 reaches CDT.
+Instrumented inverse queues retain almost the full v range while u shrinks
+below 1e-5; the finite incumbent is not the issue. Curvature-driven splitting
+does not measure uncertainty in the distance bound. Replace that heuristic
+with balanced normalized parameter widths. Add a supporting-plane bound in
+the incumbent residual direction, preserving correlations lost by boxes.
+The exact oblique-extrusion endpoint regression and all 53 NURBS tests pass
+in 0.27 s; CIRCM12 now completes in 20.28 s rather than exceeding 120 s.
+No inverse tolerance or oracle acceptance limit changes. The connector replay
+also includes the in-progress boundary/interior refinement. Evidence:
+`/tmp/{trace-circm12.log,balanced-tests.log,balanced-circm12.json}`.
+
 ### Finite-patch inverse bounds and performance regression
 
 The wider replay caught a regression in the curvature-directed inverse search:

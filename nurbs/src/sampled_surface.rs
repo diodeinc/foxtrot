@@ -516,15 +516,24 @@ where
             let bitangent = normal.cross(&tangent);
             let mut slab = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
             let mut bounds = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
+            let residual = result.map_or(DVec3::zeros(), |uv| self.surf.derivs_relative_to::<0>(uv, p)[0][0]);
+            let direction = residual.try_normalize(0.).unwrap_or_else(DVec3::zeros);
+            let mut support = f64::INFINITY;
             for q in controls.iter().flatten().copied().map(crate::nd_curve::cartesian) {
                 bounds[0] = bounds[0].inf(&q); bounds[1] = bounds[1].sup(&q);
                 let offset = DVec3::new((q-p).dot(&normal), (q-p).dot(&tangent), (q-p).dot(&bitangent));
                 slab[0] = slab[0].inf(&offset); slab[1] = slab[1].sup(&offset);
+                support = support.min((q-p).dot(&direction));
             }
+            // Any supporting plane bounds the hull. The incumbent residual
+            // preserves correlation along oblique extrusion axes that boxes
+            // lose, especially at constrained endpoint minima.
+            let roundoff = PROJECTION_TOL * (p.norm() + bounds[0].abs().sup(&bounds[1].abs()).norm());
             // An orthonormal control box also bounds distance beyond a finite
             // patch edge; the normal slab alone only bounds its infinite plane.
             let lower = (bounds[0]-p).sup(&(p-bounds[1])).sup(&DVec3::zeros()).norm()
-                .max(slab[0].sup(&(-slab[1])).sup(&DVec3::zeros()).norm());
+                .max(slab[0].sup(&(-slab[1])).sup(&DVec3::zeros()).norm())
+                .max(support-roundoff);
             if lower + tolerance >= error.sqrt() { continue; }
             for seed in [lo, hi, DVec2::new(lo.x, hi.y), DVec2::new(hi.x, lo.y), mid] {
                 if let Some(uv) = self.newtons_method_inner(p, seed, 256, spans.map(|s| s..s+1)) {
@@ -533,21 +542,10 @@ where
                 }
             }
             if error.sqrt() <= tolerance { break; }
-            // Resolve curvature before subdividing a straight extrusion axis.
-            // Length-based splitting needlessly tiles that axis at the much
-            // finer resolution required by the curved cross section.
-            let bend = |a,b,c| (crate::nd_curve::cartesian(a)-2.*crate::nd_curve::cartesian(b)
-                +crate::nd_curve::cartesian(c)).norm();
-            let u_size = controls.windows(3).flat_map(|rows| (0..rows[0].len())
-                .map(move |j| bend(rows[0][j], rows[1][j], rows[2][j]))).fold(0., f64::max);
-            let v_size = controls.iter().flat_map(|row| row.windows(3)
-                .map(|w| bend(w[0],w[1],w[2]))).fold(0., f64::max);
-            // Below coordinate resolution, curvature cannot choose a useful axis:
-            // roundoff in a straight direction must not starve the other one.
-            let roundoff = PROJECTION_TOL * bounds[0].abs().sup(&bounds[1].abs()).norm();
-            let axis = if u_size.max(v_size) > roundoff { usize::from(v_size > u_size) }
-                else { usize::from((hi.y-lo.y)/(self.surf.v_knots[spans[1]+1]-self.surf.v_knots[spans[1]])
-                    > (hi.x-lo.x)/(self.surf.u_knots[spans[0]+1]-self.surf.u_knots[spans[0]])) };
+            // Both parameter widths must shrink. Curvature is not a measure
+            // of distance-bound uncertainty and can indefinitely starve an axis.
+            let axis = usize::from((hi.y-lo.y)/(self.surf.v_knots[spans[1]+1]-self.surf.v_knots[spans[1]])
+                > (hi.x-lo.x)/(self.surf.u_knots[spans[0]+1]-self.surf.u_knots[spans[0]]));
             if mid[axis] == lo[axis] || mid[axis] == hi[axis] { continue; }
             let mut halves = [controls.clone(), controls.clone()];
             if axis == 0 {
@@ -609,6 +607,22 @@ mod tests {
 
     fn close(a: f64, b: f64, tolerance: f64) {
         assert!((a - b).abs() <= tolerance, "{} != {}", a, b);
+    }
+
+    #[test]
+    fn inverse_bounds_resolve_endpoint_minima_on_oblique_extrusions() {
+        let sampled = SampledSurface::new(NDBSplineSurface::new(true, true,
+            KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [(0.,0.), (0.5,0.5), (1.,2.)].iter().map(|&(x,z)|
+                vec![DVec3::new(x,0.,z), DVec3::new(x+1.,1.,z)]).collect()));
+        // S(u,v)=(u+v,v,u+u²); the minimum is on u=0, not
+        // stationary in that direction. Its residual is not surface-normal.
+        let target = DVec3::new(0.4,0.6,0.);
+        let uv = sampled.uv_from_point(target).unwrap();
+        close(uv.x, 0., 1e-10);
+        close(uv.y, 0.5, 1e-10);
+        close((sampled.surf.point(uv)-target).norm_squared(), 0.02, 1e-12);
     }
 
     #[test]
