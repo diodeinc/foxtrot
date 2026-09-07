@@ -1,5 +1,45 @@
 # Würth and KiCad STEP repair worklog
 
+## Oracle cohort 2 — 2026-09-07
+
+Freeze the preceding committed candidate as `local/cohort2-before-worker`
+(SHA-256 `5b10d053c883ac4960cbe27ac85ce7b64ea5a1ad62167b6e5197bab024d0a479`).
+Discovery tests 240 Würth and 240 previously untested KiCad models, in two
+deterministic 120-file batches each. Würth: 226 pass, nine oracle mismatches,
+two processing failures, three oracle timeouts. KiCad: 237 pass, three oracle
+mismatches. Stop collection at these 14 geometry/processing failures; investigate
+the three reference timeouts separately, not as proven native mesh defects.
+All source hashes, manifests, baseline meshes and reference meshes are retained
+under `local/cohort2-discovery-{wurth,wurth-batch2,kicad}`. Thresholds remain
+0.1 mm sampled distance, 5% aggregate tolerance, and 0.01 mm OCCT deflection.
+
+Initial failure families: FI7447037/7447054/7447070 excess mesh area;
+AIG8 D22L30/D30L40 displacement; two RSTV switch mismatches and one RSTV
+processing failure; TBL691308330002 and LANMX749600000 displacement;
+CMBNC7448052502 processing failure; KiCad Murata1400, Bourns3299X and CHK EI48.
+These are hypotheses pending per-face evidence, not claims that every cause is
+already known. Native face localization must include instance transforms and
+unit scaling; initial untransformed localization was wrong for several Würth
+models. `local/cohort2-rca/localization.json` records witness match residuals.
+
+### Reject incomplete OCCT reference tessellations
+
+Murata1400's 4.474 mm discrepancy is an oracle defect: OCCT exports no triangles
+for planar source face #111, despite a successful STL write and valid BRep.
+That face has exact area 405.901625 mm². Full exact area 1846.994855 mm² agrees
+with native 1846.232154, not the incomplete OCCT mesh's 1440.814250 mm².
+The oracle now requires a nonempty triangulation for every transferred face.
+It preserves a partial STL for diagnosis but rejects it as a reference rather
+than asking Foxtrot to imitate missing geometry. The Murata run now explicitly
+reports unmeshed face index 4. No native geometry changes for this case.
+
+`PYTHONPATH=scripts local/occt-venv/bin/python -m unittest
+scripts/test_corpus_geometry.py scripts/test_corpus.py`: 26 tests pass, including
+a real six-face STEP box round-trip and rejection with meshing disabled.
+The first invocation without PYTHONPATH failed to import the existing harness
+test module; correcting the invocation resolves it. OCCT source/area evidence
+is retained in `local/cohort2-occt-rca/`.
+
 ### Continue trim branches without disturbing good global projections
 
 HCF2920roundwire's independent closest-point projections jump between nearby

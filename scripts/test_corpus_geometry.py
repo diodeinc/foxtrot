@@ -104,6 +104,28 @@ class MeshMetricsTests(unittest.TestCase):
                 corpus_geometry.step_to_stl("input.step", self.path)
 
 
+@unittest.skipUnless(importlib.util.find_spec("OCP"), "optional OCCT dependency not installed")
+class ReferenceCompletenessTests(unittest.TestCase):
+    def test_reference_requires_every_source_face_to_be_meshed(self):
+        from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+        from OCP.IFSelect import IFSelect_RetDone
+        from OCP.STEPControl import STEPControl_Writer, STEPControl_AsIs
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "box.step"
+            output = Path(directory) / "box.stl"
+            writer = STEPControl_Writer()
+            writer.Transfer(BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), STEPControl_AsIs)
+            self.assertEqual(writer.Write(str(source)), IFSelect_RetDone)
+            corpus_geometry.step_to_stl(source, output)
+            self.assertAlmostEqual(corpus_geometry.mesh_metrics(output)["surface_area"], 22.0)
+            # Simulate meshing failure on genuine transferred topology, not a
+            # fabricated mesh-metric result. A writable STL is not sufficient.
+            with mock.patch("OCP.BRepMesh.BRepMesh_IncrementalMesh"):
+                with self.assertRaisesRegex(RuntimeError, "faces unmeshed"):
+                    corpus_geometry.step_to_stl(source, output)
+
+
 @unittest.skipUnless(
     all(importlib.util.find_spec(name) for name in ("trimesh", "scipy", "rtree")),
     "optional surface oracle dependencies not installed",

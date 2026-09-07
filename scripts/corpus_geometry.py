@@ -258,11 +258,16 @@ def step_to_stl(
 ) -> None:
     """Convert STEP to binary STL with OCCT, scaling STEP units to millimeters."""
     try:
+        from OCP.BRep import BRep_Tool
         from OCP.BRepMesh import BRepMesh_IncrementalMesh
         from OCP.IFSelect import IFSelect_RetDone
         from OCP.Interface import Interface_Static
         from OCP.STEPControl import STEPControl_Reader
         from OCP.StlAPI import StlAPI_Writer
+        from OCP.TopAbs import TopAbs_FACE
+        from OCP.TopExp import TopExp_Explorer
+        from OCP.TopLoc import TopLoc_Location
+        from OCP.TopoDS import TopoDS
     except ImportError as error:
         raise RuntimeError(
             "STEP conversion requires the optional 'cadquery-ocp' package "
@@ -283,9 +288,25 @@ def step_to_stl(
     shape = reader.OneShape()
     # Reference chords are finer than the default 0.1 mm comparison tolerance.
     BRepMesh_IncrementalMesh(shape, 0.01, False, 0.1, True)
+    # StlAPI can successfully write a partial mesh. Never use one as an oracle:
+    # a missing reference face falsely implicates correct native geometry.
+    missing = []
+    faces = TopExp_Explorer(shape, TopAbs_FACE)
+    index = 0
+    while faces.More():
+        index += 1
+        face = TopoDS.Face_s(faces.Current())
+        mesh = BRep_Tool.Triangulation_s(face, TopLoc_Location())
+        if mesh is None or mesh.NbTriangles() == 0:
+            missing.append(index)
+        faces.Next()
     writer = StlAPI_Writer()
     writer.ASCIIMode = False
-    if not writer.Write(shape, os.fspath(output_path)):
+    written = writer.Write(shape, os.fspath(output_path))
+    if missing:
+        # Keep the partial STL as diagnostic evidence, not an accepted reference.
+        raise RuntimeError(f"OCCT left faces unmeshed (1-based face indices): {missing}")
+    if not written:
         raise RuntimeError(f"OCCT failed to write STL file: {output_path}")
 
 
