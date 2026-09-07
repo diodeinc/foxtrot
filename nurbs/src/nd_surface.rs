@@ -157,17 +157,27 @@ impl<const D: usize> NDBSplineSurface<D> {
         })
     }
 
-    /// A regular closed direction needs more than coincident endpoints.
-    /// Exclude a control-net extrusion contained within source uncertainty;
-    /// identifying its ends would turn a thin strip into an artificial loop.
+    /// Matching ends only suggest closure when the sweep has resolved extent.
+    /// Measure actual surface displacement: rational weight variation alone
+    /// does not distinguish a loop from a small curved fillet.
     pub fn rational_direction_is_closed(&self, parameter: usize, uncertainty: f64) -> bool {
         if !self.rational_boundaries_coincide(parameter, uncertainty) { return false; }
         let w = D-1;
-        self.control_points.iter().enumerate().any(|(u,row)| row.iter().enumerate().any(|(v,p)| {
-            let reference = if parameter == 0 { self.control_points[0][v] } else { self.control_points[u][0] };
-            let anchor = if parameter == 0 { self.control_points[u][0] } else { self.control_points[0][v] };
-            p[w]/anchor[w] != reference[w]/self.control_points[0][0][w]
-                || (0..w).fold(0.0_f64, |distance,i| distance.hypot(p[i]/p[w]-reference[i]/reference[w])) > uncertainty
+        let sites = |knots: &KnotVector| {
+            let count = knots.degree()+1;
+            (knots.degree()..knots.len()-count).filter(|&i| knots[i] < knots[i+1])
+                .flat_map(|i| (0..count).map(move |j| knots[i]+(knots[i+1]-knots[i])*(j as f64+0.5)/count as f64))
+                .collect::<Vec<_>>()
+        };
+        let us = sites(&self.u_knots);
+        let vs = sites(&self.v_knots);
+        us.iter().any(|&u| vs.iter().any(|&v| {
+            let uv = DVec2::new(u,v);
+            let mut start = uv;
+            start[parameter] = if parameter == 0 { self.min_u() } else { self.min_v() };
+            let p = self.surface_point(uv);
+            let q = self.surface_point(start);
+            (0..w).fold(0.0_f64, |distance,i| distance.hypot(p[i]/p[w]-q[i]/q[w])) > uncertainty
         }))
     }
 
@@ -465,6 +475,20 @@ mod tests {
         surface.control_points[1][1].x = 0.;
         surface.control_points[1][1] *= 2.;
         assert!(surface.rational_direction_is_closed(0,1e-8));
+    }
+
+    #[test]
+    fn a_small_rational_fillet_does_not_imply_a_period() {
+        let weights = [1.,0.5_f64.sqrt(),1.];
+        let controls = [0.,1.].iter().map(|&x| {
+            [(0.,0.05),(0.,0.),(0.05,0.)].iter().zip(weights).map(|(&(y,z),w)|
+                DVec4::new(x*w,y*w,z*w,w)).collect()
+        }).collect();
+        let surface = NDBSplineSurface::new(true,true,
+            KnotVector::from_multiplicities(1,&[0.,1.],&[2,2]),
+            KnotVector::from_multiplicities(2,&[0.,1.],&[3,3]),controls);
+        assert!(surface.rational_boundaries_coincide(1,0.2));
+        assert!(!surface.rational_direction_is_closed(1,0.2));
     }
 
     #[test]

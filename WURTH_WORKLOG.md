@@ -1,5 +1,27 @@
 # Würth and KiCad STEP repair worklog
 
+### Require geometric extent before inferring periodicity
+
+SMA60312102114506 declares 0.2 mm uncertainty. Its 0.05 mm rational fillets
+have unequal interior weights; the control-weight test incorrectly inferred
+a second periodic direction and wrapped the open fillet ends together.
+Adjacent f64 chart values then lifted to positions separated by 0.05 mm.
+No amount of mesh subdivision can resolve that discontinuity.
+
+Closure inference now measures actual sampled displacement from the starting
+iso-curve over every knot span. Weight changes alone are not physical extent.
+The new rational-fillet regression preserves the existing resolved-loop and
+weighted-loop tests. All 145 workspace library tests pass. The representative
+SMA completes; the expanded 41-case replay has 33 passes, six other face-error
+cases and two timeouts (`local/cohort-extent-regressions`). The unchanged
+oracle replay remains 55 pass / one invalid-source mismatch.
+
+Independent OCCT transfer/validity checks cover all 272 newly regressed inputs:
+246 valid, 26 invalid, zero unknown; every input hash and root transfer matches.
+HCF2920roundwire, LQS5020, CMANC7848040382, MJ615024143921 and RPSMA63012242124506
+are all valid after OCCT transfer. Their remaining failures are not dismissed
+as invalid sources. Evidence: `local/cohort-new-source-validity.{json,jsonl}`.
+
 ### Give bounded two-pole splines a lens chart
 
 MJ615016137621 surfaces 250/251/253/255 have two collapsed ends. One is exact;
