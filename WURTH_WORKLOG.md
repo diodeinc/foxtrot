@@ -2,6 +2,90 @@
 
 ## Oracle cohort 2 — 2026-09-07
 
+### Reopen Coilcraft 2222SQ-221: stale views and real facet error
+
+The user reports that 2222SQ-221 still looks wrong. Investigate it explicitly,
+despite its earlier OCCT exclusion. The main spline is not dismissed because
+the complete reference has invalid/unmeshed caps. Source SHA-256:
+`433d6e566babe1b3539dfb3205615c8c782d3f980bbf3e9022f2bb5d362a6a72`.
+
+Two different stale review surfaces reproduce the report:
+
+- The browser demo serves a September 6 WASM build, producing 3,038 triangles
+  with obvious spikes/crossed surfaces. Rebuild the real wasm32 release and
+  regenerate the no-modules bindings with wasm-bindgen 0.2.128. An ordinary
+  reload still uses cached worker subresources; explicitly cache-busted asset
+  URLs produce 96,001 triangles and complete processing, matching native count.
+  Rebuilt WASM SHA-256 is
+  `563c5d6c4c2a437f3771ea720cb804b7f83245f23e670f0ffdc2993f7e96bb72`.
+  Native and WASM raw buffer digests differ; do not claim bytewise parity.
+- The original three-pane report's "After" is also old: 130,173 triangles.
+  Its noisy bands are real facet geometry, not merely a flat-normal shader
+  implementation difference. CPU-computed face normals and GPU derivative
+  normals render the same bad bands. The frozen pre-scale worker reproduces
+  that report STL byte-for-byte. A controlled experiment reverting only the
+  rational chart-scale calculation also reproduces it byte-for-byte.
+
+The existing Cartesian-per-knot-unit fix changes this face's v scale from
+11.7702590787 to 0.9355334418. The old homogeneous/parameter-unit mismatch
+causes severely skewed facets; numerical proximity alone misses their poor
+normal fidelity. Compare the emitted f64 facets to derivatives of the original
+STEP surface #616, respecting face #17's `same_sense = FALSE`:
+
+| Main spline diagnostic | Published old After | Current native |
+| --- | ---: | ---: |
+| Facets on face #17 | 129,070 | 94,660 |
+| Main-face area (mm²) | 371.507555 | 360.294820 |
+| Area with facet-normal error >8° | 21.1296% | 0.0748% |
+| Area with facet-normal error >25° | 13.0143% | 0.00518% |
+| Whole-model mesh area (mm²) | 430.057263 | 418.841187 |
+
+The partial OCCT mesh has area 419.131182 mm², but this is corroboration only.
+The old area discrepancy was within the oracle's 5% limit; its sampled
+distances also passed. Neither gate establishes good-looking facets. These
+angle cutoffs are diagnostic measurements, not newly invented acceptance gates.
+An initial orientation probe omitted `same_sense`; the saved reproducible
+`check_normals.py` corrects that source-contract error.
+
+Consult the oracle about the specific remaining ambiguity: can centroid-only
+distance to an unrestricted nearby spline point accept nonlocal chords or
+duplicate coverage? It confirms a real limitation of that predicate, but not
+a demonstrated current Coilcraft defect. Follow its advice with a face-local
+f64 XYZ/UV capture rather than reprojecting f32 STL to invent ownership:
+
+- Evaluate ten source-patch samples per current main-face triangle. Local
+  point-to-corresponding-triangle error reaches 0.0640 mm, but nearest distance
+  to the whole emitted face is only 0.013464 mm at those selected worst points.
+  Of 94,660 selected probes, 19 exceed 0.01 mm, none exceed 0.1 mm. The maxima
+  are near the sweep ends. Local parameter distortion is not by itself proof
+  of missing global coverage; small end-region approximation errors remain.
+- Test 544,565 candidate triangle pairs after accounting for duplicated spatial
+  seam vertices: no proper non-adjacent intersection witness. This does not
+  certify watertightness or rule out coplanar/adjacent overlap. The first probe
+  incorrectly counted shared seam edges; the saved checker excludes them.
+  The old-mesh probe has three candidates including a roundoff-offset seam;
+  do not present them as proven self-intersections.
+
+Evidence and replayable diagnostic scripts are under
+`local/coilcraft221-investigation/`. Patch sampling peaks at about 449 MiB;
+the current intersection scan takes 9.84 s and about 82 MiB. Experimental
+instrumentation and the old-scale counterfactual are removed. Rebuild the
+normal release worker; `cmp` confirms it is byte-identical to the frozen
+current `cohort2-scale-worker`. No new native workaround is committed.
+
+Publish an inspected, same-camera, same-flat-shading comparison of the old
+published After / actual current code / explicitly incomplete OCCT reference:
+https://t-03gt7gvkes26clqzi7ocdrmrw-p26812.onamp.dev/
+The DOM confirms three canvases and triangle counts 130,173 / 96,001 / 111,772.
+The warning explicitly withholds full oracle approval. Screenshot:
+`.amp/in/artifacts/coilcraft221-old-report-current-oracle.png`.
+Keep historical reports unchanged; this investigation supersedes their
+"current After" interpretation for this model. Save intermediate captures with
+the local evidence, remove temporary duplicate exports, and close the browser.
+System memory returns to about 1.3 GiB used / 30 GiB available, with 9 GiB disk
+free. Remaining methodological work is normal/coverage-sensitive acceptance,
+not another density increase or pretending the partial OCCT mesh is complete.
+
 ### Apply the OCCT-supported corpus policy
 
 The user explicitly excludes models OCCT rejects or cannot fully tessellate
