@@ -536,6 +536,13 @@ where
                 .max(support-roundoff);
             if lower + tolerance >= error.sqrt() { continue; }
             for seed in [lo, hi, DVec2::new(lo.x, hi.y), DVec2::new(hi.x, lo.y), mid] {
+                // Every evaluated point is a feasible upper bound. Accelerate
+                // improvements with Newton, rather than repeatedly solving the
+                // same knot cell from seeds already worse than the incumbent.
+                let seed_error = distance(seed);
+                if seed_error >= error { continue; }
+                error = seed_error;
+                result = Some(seed);
                 if let Some(uv) = self.newtons_method_inner(p, seed, 256, spans.map(|s| s..s+1)) {
                     let d = distance(uv);
                     if d < error { error = d; result = Some(uv); }

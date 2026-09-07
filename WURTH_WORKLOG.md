@@ -1,5 +1,14 @@
 # Würth and KiCad STEP repair worklog
 
+### Reuse feasible inverse upper bounds
+
+Subdivision samples are themselves feasible solutions. Keep improving sample
+positions as upper bounds and run Newton only to accelerate those improvements,
+instead of repeatedly solving a knot cell from already-worse samples. This
+retains global control-hull search and its precision. NURBS 53 / triangulation
+56 tests pass; the CIRCM12 probe drops from 20.28 s to 5.17 s and remains
+complete. Evidence: `/tmp/incumbent-{tests.log,circm12.json}`.
+
 ### Balanced inverse subdivision
 
 The CIRCM12-643210100404 timeout localizes before surface 19948 reaches CDT.
