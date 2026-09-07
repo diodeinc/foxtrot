@@ -171,6 +171,7 @@ pub(crate) enum FaceChart {
 pub struct PreparedSurface<'a> {
     surface: &'a Surface,
     chart: FaceChart,
+    uncertainty: f64,
 }
 
 impl Surface {
@@ -515,6 +516,7 @@ impl Surface {
         Ok(PreparedSurface {
             surface: self,
             chart,
+            uncertainty,
         })
     }
 }
@@ -778,6 +780,53 @@ impl PreparedSurface<'_> {
     pub fn lower_verts(&self, verts: &[Vertex]) -> Result<Vec<(f64, f64)>, Error> {
         let name = self.type_name();
         crate::timing::time(name, || self.lower_verts_inner(verts))
+    }
+
+    /// Resolve competing projection branches by walking each source contour.
+    /// Keep shared anchors fixed and retain the global result when the local
+    /// solve exceeds the source's geometric uncertainty or known minimum gap.
+    pub fn continue_trims(&self, pts: &mut [(f64,f64)], verts: &[Vertex], edges: &[(usize,usize)], tolerance: f64) {
+        let (Surface::NURBS { surf }, FaceChart::Spline(chart)) = (self.surface,&self.chart) else { return; };
+        let mut anchored = vec![false;pts.len()];
+        for &(a,b) in edges {
+            anchored[a] = true;
+            if anchored[b] { continue; }
+            anchored[b] = true;
+            let Some(seed) = Self::spline_raw(surf,chart,DVec2::new(pts[a].0,pts[a].1)) else { continue; };
+            let Some(raw) = Self::spline_raw(surf,chart,DVec2::new(pts[b].0,pts[b].1)) else { continue; };
+            let p = verts[b].pos;
+            let start = verts[a].pos;
+            let chord = p-start;
+            let length2 = chord.norm_squared();
+            let path_error = |mut end: DVec2| {
+                for axis in 0..2 {
+                    if let Some(period) = chart.periods()[axis] {
+                        end[axis] = Self::unwrap_near(end[axis],seed[axis],period);
+                    }
+                }
+                [0.25,0.5,0.75].iter().map(|&t| {
+                    let mut uv = seed+(end-seed)*t;
+                    uv.x = Self::spline_parameter(uv.x,surf.surf.min_u(),surf.surf.max_u(),chart.periods()[0].is_none());
+                    uv.y = Self::spline_parameter(uv.y,surf.surf.min_v(),surf.surf.max_v(),chart.periods()[1].is_none());
+                    let q = surf.surf.point(uv)-start;
+                    let along = if length2 == 0. { 0. } else { (q.dot(&chord)/length2).clamp(0.,1.) };
+                    (q-along*chord).norm()
+                }).fold(0.,f64::max)
+            };
+            // A nearby global minimum needs no continuation correction. Only
+            // replace a branch whose connecting surface path leaves the trim
+            // chord budget, and only with a locally feasible path inside it.
+            let budget = tolerance+self.uncertainty;
+            if path_error(raw) <= budget { continue; }
+            if let Some(local) = surf.uv_from_point_newtons_method(p,seed) {
+                let global_gap = surf.surf.derivs_relative_to::<0>(raw,p)[0][0].norm();
+                let local_gap = surf.surf.derivs_relative_to::<0>(local,p)[0][0].norm();
+                if local_gap <= global_gap.max(self.uncertainty)+32.*EPSILON*p.norm() && path_error(local) <= budget {
+                    let uv = chart.lower(local);
+                    pts[b] = (uv.x,uv.y);
+                }
+            }
+        }
     }
 
     /// Subdivision must partition the parent chart triangle. Interpolating
@@ -2019,6 +2068,28 @@ mod tests {
             (a - b).norm() > 0.5,
             "a short edge must retain distinct chart ends"
         );
+    }
+
+    #[test]
+    fn trim_continuation_preserves_a_sheet_only_within_source_uncertainty() {
+        let controls = [(0.,0.),(1.,0.),(1.,0.001),(0.,0.001)].iter()
+            .map(|&(x,z)| [0.,1.].iter().map(|&y|DVec4::new(x,y,z,1.)).collect()).collect();
+        let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(true,true,
+            KnotVector::from_multiplicities(1,&[0.,1.,2.,3.],&[2,1,1,2]),
+            KnotVector::from_multiplicities(1,&[0.,1.],&[2,2]),controls)));
+        let verts = [(0.2,0.0002),(0.3,0.00075),(0.4,0.01)].iter().map(|&(x,z)|
+            Vertex { pos:DVec3::new(x,0.5,z),norm:DVec3::zeros(),color:DVec3::zeros() }).collect::<Vec<_>>();
+        let edges = [(0,1),(1,2),(2,0)];
+        for uncertainty in [0.,0.001] {
+            let prepared = surface.prepare(&verts,&edges,true,uncertainty,false).unwrap();
+            let mut pts = prepared.lower_verts(&verts).unwrap();
+            let anchor = pts[0];
+            assert!(pts[1].0 > 2.);
+            prepared.continue_trims(&mut pts,&verts,&edges,0.01);
+            assert_eq!(pts[0],anchor);
+            assert_eq!(pts[1].0 < 1.,uncertainty > 0.);
+            assert!(pts[2].0 > 2.,"an inaccurate local branch must not replace the global projection");
+        }
     }
 
     #[test]

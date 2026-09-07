@@ -1,5 +1,50 @@
 # Würth and KiCad STEP repair worklog
 
+### Continue trim branches without disturbing good global projections
+
+HCF2920roundwire's independent closest-point projections jump between nearby
+regions of its swept spline. One closed contour acquires the wrong winding,
+leaving three unmatched ports on each periodic cut. The source has no PCURVE
+for these edges. OCCT's curve projector uses local continuation with global
+fallback, rather than independent nearest points for every sample.
+
+Walk source contours with fixed shared anchors. Keep the global projection
+unless its connecting native surface path leaves the chord/source-uncertainty
+budget; accept a local Newton branch only when both its residual and connecting
+path fit that budget. Unconditional warm starts regressed a capacitor and CRD;
+path qualification preserves both. No source vertex is moved and no triangle
+is discarded. The two-sheet test checks continuity, rejection outside the
+source budget, and preservation of the starting anchor.
+
+The combined candidate passes all 146 workspace library tests and all 53
+processing regressions. The original oracle replay remains 55 pass / one
+invalid-source mismatch (`local/cohort-trace6-*`). Independent OCCT checks of
+the two newly repaired MJ connectors and SMA connector all pass. HCF processing
+completes with 442,505 triangles; its reference contains roughly 2.5M triangles,
+so comparison exceeded the harness's 120 s limit and is rerunning against the
+retained meshes without repeating reference generation.
+
+CMANC7848040382 is a separate source inconsistency, not a failed inverse solve.
+OCCT independently confirms source curve #10238 lies 0.0531–0.0650 mm away from
+surface #9520 at tested points, versus declared uncertainty 0.001 mm. Those
+points lie on the original curve to about 2e-15 mm. The transferred OCCT shape
+passes IsValid only with raised edge tolerances (up to 0.0537 mm on this face).
+The stalled chord midpoint's 0.0717886 mm nearest distance agrees in OCCT and
+Foxtrot. Evidence: `local/cohort-cmanc-{source-consistency,occt-gap}.json`.
+No tolerance is inflated in Foxtrot to hide that inconsistency. OCCT IsValid
+after transfer alone is not proof of a consistent original STEP representation.
+
+The regenerated original-cohort report uses `cohort-trace6-oracle`, not a stale
+candidate. All 48 meshes exist, all 16 Before/After hashes differ, all input
+hashes match, and all 16 three-pane renders plus a wireframe state are inspected
+with no browser errors. Coilcraft161 remains explicitly unresolved. The report
+does not claim that the broader corpus is now free of accuracy failures.
+
+Content-addressed hardlink deduplication of 672 frozen oracle meshes preserves
+all paths and verifies every SHA-256 afterward. It links 529 duplicate files
+and recovers 735.33 MiB (`local/cohort-mesh-dedup.{log,sha256}`). No frozen worker
+duplicates are found. Approximately 12 GiB remains free.
+
 ### Require geometric extent before inferring periodicity
 
 SMA60312102114506 declares 0.2 mm uncertainty. Its 0.05 mm rational fillets

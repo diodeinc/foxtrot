@@ -1008,6 +1008,7 @@ fn advanced_face(
     // constraints at existing vertices, including samples exactly on an edge.
     let prepared = surf.prepare(&mesh.verts, &edges, same_sense, uncertainty, has_seam)?;
     let mut pts = crate::timing::time("face:lower_verts", || prepared.lower_verts(&mesh.verts))?;
+    prepared.continue_trims(&mut pts,&mesh.verts,&edges,tolerance);
     if !prepared.cut_periodic(&mut pts, &mut edges, &mut mesh.verts, tolerance)? {
         crate::timing::time("face:unwrap_periodic", || {
             prepared.unwrap_periodic(&mut pts, &edges, &unwrap_ranges)
