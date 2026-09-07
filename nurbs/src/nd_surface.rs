@@ -12,6 +12,26 @@ pub struct NDBSplineSurface<const D: usize> {
 }
 
 impl NDBSplineSurface<4> {
+    /// Relative Cartesian travel per parameter unit, estimated from control
+    /// polygons. Knot units and homogeneous weights are not spatial lengths.
+    pub fn v_parameter_scale(&self) -> f64 {
+        let mut u_length = 0.;
+        let mut v_length = 0.;
+        let point = |i: usize,j: usize| {
+            let p = self.control_points[i][j];
+            p.xyz()/p.w
+        };
+        for i in 0..self.control_points.len() {
+            for j in 0..self.control_points[i].len() {
+                if i > 0 { u_length += (point(i,j)-point(i-1,j)).norm(); }
+                if j > 0 { v_length += (point(i,j)-point(i,j-1)).norm(); }
+            }
+        }
+        let u_speed = u_length / self.control_points[0].len() as f64 / (self.max_u()-self.min_u());
+        let v_speed = v_length / self.control_points.len() as f64 / (self.max_v()-self.min_v());
+        v_speed/u_speed
+    }
+
     /// A convex, constant-weight bilinear patch is a regular plane exactly
     /// when its four controls are coplanar. No geometric tolerance is used.
     pub fn bilinear_plane_normal(&self) -> Option<DVec3> {
@@ -299,39 +319,28 @@ impl<const D: usize> NDBSplineSurface<D> {
         (origin, SKL)
     }
 
-    // Computes the relative scale of U and V, based on average distance between
-    // control points in 3D space
-    pub fn aspect_ratio(&self) -> f64 {
-        let mut u_sum = 0.0;
-        let mut v_sum = 0.0;
-        // Helper function to find 3-distance even if this is 4D
-        let distance = |a, b| {
-            let delta: TVec<f64, D> = a - b;
-            DVec3::new(delta[0], delta[1], delta[2]).norm()
-        };
-        for i in 0..self.control_points.len() {
-            for j in 0..self.control_points[i].len() {
-                if i > 0 {
-                    v_sum += distance(self.control_points[i - 1][j],
-                                      self.control_points[i][j]);
-                }
-                if j > 0 {
-                    u_sum += distance(self.control_points[i][j - 1],
-                                      self.control_points[i][j]);
-                }
-            }
-        }
-        let u_mean = u_sum / self.control_points.len() as f64;
-        let v_mean = v_sum / self.control_points[0].len() as f64;
-
-        u_mean / v_mean
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use nalgebra_glm::DVec4;
+
+    #[test]
+    fn chart_scale_uses_cartesian_lengths_and_parameter_units() {
+        for translation in [DVec3::zeros(), DVec3::new(1024.,-512.,2048.)] {
+            let controls = [0.,2.].iter().enumerate().map(|(i,&x)| {
+                [0.,3.].iter().enumerate().map(|(j,&y)| {
+                    let p = DVec3::new(x,y,0.)+translation;
+                    DVec4::new(p.x,p.y,p.z,1.)*2f64.powi((2*i+j) as i32)
+                }).collect()
+            }).collect();
+            let surface = NDBSplineSurface::new(true,true,
+                KnotVector::from_multiplicities(1,&[10.,12.],&[2,2]),
+                KnotVector::from_multiplicities(1,&[-3.,-2.5],&[2,2]),controls);
+            assert_eq!(surface.v_parameter_scale(),6.);
+        }
+    }
 
     #[test]
     fn extrusion_coordinates_and_derivatives_are_independent_of_the_other_axis() {

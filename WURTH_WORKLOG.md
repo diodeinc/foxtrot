@@ -2,6 +2,40 @@
 
 ## Oracle cohort 2 — 2026-09-07
 
+### Condition spline charts in Cartesian distance per knot unit
+
+FI7447054 source face #206/surface #512 has a v range of only 0.00975204.
+The old chart scale compared homogeneous control-polygon lengths without
+dividing by parameter ranges. Its mapped v width was 0.00673677 against a full
+u period of 1, despite comparable physical extents. The resulting long, skinny
+chords fold on the surface. UV triangles remain positively oriented and cover
+one parameter rectangle; checking only distance to the supporting surface misses
+the excess area. OCCT evaluation of all native UV samples agrees to roundoff,
+so this is chart conditioning, not a surface-evaluation discrepancy.
+
+Estimate Cartesian travel per parameter unit instead. Dehomogenize controls
+before measuring lengths; otherwise weights and translations also distort the
+chart. Replace the old generic aspect-ratio method with the rational-surface
+scale actually needed by its sole consumer. No new subdivision modes or
+model-specific conditions. A translated, non-unit-weight, unequal-knot-range
+regression checks the units. All 147 library tests and 53 processing controls
+pass. FI7447054 now passes the oracle: 524.260408 mm² vs 525.485950 mm², compared
+with 634.765290 before; 66,943 triangles, roughly 1.1 s native meshing.
+
+The rejected three-probe interior-chord experiment took 31.4 s, emitted 528,408
+triangles and still had 583.107782 mm² area. It is not retained; evidence is
+`local/cohort2-chord-*`. Accepted scale evidence: `local/cohort2-scale-*`.
+The original 56-case controls now have 51 pass / five oracle errors: the new
+reference-completeness check correctly rejects all five Coilcraft partial OCCT
+meshes. Those are not new native processing failures and their previous sampled
+agreements against partial references are not complete-reference guarantees.
+
+At the user's memory checkpoint, three concurrent large OCCT comparisons used
+about 1.7/3.7/3.4 GiB RSS. Stop that run's workload scope and retain its manifest,
+two completed case results and partial diagnostic outputs; it is not a completed
+17-case replay. Machine used memory drops from about 9.9 to 1.2 GiB. Subsequent
+large comparisons will run singly while replacing the costly proximity path.
+
 Freeze the preceding committed candidate as `local/cohort2-before-worker`
 (SHA-256 `5b10d053c883ac4960cbe27ac85ce7b64ea5a1ad62167b6e5197bab024d0a479`).
 Discovery tests 240 Würth and 240 previously untested KiCad models, in two

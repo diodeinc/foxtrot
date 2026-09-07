@@ -240,7 +240,7 @@ impl Surface {
                 })
             })
             .unwrap_or_else(|| SplineChart::Cartesian {
-                v_scale: surf.surf.aspect_ratio(),
+                v_scale: surf.surf.v_parameter_scale(),
                 periods: [0,1].map(|axis| periodic[axis].then_some(bounds[1][axis]-bounds[0][axis])),
             })
     }
