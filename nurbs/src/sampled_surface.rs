@@ -492,8 +492,8 @@ where
         // A local stationary point is only an upper bound. Refine the actual
         // homogeneous control hull until no remaining patch can improve the
         // distance at the geometric resolution of f64 input coordinates.
-        let scale = self.cells.iter().flat_map(|c| c.bounds).map(|p| p.norm()).fold(p.norm(), f64::max);
-        let tolerance = f64::EPSILON.sqrt() * scale;
+        let scale = self.cells.iter().map(|c| (c.bounds[1]-c.bounds[0]).norm()).fold(0., f64::max);
+        let tolerance = f64::EPSILON.sqrt() * scale + PROJECTION_TOL * p.norm();
         let mut queue = VecDeque::new();
         if error.sqrt() > tolerance {
             for cell in &self.cells {
@@ -525,12 +525,18 @@ where
                 }
             }
             if error.sqrt() <= tolerance { break; }
-            // Split the direction with the larger control polygon variation.
-            let u_size = controls.windows(2).map(|rows| rows[0].iter().zip(&rows[1]).map(|(&a,&b)|
-                (crate::nd_curve::cartesian(a)-crate::nd_curve::cartesian(b)).norm()).fold(0., f64::max)).sum::<f64>();
-            let v_size = controls.iter().map(|row| row.windows(2).map(|w|
-                (crate::nd_curve::cartesian(w[0])-crate::nd_curve::cartesian(w[1])).norm()).sum::<f64>()).fold(0., f64::max);
-            let axis = if u_size >= v_size { 0 } else { 1 };
+            // Resolve curvature before subdividing a straight extrusion axis.
+            // Length-based splitting needlessly tiles that axis at the much
+            // finer resolution required by the curved cross section.
+            let bend = |a,b,c| (crate::nd_curve::cartesian(a)-2.*crate::nd_curve::cartesian(b)
+                +crate::nd_curve::cartesian(c)).norm();
+            let u_size = controls.windows(3).flat_map(|rows| (0..rows[0].len())
+                .map(move |j| bend(rows[0][j], rows[1][j], rows[2][j]))).fold(0., f64::max);
+            let v_size = controls.iter().flat_map(|row| row.windows(3)
+                .map(|w| bend(w[0],w[1],w[2]))).fold(0., f64::max);
+            let axis = if u_size+v_size > 0. { usize::from(v_size > u_size) }
+                else { usize::from((hi.y-lo.y)/(self.surf.v_knots[spans[1]+1]-self.surf.v_knots[spans[1]])
+                    > (hi.x-lo.x)/(self.surf.u_knots[spans[0]+1]-self.surf.u_knots[spans[0]])) };
             if mid[axis] == lo[axis] || mid[axis] == hi[axis] { continue; }
             let mut halves = [controls.clone(), controls.clone()];
             if axis == 0 {
