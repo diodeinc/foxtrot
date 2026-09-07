@@ -1,4 +1,5 @@
 import builtins
+import importlib.util
 import json
 import math
 import struct
@@ -101,6 +102,55 @@ class MeshMetricsTests(unittest.TestCase):
         with mock.patch("builtins.__import__", side_effect=missing_ocp):
             with self.assertRaisesRegex(RuntimeError, "cadquery-ocp"):
                 corpus_geometry.step_to_stl("input.step", self.path)
+
+
+@unittest.skipUnless(
+    all(importlib.util.find_spec(name) for name in ("trimesh", "scipy", "rtree")),
+    "optional surface oracle dependencies not installed",
+)
+class SurfaceDistanceTests(unittest.TestCase):
+    def compare(self, actual, reference, tolerance=1e-6):
+        with tempfile.TemporaryDirectory() as directory:
+            a, b = Path(directory) / "actual.stl", Path(directory) / "reference.stl"
+            write_stl(a, actual)
+            write_stl(b, reference)
+            return corpus_geometry.compare_meshes(
+                a, b, surface_samples=500, surface_tolerance=tolerance
+            )
+
+    def test_different_triangulations_agree_without_vertex_correspondence(self):
+        a, b, c, d = (0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)
+        result = self.compare([(a, b, c), (a, c, d)], [(a, b, d), (b, c, d)])
+        self.assertTrue(result["passed"])
+        self.assertLess(
+            result["surface_distance"]["actual_to_reference"]["max_sampled_mm"], 1e-6
+        )
+
+    def test_displaced_interior_surface_evades_aggregate_checks(self):
+        def panel(z):
+            return ((0.2, 0.2, z), (0.3, 0.2, z), (0.2, 0.3, z))
+
+        result = self.compare(TETRAHEDRON + [panel(0.2)], TETRAHEDRON + [panel(0.4)])
+        self.assertTrue(result["differences"]["bounds"]["passed"])
+        self.assertTrue(result["differences"]["surface_area"]["passed"])
+        self.assertFalse(result["passed"])
+        self.assertGreater(
+            result["surface_distance"]["actual_to_reference"]["max_sampled_mm"], 0.1
+        )
+
+    def test_reverse_direction_detects_missing_face(self):
+        result = self.compare(TETRAHEDRON[:3], TETRAHEDRON)
+        distance = result["surface_distance"]
+        self.assertTrue(distance["actual_to_reference"]["passed"])
+        self.assertFalse(distance["reference_to_actual"]["passed"])
+        self.assertGreater(
+            distance["reference_to_actual"]["area_fraction_outside_tolerance"], 0.1
+        )
+
+    def test_zero_area_facets_are_reported_without_blocking_surface_comparison(self):
+        result = self.compare(TETRAHEDRON + [((0, 0, 0),) * 3], TETRAHEDRON)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["actual"]["validation"]["degenerate_triangle_count"], 1)
 
 
 if __name__ == "__main__":

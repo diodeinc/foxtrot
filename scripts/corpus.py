@@ -22,7 +22,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from threading import Event
 
-from corpus_geometry import compare_meshes, mesh_metrics
+from corpus_geometry import mesh_metrics
 
 REPO = Path(__file__).resolve().parents[1]
 SCHEMA = 1
@@ -221,14 +221,20 @@ def run_file(entry, args):
                 raise ValueError("invalid worker status")
             failures = metrics.get("failures")
             completion = metrics.get("completion")
-            if completion not in ("complete", "partial") or not isinstance(failures, list):
+            if completion not in ("complete", "partial") or not isinstance(
+                failures, list
+            ):
                 raise ValueError("invalid tessellation diagnostics")
             if (completion == "complete") != (not failures):
                 raise ValueError("completion disagrees with failures")
             for failure in failures:
-                if not isinstance(failure, dict) or not isinstance(failure.get("entity_id"), int) \
-                        or failure.get("kind") not in ("geometry", "unsupported", "panic", "invalid_entity") \
-                        or not isinstance(failure.get("message"), str):
+                if (
+                    not isinstance(failure, dict)
+                    or not isinstance(failure.get("entity_id"), int)
+                    or failure.get("kind")
+                    not in ("geometry", "unsupported", "panic", "invalid_entity")
+                    or not isinstance(failure.get("message"), str)
+                ):
                     raise ValueError("invalid tessellation failure")
             required = (
                 "read_ms",
@@ -247,9 +253,7 @@ def run_file(entry, args):
                 "browser_zero_normals",
             )
             browser_supplied = [k for k in browser_required if k in metrics]
-            if browser_supplied and len(browser_supplied) != len(
-                browser_required
-            ):
+            if browser_supplied and len(browser_supplied) != len(browser_required):
                 raise ValueError("incomplete browser worker metrics")
             degenerate_f64 = metrics.get("degenerate_f64", 0)
             if any(
@@ -272,7 +276,10 @@ def run_file(entry, args):
             geometry = mesh_metrics(mesh_path) if mesh_path.exists() else None
             if not browser_metrics:
                 raise ValueError("worker omitted browser diagnostics")
-            if geometry is not None and geometry["triangle_count"] != metrics["triangles"]:
+            if (
+                geometry is not None
+                and geometry["triangle_count"] != metrics["triangles"]
+            ):
                 raise ValueError("worker triangle count does not match exported mesh")
             sample.update(metrics)
             sample["process_ms"] = metrics["parse_ms"] + metrics["triangulate_ms"]
@@ -291,8 +298,7 @@ def run_file(entry, args):
                     "browser_zero_normals",
                 ]
             if "metrics" in result and any(
-                result["metrics"].get(k) != metrics.get(k)
-                for k in deterministic
+                result["metrics"].get(k) != metrics.get(k) for k in deterministic
             ):
                 result["status"] = "nondeterministic"
             result["metrics"] = metrics
@@ -344,6 +350,18 @@ def run_file(entry, args):
                     str(REPO / "scripts/corpus_geometry.py"),
                     str(source),
                     str(directory / "occt.stl"),
+                    "--compare",
+                    str(directory / "mesh.stl"),
+                    "--report",
+                    str(directory / "oracle.json"),
+                    "--relative-tolerance",
+                    str(args.relative_tolerance),
+                    "--absolute-tolerance",
+                    str(args.absolute_tolerance),
+                    "--surface-tolerance",
+                    str(args.surface_tolerance),
+                    "--surface-samples",
+                    str(args.surface_samples),
                 ],
                 directory / "occt.log",
                 args.timeout,
@@ -357,15 +375,10 @@ def run_file(entry, args):
                     result["status"] = "oracle_error"
                     if (directory / "occt.stl").exists():
                         result["oracle_geometry"] = mesh_metrics(directory / "occt.stl")
-                        if not result["oracle_geometry"]["validation"]["valid"]:
+                        if not result["oracle_geometry"]["comparable"]:
                             result["status"] = "oracle_invalid_mesh"
             else:
-                result["oracle"] = compare_meshes(
-                    directory / "mesh.stl",
-                    directory / "occt.stl",
-                    args.relative_tolerance,
-                    args.absolute_tolerance,
-                )
+                result["oracle"] = json.loads((directory / "oracle.json").read_text())
                 if not result["oracle"]["passed"]:
                     result["status"] = "oracle_mismatch"
         if digest(source) != entry["sha256"]:
@@ -389,8 +402,14 @@ def compare(results, baseline, config, threshold):
     changes = []
     old = {r["path"]: r for r in baseline["results"]}
     current = {r["path"]: r for r in results}
-    for key in ("occt", "relative_tolerance", "absolute_tolerance"):
-        if baseline["config"][key] != config[key]:
+    for key in (
+        "occt",
+        "relative_tolerance",
+        "absolute_tolerance",
+        "surface_tolerance",
+        "surface_samples",
+    ):
+        if baseline["config"].get(key) != config.get(key):
             changes.append(f"validation configuration changed: {key}")
     for name in sorted(old.keys() ^ current.keys()):
         changes.append(f"{name}: missing from current run or baseline")
@@ -439,7 +458,9 @@ def markdown(report):
     ):
         name = r["path"].replace("|", "\\|").replace("\n", " ")
         median = r.get("timing", {}).get("process_ms", {}).get("median", 0)
-        quality = ", ".join(f"{k}: {v}" for k, v in r.get("quality_diagnostics", {}).items() if v)
+        quality = ", ".join(
+            f"{k}: {v}" for k, v in r.get("quality_diagnostics", {}).items() if v
+        )
         lines.append(
             f"| {name} | {r['status']} | {median:.3f} | {r.get('metrics', {}).get('triangles', '—')} | {quality or '—'} | [artifacts]({r['artifacts']}/result.json) |"
         )
@@ -450,7 +471,7 @@ def markdown(report):
         "and cases/*/run-*.log for diagnostics/backtraces. Timing excludes STL export and process startup.",
         "Each result records whether acceptance used browser f32 triangle-buffer metrics or the legacy strict STL gate; these classifications are not interchangeable fixes or visual verification.",
         "Browser isolated degenerates, zero normals, and f64 degenerates are named review diagnostics, not strict failures. STL is optional diagnostic/world-unit transport for browser-metric workers.",
-        "OCCT checks bounds and area only, not topology or mesh equivalence.",
+        "OCCT compares bounds, area and bidirectional sampled surface distances. See oracle.json for directional errors and worst points; agreement does not prove topology or mesh equivalence.",
         "",
     ]
     return "\n".join(lines)
@@ -521,6 +542,18 @@ def main(argv=None):
     parser.add_argument("--relative-tolerance", type=nonnegative, default=0.05)
     parser.add_argument("--absolute-tolerance", type=nonnegative, default=0.01)
     parser.add_argument(
+        "--surface-tolerance",
+        type=nonnegative,
+        default=0.1,
+        help="maximum sampled surface distance in millimeters (OCCT)",
+    )
+    parser.add_argument(
+        "--surface-samples",
+        type=positive,
+        default=10000,
+        help="area samples per direction, plus up to this many face probes",
+    )
+    parser.add_argument(
         "--compare", type=Path, help="previous results.json (exact corpus required)"
     )
     parser.add_argument(
@@ -588,10 +621,13 @@ def main(argv=None):
             "results": [],
             "changes": [],
         }
-        try:
-            report["cadquery_ocp"] = version("cadquery-ocp") if args.occt else None
-        except PackageNotFoundError:
-            report["cadquery_ocp"] = None
+        for package in ("cadquery-ocp", "trimesh", "numpy", "scipy", "rtree"):
+            try:
+                report[package.replace("-", "_")] = (
+                    version(package) if args.occt else None
+                )
+            except PackageNotFoundError:
+                report[package.replace("-", "_")] = None
         # Provenance is informational: the worker hash is authoritative, not checkout HEAD.
         for key, command in [
             ("git_head", ["git", "rev-parse", "HEAD"]),
@@ -633,8 +669,7 @@ def main(argv=None):
         review = {
             r["path"]
             for r in report["results"]
-            if r["status"] != "ok"
-            or any(r.get("quality_diagnostics", {}).values())
+            if r["status"] != "ok" or any(r.get("quality_diagnostics", {}).values())
         }
         write_json(
             args.output / "review-manifest.json",
