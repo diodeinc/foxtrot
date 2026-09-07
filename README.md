@@ -191,28 +191,53 @@ concurrency or use OS/container limits for untrusted or very large inputs.
 
 ```sh
 python3 -m venv local/occt-env
-local/occt-env/bin/pip install cadquery-ocp
+local/occt-env/bin/pip install cadquery-ocp trimesh scipy rtree
 local/occt-env/bin/python scripts/corpus.py examples --occt \
   --meshes all --output local/oracle
 ```
 
-OCCT independently reads STEP and emits a millimeter-scale STL with 0.1 mm
-linear and 0.1 rad angular deflection. The harness compares bounds and surface
-area, not triangle counts: tessellators need not produce identical triangles.
+OCCT independently reads STEP and emits a millimeter-scale STL with 0.01 mm
+linear and 0.1 rad angular deflection. In addition to bounds and area, the harness
+compares **bidirectional sampled point-to-triangle distances** using Trimesh's
+spatial index. Foxtrot → OCCT detects extra/displaced surfaces; OCCT → Foxtrot
+detects missing surfaces. There is no alignment, rescaling, mesh repair or vertex
+correspondence: different triangulations can represent the same surface.
+
+Each direction uses 10,000 seeded, area-weighted samples plus up to 10,000 face
+centroids to probe smaller faces. `--surface-samples` controls that budget.
+`--surface-tolerance` defaults to **0.1 mm**; the worst sampled distance in both
+directions must be within it. Choose tolerances appropriate to the part's smallest
+important features; this default is not an accuracy guarantee. `oracle.json`
+records p50/p95/p99, RMS, the worst sampled distance and its coordinates, and the
+area-sampled fraction outside tolerance. Percentiles/fractions use only the
+area-weighted samples; the maximum also includes the face probes.
+
 Defaults are 5% relative tolerance and 0.01 mm absolute bounds tolerance;
 adjust `--relative-tolerance` and `--absolute-tolerance` for your models.
 Bounds allow absolute tolerance + relative tolerance × reference diagonal;
 area allows absolute tolerance squared + relative tolerance × reference area.
 Signed volume is diagnostic only because STEP can contain open shells or
-inconsistent winding. **This is a coarse oracle, not proof of mesh equivalence:**
-matching bounds/area can miss local defects, holes, and topology errors.
-Both meshes and detailed deltas are kept on a mismatch. Missing OCCT or failed
-conversion is an explicit failure, never a silently skipped check.
+inconsistent winding. Zero-area STL facets are counted but excluded from the
+distance query; they do not block comparison of the remaining surface. Neither
+exported mesh is modified. Empty/nonfinite/zero-area meshes are not comparable.
+
+**Agreement is evidence, not proof:** sampling can miss tiny holes; it does not
+certify Hausdorff distance, topology, watertightness, winding or shading. OCCT can
+also be wrong. Both STL transports have world-coordinate f32 rounding, so extreme
+coordinate offsets or very tight tolerances need a higher-precision follow-up.
+Both meshes and detailed deltas are kept on a mismatch. Conversion and distance
+queries run together in the timeout-isolated oracle subprocess. Missing optional
+dependencies or failed conversion is an explicit failure, never a skipped check.
+Reports record comparison settings and dependency versions. Re-record old OCCT
+baselines: aggregate-only acceptance is not equivalent to surface agreement.
 
 Harness tests (no Rust build or corpus download required):
 ```sh
 python3 -m unittest discover -s scripts -p 'test_corpus*.py'
 ```
+Run the same command with `local/occt-env/bin/python` to include the optional
+surface-distance tests (different triangulations, displaced/missing faces and
+zero-area facets).
 
 To extract STEP models embedded in a KiCad board or footprint for local
 testing, use `scripts/extract_steps.py` (requires `pip install zstandard`).

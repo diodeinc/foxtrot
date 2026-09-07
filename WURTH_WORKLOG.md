@@ -1,5 +1,56 @@
 # Würth and KiCad STEP repair worklog
 
+## Sampled OCCT surface oracle — 2026-09-07
+
+Processing acceptance is not geometric correctness. Extended the existing
+optional bounds/area oracle with bidirectional point-to-triangle distances,
+using Trimesh, NumPy, SciPy and Rtree rather than a custom spatial index.
+The native tessellator and browser pipeline are unchanged.
+
+`--occt` now uses 10,000 seeded area samples per direction plus up to 10,000
+face-centroid probes, with a configurable 0.1 mm maximum sampled-distance
+tolerance. OCCT uses 0.01 mm linear / 0.1 rad angular deflection, in millimeters,
+and must transfer every STEP root. Conversion and comparison share the existing
+timeout-isolated subprocess. Reports retain percentiles, RMS, directional
+out-of-tolerance area fractions, worst-point coordinates and dependency versions.
+No alignment, rescaling or mesh repair is applied. Zero-area STL facets remain
+reported but do not prevent comparison of the positive-area surfaces; source
+exports are untouched. This avoids making STL degeneracy a browser acceptance
+criterion again.
+
+Executed samples with frozen `local/architecture-worker`, OCCT 7.9.3.1,
+Trimesh 4.12.2, NumPy 2.4.6, SciPy 1.17.1 and Rtree 1.4.1:
+
+| Part | Foxtrot → OCCT max (mm) | OCCT → Foxtrot max (mm) | Result |
+| --- | ---: | ---: | --- |
+| examples/cube_hole.step | 0.032535 | 0.032464 | agreement within tolerance |
+| DSUB-15 socket, 14.56 mm edge offset / 15.98 mm mounting offset | 0.035962 | 0.039898 | agreement within tolerance |
+| Coilcraft 2222SQ-131 | 1.721622 | 0.804278 | oracle mismatch |
+
+The first two also pass bounds and area checks, with no area samples outside
+0.1 mm. Coilcraft's Foxtrot area is 1095.004 mm² versus OCCT's 275.003 mm²;
+77.30% of Foxtrot area samples and 40.07% of OCCT area samples exceed tolerance.
+This is strong evidence of a geometry discrepancy, not merely different mesh
+density or normals. The discrepancy is not repaired in this tooling task.
+Next investigation should localize the worst points to STEP faces and compare
+their trims/sampling; do not loosen the oracle to make the part pass.
+
+Evidence: `local/surface-oracle-{examples,parts}/results.json`, each case's
+`oracle.json`, and both retained STLs. Reproduction uses `scripts/corpus.py`
+with `--occt --meshes all --timeout 120`, selecting the exact model paths from
+these manifests. Optional tolerances/budgets are documented in README.
+
+Verification: all 25 Python tests pass in the oracle environment. Added
+regressions show that different triangulations agree, displaced surfaces can
+evade bounds/area but fail the distance check, the reverse direction detects
+missing geometry, and zero-area facets remain diagnosed. No Rust code changes.
+
+Limitations: sampled agreement is not a certified Hausdorff bound, topological
+proof, or shading check. Very small unsampled defects can escape; OCCT itself
+can be wrong. STL world coordinates round to f32, so extreme coordinate offsets
+or much tighter tolerances require higher-precision follow-up. These three
+samples are not a corpus-wide accuracy claim.
+
 ## Architecture refactors — 2026-09-06
 
 Implemented the approved sequence: face-local construction, structured outcomes,
