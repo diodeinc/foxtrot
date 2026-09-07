@@ -1,5 +1,167 @@
 # Würth and KiCad STEP repair worklog
 
+## OCCT failure batch and root causes — 2026-09-07
+
+The oracle implementation and initial samples are committed. The next targeted
+KiCad cohort completes 56 files: **40 ok, 16 oracle_mismatch**, with no processing
+failures. Stop collection here and investigate the batch, as requested. This
+cohort combines earlier quality cases and a sample; its failure fraction is not
+an estimate of the complete corpus. No production geometry fix is made here.
+
+Reproduction:
+
+```sh
+RUST_LOG=error local/occt-venv/bin/python scripts/corpus.py local/kicad-packages3D \
+  --manifest local/cleanup24-kicad-manifest.json --occt \
+  --worker local/architecture-worker --meshes all --jobs 2 --threads 1 \
+  --timeout 120 --output local/oracle-rca-kicad
+```
+
+Distances below are maximum sampled mm, Foxtrot→OCCT / OCCT→Foxtrot. The
+baseline uses 10,000 area samples per direction, additional face centroids,
+0.1 mm acceptance, and OCCT deflection 0.01 mm / 0.1 rad. Face/surface numbers
+are STEP entity IDs, not OCCT explorer indices. All worst-point assignments
+match the native per-face mesh within 4e-15 mm. In the reverse direction,
+localization uses the nearest Foxtrot point, not the OCCT source point.
+
+| Model (basename without `.step`) | Max mm, forward / reverse | Localized cause / face IDs |
+| --- | ---: | --- |
+| CP_Elec_5x5.3 | .18246 / .17802 | Cylinder chord sag, face 973 / surface 1020 |
+| CP_Axial_L30.0mm_D15.0mm_P35.00mm_Horizontal | .43681 / .43742 | Cylinder chord sag, 1102 / 1115 |
+| C_Disc_D16.0mm_W5.0mm_P7.50mm | 5.34288 / 2.69460 | Distorted sphere trim chart, 298 / 376 and 183 / 293 |
+| SMA_Molex_73251-2200_Horizontal | .11011 / .09501 | Spline approximation, 7981 / 8076; reverse witness cylinder 10381 / 10437 |
+| L_Coilcraft_2222SQ-111 | 1.72070 / .77029 | Wrong inverse-projection minimum, 17 / 479 |
+| L_Coilcraft_2222SQ-131 | 1.72162 / .80428 | Wrong inverse-projection minimum, 17 / 493 |
+| L_Coilcraft_2222SQ-161 | 1.76063 / 1.05528 | Wrong inverse-projection minimum, 17 / 729 |
+| L_Coilcraft_2222SQ-181 | 1.70173 / .91650 | Wrong inverse-projection minimum, 17 / 601 |
+| L_Coilcraft_2222SQ-221 | 1.72593 / 1.07558 | Wrong inverse-projection minimum, 17 / 616 |
+| L_Vishay_IHSM-7832 | .10762 / .11604 | Distorted sphere trims, 510 / 513 and 166 / 173 |
+| L_Wuerth_XHMI-8080 | .11656 / .11662 | Distorted sphere trims, 378 / 381 and 202 / 211 |
+| Bourns_8100, L38.1mm W20.3mm Px15.24mm Py22.86mm | .22007 / .23539 | Sphere charts, 6074 / 6080 and 803 / 815; residual cylinder approximation |
+| Bourns_8100, L39.4mm W20.3mm Px15.24mm Py22.86mm | .17473 / .18744 | Sphere charts, 49980 / 49986 and 47834 / 47846; residual cylinder approximation |
+| Bourns_8100, L41.9mm W20.3mm Px15.24mm Py22.86mm | .17069 / .18724 | Cylinder 18983 / 19191 forward; sphere 47403 / 47409 reverse |
+| Sharp_IS485 | .28968 / .29190 | Sphere chart conditioning/interior approximation, 1113 / 1118 |
+| RV_Disc_D12mm_W6.3mm_P7.5mm | .10055 / .09949 | Revolution approximation, 50 / 151 and 168 / 271 |
+
+### Evidence and rejected explanations
+
+**Inverse projection, not spline evaluation.** All five Coilcraft main faces
+contain original boundary vertices projected onto a wrong local minimum.
+For 131, vertex 555 projects to native UV (3.45717, 14.19925), 0.06310 mm from
+its input position. OCCT finds (5.92636, approximately 0), residual 4.21e-15 mm.
+Adjacent boundary vertices remain near v=0: this creates a large trim-domain
+spike across a 0.096 mm spatial edge. Other variants reproduce residuals
+0.051–0.064 mm versus approximately 4e-15 mm. Native forward evaluation agrees
+with OCCT at all audited inserted points on 131 within 2.7e-14 mm. Its main-face
+area is about 1036 mm² versus the underlying complete surface's 216.65 mm²;
+raising the interior grid from 16 to 64 increases the native area to about
+6488 mm². More samples cannot repair the wrong domain.
+
+`nurbs/src/sampled_surface.rs::uv_from_point` bounds candidate knot cells but
+tries only one nearest seed per cell. A cell's position bound does not prove
+that one local Newton solve finds its global closest point. Local stationarity
+is not an on-surface residual contract.
+
+**Distorted charts, not a basic spherical inverse failure.** The sphere chart
+places its antipode only half a boundary-edge clearance outside the trim.
+Joining independently projected sparse vertices with straight chart chords
+can introduce crossings absent from the true surface boundary. Crossing
+resolution then interpolates spatial chords to manufacture new vertices.
+Vishay's 21 original boundary vertices round-trip within 2.7e-15 mm; its two
+constructed crossings deviate by up to 0.5002 mm. Disc16's 161 originals are
+within 1.14e-7 mm, but three constructed crossings reach 9.082 mm.
+
+A diagnostic mean-centered chart makes Vishay and Wuerth pass (.00915 and
+.00517 mm maxima), and reduces Disc16's maximum from 5.343 to .1057 mm. Bourns
+variants improve but retain cylinder deviations around .151–.171 mm. However,
+Sharp's reverse error worsens from .292 to 1.052 mm: a blind center change can
+select the wrong/complementary region. This experiment is rejected. Sharp's
+original vertices already round-trip within 1e-15 mm; centroid deviation is
+.8214 mm, implicating chart conditioning and interior approximation instead.
+
+**Approximation needs a physical tolerance, not larger fixed grids.** CP_Elec
+and CP_Axial worst points lie on cylinders, not their nearby spline faces.
+Their radius-2.5/radius-7.5 boundaries have chord sag .1913/.4394 mm while
+vertex radial residuals are only about 1e-5 mm. Densifying spline interiors
+does not change these failures. Current policies use 8 samples per spline
+knot span, 32 per ellipse revolution, sphere grid 6×6, and spline grid 16×16;
+these do not bound physical error. The varistor improves to .03074 mm with
+grid 64, demonstrating approximation sensitivity, not endorsing that fix.
+Finer OCCT references (.001 mm/.03 rad, 100,000 samples) still fail SMA
+(.11065/.09582 mm) and the varistor (.10347/.10292 mm). SMA's exact split of
+edge versus interior error remains unresolved; the failing spline face is
+localized. These mismatches are not explained by baseline OCCT coarseness.
+
+### Source validity and limits
+
+Eleven failing models pass OCCT BRep validation. All five Coilcraft complete
+shapes fail it; on 131, two small planar caps report SelfIntersectingWire /
+UnorientableShape, while the main spline face is valid. This does not establish
+STEP spec invalidity by itself. Keep cap/source issues separate from the
+independently demonstrated inverse-projection defect; do not add source repair
+heuristics to accommodate invalid inputs. Some meshes contain zero-area facets;
+the oracle compares positive-area surfaces and does not prove manifoldness.
+
+### Fundamental fix strategy (not implemented)
+
+1. **Make inverse projection residual-checked.** Subdivide bounded spline
+   patches where the lower bound still permits a better solution; retain
+   Newton as a local accelerator, not a completeness test. Include parameter
+   boundaries in minimization. Use knot/Bézier-aware bounds, with explicit
+   handling of rational-weight assumptions. Distinguish closest-point queries
+   from inversion of a trim point known to belong to the surface. Return a
+   diagnostic when the required geometric residual cannot be met. Neighbor
+   continuity may propose candidates, never establish correctness.
+2. **Preserve the oriented trim domain in well-conditioned charts.** Choose
+   charts using the complete oriented boundary, not a centroid heuristic.
+   Preserve outer/inner loop meaning and face sense; split patches when one
+   chart cannot represent the domain safely. Discretize the actual charted
+   trim, rather than treating long projected chords as exact. Do not repair
+   invented intersections by snapping vertices onto the surface.
+3. **Replace fixed sampling counts with one physical error budget.** Own
+   canonical 3D edge samples once and share them between incident faces.
+   Refine boundary curves and face interiors together until their deviation
+   budgets are met. Use flat arrays of samples, patch bounds and a work queue;
+   keep surface evaluators responsible for geometry, not separate meshing
+   policies. High-degree splines require bounds/subdivision rather than a
+   midpoint-only test that can miss oscillations. Keep geometry in f64 and
+   convert only at the browser output boundary.
+
+Implement each logical change in its own commit. First add focused analytic
+regressions for the demonstrated invariant (multiple minima within one cell,
+oriented spherical trims, cylinder sag/shared edges), then replay these 16
+failures plus the 40 passing controls at unchanged oracle tolerances. Follow
+with full Würth/KiCad processing checks and broader oracle coverage. Track
+triangle counts and timings to prevent solving error by indiscriminate density.
+Do not claim all 16 fixed until that replay succeeds; sampled agreement still
+is not a certified maximum-distance bound or a topology guarantee.
+
+Evidence retained in `local/oracle-rca-kicad`, `local/oracle-face-localization.json`,
+`local/oracle-cylinder-sag.json`, `local/oracle-coilcraft-{projection,evaluation}.json`,
+and `local/oracle-counterfactuals`. Replay scripts and instrumented workers remain
+under `local/oracle-*`; diagnostic source changes are removed from production.
+The initial `local/oracle-moderate-rca/REPORT.md` contains superseded face guesses
+and conflates constructed crossings with original vertices; this worklog and
+the exact localization JSON supersede those conclusions.
+
+**Post-cohort housekeeping is now required:** preserve inputs, manifests,
+reports and active failure evidence; archive superseded cohorts with verified
+contents, remove disposable build/cache outputs, and check available disk space
+before starting the next cohort. Avoid accumulating another set of full meshes
+when failure-only output or a frozen existing baseline is sufficient.
+
+This checkpoint archives Würth/KiCad passes 19–21 as `local/*-repair-pass*.tar.gz`.
+All 132,237 regular files pass SHA-256 comparison against archive contents before
+their expanded directories are removed, recovering 8,864,024,213 allocated bytes.
+`local/oracle-rca-cleanup.json` records the inventory. `cargo clean` removes stale
+build outputs; the release corpus worker is then rebuilt successfully and is
+SHA-256 identical to `local/architecture-worker`. `df -h .` reports 20 GiB free
+after rebuilding, up from 6.3 GiB. STEP sources, reports, and current oracle
+evidence remain available. The compact user-facing evidence export is
+`.amp/in/artifacts/oracle-rca-batch.json`. Its 56 results, 16 failing paths and
+all face assignments are checked against the original reports. `git diff
+--check` passes; only this worklog changes after removing the experiments.
+
 ## Sampled OCCT surface oracle — 2026-09-07
 
 Processing acceptance is not geometric correctness. Extended the existing
