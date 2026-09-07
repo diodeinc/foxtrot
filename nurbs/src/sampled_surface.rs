@@ -2,6 +2,7 @@ use crate::{abstract_surface::AbstractSurface, nd_surface::NDBSplineSurface};
 use log::error;
 use nalgebra_glm::{dot, DVec2, DVec3};
 use std::collections::VecDeque;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
 pub struct SampledSurface<const N: usize> {
@@ -21,7 +22,7 @@ struct SurfaceCell<const N: usize> {
     spans: [usize; 2],
     bounds: [DVec3; 2],
     samples: std::ops::Range<usize>,
-    controls: Vec<Vec<nalgebra_glm::TVec<f64, N>>>,
+    controls: OnceLock<Vec<Vec<nalgebra_glm::TVec<f64, N>>>>,
 }
 
 struct DistanceModel {
@@ -196,7 +197,7 @@ where
                     spans: [i, j],
                     bounds,
                     samples: start..samples.len(),
-                    controls: surf.bezier_cell([i, j]),
+                    controls: OnceLock::new(),
                 });
             }
         }
@@ -497,7 +498,10 @@ where
         let mut queue = VecDeque::new();
         if error.sqrt() > tolerance {
             for cell in &self.cells {
-                queue.push_back((cell.controls.clone(),
+                let lower = (cell.bounds[0]-p).sup(&(p-cell.bounds[1])).sup(&DVec3::zeros()).norm();
+                if lower+tolerance >= error.sqrt() { continue; }
+                let controls = cell.controls.get_or_init(|| self.surf.bezier_cell(cell.spans));
+                queue.push_back((controls.clone(),
                     DVec2::new(self.surf.u_knots[cell.spans[0]], self.surf.v_knots[cell.spans[1]]),
                     DVec2::new(self.surf.u_knots[cell.spans[0]+1], self.surf.v_knots[cell.spans[1]+1]),
                     cell.spans));
@@ -508,15 +512,19 @@ where
             let d = self.surf.derivs_in_span::<1>(mid, spans, p);
             let normal = d[1][0].cross(&d[0][1]);
             let normal = if normal.norm_squared() > 0. { normal.normalize() } else { DVec3::zeros() };
-            let mut slab = [f64::INFINITY, f64::NEG_INFINITY];
+            let tangent = if d[1][0].norm_squared() > 0. { d[1][0].normalize() } else { DVec3::zeros() };
+            let bitangent = normal.cross(&tangent);
+            let mut slab = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
             let mut bounds = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
             for q in controls.iter().flatten().copied().map(crate::nd_curve::cartesian) {
                 bounds[0] = bounds[0].inf(&q); bounds[1] = bounds[1].sup(&q);
-                let offset = (q-p).dot(&normal);
-                slab[0] = slab[0].min(offset); slab[1] = slab[1].max(offset);
+                let offset = DVec3::new((q-p).dot(&normal), (q-p).dot(&tangent), (q-p).dot(&bitangent));
+                slab[0] = slab[0].inf(&offset); slab[1] = slab[1].sup(&offset);
             }
+            // An orthonormal control box also bounds distance beyond a finite
+            // patch edge; the normal slab alone only bounds its infinite plane.
             let lower = (bounds[0]-p).sup(&(p-bounds[1])).sup(&DVec3::zeros()).norm()
-                .max(slab[0].max(-slab[1]));
+                .max(slab[0].sup(&(-slab[1])).sup(&DVec3::zeros()).norm());
             if lower + tolerance >= error.sqrt() { continue; }
             for seed in [lo, hi, DVec2::new(lo.x, hi.y), DVec2::new(hi.x, lo.y), mid] {
                 if let Some(uv) = self.newtons_method_inner(p, seed, 256, spans.map(|s| s..s+1)) {
@@ -534,7 +542,10 @@ where
                 .map(move |j| bend(rows[0][j], rows[1][j], rows[2][j]))).fold(0., f64::max);
             let v_size = controls.iter().flat_map(|row| row.windows(3)
                 .map(|w| bend(w[0],w[1],w[2]))).fold(0., f64::max);
-            let axis = if u_size+v_size > 0. { usize::from(v_size > u_size) }
+            // Below coordinate resolution, curvature cannot choose a useful axis:
+            // roundoff in a straight direction must not starve the other one.
+            let roundoff = PROJECTION_TOL * bounds[0].abs().sup(&bounds[1].abs()).norm();
+            let axis = if u_size.max(v_size) > roundoff { usize::from(v_size > u_size) }
                 else { usize::from((hi.y-lo.y)/(self.surf.v_knots[spans[1]+1]-self.surf.v_knots[spans[1]])
                     > (hi.x-lo.x)/(self.surf.u_knots[spans[0]+1]-self.surf.u_knots[spans[0]])) };
             if mid[axis] == lo[axis] || mid[axis] == hi[axis] { continue; }

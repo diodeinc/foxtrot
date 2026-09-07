@@ -1,5 +1,71 @@
 # Würth and KiCad STEP repair worklog
 
+### Finite-patch inverse bounds and performance regression
+
+The wider replay caught a regression in the curvature-directed inverse search:
+roundoff-sized second differences kept splitting one effectively straight
+direction while leaving the other unresolved. A normal slab bounds an infinite
+plane, not the finite patch, so its lower bound could not prune those cells.
+The `A_Wurth_WA-BCMC_79573131` probe exceeded 120 s. Instrumentation captured
+subcells with one parameter width around 2.4e-7 and the other still 0.125.
+
+Use an orthonormal control-hull box (normal and both tangent directions), and
+fall back to balanced parameter subdivision below coordinate roundoff. The
+bound remains geometric; no model names or relaxed acceptance limits enter the
+algorithm. Cache extracted Bézier cells lazily, after their coarse hull passes
+the distance bound. NURBS: 52 tests pass in 0.18 s. The reproduced Würth model
+meshes in 725.75 ms with the same 3,287 triangles and complete status. Evidence:
+`/tmp/cohort-box-{tests.log,json}`. Earlier `cohort-final` and `cohort-full`
+sweeps precede this correction and are not final regression evidence.
+
+## Implementing the oracle cohort fixes — 2026-09-07 (in progress)
+
+The before baseline remains frozen in `local/oracle-rca-kicad`. Accepted changes
+so far select spherical chart candidates by whole oriented-boundary clearance,
+search subdivided homogeneous Bézier control hulls beyond local inverse minima,
+and replace fixed edge sampling counts with a 0.01 mm chord budget converted to
+native file units. Spline chord bounds use restricted control hulls; conics use
+second-derivative bounds. Resolved curve/topological-vertex offsets are retained
+so two distinct edges with shared endpoints do not collapse together.
+
+The inverse-search implementation includes a same-knot-cell folded-cubic
+regression. A focused Coilcraft131 probe confirms that original vertex 555 now
+uses the correct parameter region, but the model still has a large area mismatch:
+this corrects the demonstrated inverse defect, not all of its trim problems.
+Splitting the inverse search by curvature instead of extrusion length reduces
+the complete 52-test NURBS suite from 91.07 s to 0.70 s. Translation roundoff and
+geometric size have separate terms in the search resolution.
+
+The initial delegated inverse change contained formatting and an unused import,
+not the reported search algorithm. Parent diff review caught this; the actual
+control-hull search is implemented and verified in the later commits. Concurrent
+worker commits also caused formatting churn across the two worker commits; no
+history is rewritten. Do not treat their initial summaries as verification.
+
+Completed cohort stages (56 identical input hashes, unchanged oracle settings):
+
+| Stage | Result | Evidence |
+| --- | --- | --- |
+| Whole-boundary sphere chart | 43 ok / 13 mismatch | `local/cohort-chart` |
+| Adaptive edge chords + inverse search | 45 ok / 11 mismatch | `local/cohort-edge` |
+| Experimental triangle-plane interior criterion | 51 ok / 4 mismatch / 1 face error | `local/cohort-interior2` |
+
+All eleven initially failing OCCT-valid sources and all forty passing controls
+pass the triangle-plane experiment, but it does not adequately measure the
+remaining Coilcraft chord errors. A geometric point-to-surface interior criterion
+is now being checked instead; it is not yet accepted. Its analytic hemisphere
+regression and all 56 triangulation tests pass. Two rejected criteria illustrate
+why parameter-space correspondence error (over-refines nonlinear planar charts)
+and triangle-plane distance (misses in-plane chord errors) are insufficient.
+No rejected experimental report is presented as the finished After report.
+
+`local/cohort-interior3` is the current oracle replay; full processing sweeps
+run Würth then KiCad in `local/cohort-full-{wurth,kicad}`, with no STL exports to
+avoid disk bloat. Results remain pending. Old intermediate chart/edge STLs are
+losslessly compressed and SHA-256 checked; `local/cohort-cleanup.json` records
+the operations. The original before meshes, current evidence, STEP inputs and
+reports are retained. Approximately 18 GiB is free at this checkpoint.
+
 ## Three-pane visual report — 2026-09-07
 
 Added `scripts/oracle_report.py` and its HTML viewer. The generated report in
