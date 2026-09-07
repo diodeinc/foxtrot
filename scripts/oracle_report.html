@@ -30,14 +30,13 @@
 <script type="importmap">{"imports":{"three":"./three.module.js"}}</script>
 <header>
   <h1>Foxtrot / Surface oracle review</h1>
-  <p>Candidate report for all original failures · matched camera, scale and lighting · drag any pane to rotate all three; scroll to zoom.</p>
+  <p>Comparison of all original failures · matched camera, scale and lighting · drag any pane to rotate all three; scroll to zoom.</p>
   <div class="toolbar">
     <button id="previous" aria-label="Previous model">←</button>
     <select id="model" aria-label="Failed model"></select>
     <button id="next" aria-label="Next model">→</button>
   </div>
   <div class="toolbar">
-    <label>Middle pane <select id="mode"><option value="after">After / candidate output</option><option value="experiment">RCA experiment — NOT an accepted fix</option></select></label>
     <label><input type="checkbox" id="wire"> Wireframe</label>
     <button id="reset">Reset camera</button>
   </div>
@@ -47,7 +46,7 @@
   <div id="status" role="status">Loading report…</div>
   <div class="panes">
     <article><h2>01 / Before · Foxtrot</h2><div class="viewport"></div><div class="metrics"></div></article>
-    <article><h2 id="middleTitle">02 / After · candidate Foxtrot</h2><div class="viewport"><strong id="afterBadge" class="badge" hidden>UNRESOLVED · NOT FIXED</strong></div><div class="metrics"></div></article>
+    <article><h2>02 / After · current Foxtrot</h2><div class="viewport"><strong id="afterBadge" class="badge" hidden>UNRESOLVED · NOT FIXED</strong></div><div class="metrics"></div></article>
     <article><h2>03 / Oracle · OCCT</h2><div class="viewport"></div><div class="metrics"></div></article>
   </div>
   <p class="legend">Distances: maximum sampled Foxtrot → OCCT / OCCT → Foxtrot, in mm. Acceptance threshold: 0.1 mm. Sampling is not a correctness proof. Neutral, double-sided, flat-shaded STL rendering compares geometry, not original STEP colors or browser vertex normals. No independent alignment or scaling is applied.</p>
@@ -105,14 +104,12 @@ function reset() {
 }
 async function load() {
   const run = ++generation, row = rows[Number($('model').value)];
-  const experimental = $('mode').value === 'experiment' && row.experiment;
-  const unresolved = !experimental && row.hasAfter && row.afterStatus !== 'ok';
+  const unresolved = row.afterStatus !== 'ok';
   $('status').textContent = 'Loading all three meshes…';
-  $('notice').textContent = experimental ? `Diagnostic only: ${row.experimentName}. This experiment was not accepted; improvements and regressions are both shown.` : row.hasAfter ? `Candidate status: ${row.afterStatus}; mesh completion: ${row.afterCompletion}. ${row.afterStatus === 'ok' ? 'Passes the sampled oracle check, but is not accepted and is not a correctness proof.' : 'UNRESOLVED — NOT FIXED. Any partial mesh is diagnostic only; the Before mesh is never substituted.'}` : 'No candidate geometry output supplied. Before and After intentionally show the same baseline. Select the RCA experiment to inspect the rejected trial.';
-  $('middleTitle').textContent = experimental ? '02 / Experiment · NOT a fix' : '02 / After · candidate Foxtrot';
+  $('notice').textContent = `Current Foxtrot status: ${row.afterStatus}; mesh completion: ${row.afterCompletion}. ${row.afterStatus === 'ok' ? 'Passes the sampled oracle check; this is not a correctness proof.' : 'UNRESOLVED — NOT FIXED. Any partial mesh is diagnostic only.'}`;
   $('afterBadge').hidden = !unresolved;
   try {
-    const geometries = await Promise.all([row.before, experimental || row.after, row.reference].map(url => url ? loader.loadAsync(url) : new THREE.BufferGeometry()));
+    const geometries = await Promise.all([row.before, row.after, row.reference].map(url => loader.loadAsync(url)));
     if (run !== generation) { geometries.forEach(g => g.dispose()); return; }
     meshes.forEach((m,i) => { views[i].scene.remove(m); m.geometry.dispose(); m.material.dispose(); });
     meshes = geometries.map((geometry,i) => {
@@ -124,7 +121,7 @@ async function load() {
     const center = box.getCenter(new THREE.Vector3()), radius = box.getSize(new THREE.Vector3()).length()/2;
     const aspect = Math.min(...views.map(v => v.camera.aspect));
     home = {center, radius, distance: radius * 1.15 / Math.sin(Math.atan(Math.tan(THREE.MathUtils.degToRad(17.5)) * Math.min(1,aspect)))};
-    const values = [row.beforeDistances, experimental ? row.experimentDistances : row.afterDistances, null];
+    const values = [row.beforeDistances, row.afterDistances, null];
     [...document.querySelectorAll('.metrics')].forEach((e,i) => {
       e.textContent = geometries[i].getAttribute('position') ? `${(geometries[i].getAttribute('position').count/3).toLocaleString()} triangles` : 'No mesh produced';
       e.append(document.createElement('br'));
@@ -135,7 +132,7 @@ async function load() {
   } catch (error) { $('status').textContent = `Could not load comparison: ${error.message}`; }
 }
 rows.forEach((r,i) => { const o = new Option(`${i+1}. ${r.path.split('/').pop()}`,i); $('model').add(o); });
-$('model').onchange = load; $('mode').onchange = load;
+$('model').onchange = load;
 $('previous').onclick = () => { $('model').value = (Number($('model').value)+rows.length-1)%rows.length; load(); };
 $('next').onclick = () => { $('model').value = (Number($('model').value)+1)%rows.length; load(); };
 $('wire').onchange = () => { meshes.forEach(m => m.material.wireframe = $('wire').checked); render(); };

@@ -11,16 +11,12 @@ import urllib.request
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("before", type=Path, help="Corpus output directory")
-    parser.add_argument("--after", type=Path, help="Candidate worker's corpus output; omit if unavailable")
-    parser.add_argument("--experiments", type=Path, help="Optional counterfactual directory with summary.json")
+    parser.add_argument("--after", required=True, type=Path, help="Current Foxtrot corpus output")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     before = json.loads((args.before / "results.json").read_text())
-    after = {} if args.after is None else {
+    after = {
         row["path"]: row for row in json.loads((args.after / "results.json").read_text())["results"]
-    }
-    experiments = {} if args.experiments is None else {
-        row["path"]: row for row in json.loads((args.experiments / "summary.json").read_text())
     }
     args.output.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -40,27 +36,19 @@ def main():
             continue
         case = args.before / row["artifacts"]
         old = copy_mesh(case / "mesh.stl", f"{index}-before.stl")
-        item = {"path": row["path"], "before": old, "after": old,
+        item = {"path": row["path"], "before": old,
                 "reference": copy_mesh(case / "occt.stl", f"{index}-oracle.stl"),
-                "beforeDistances": distances(row), "afterDistances": distances(row),
-                "hasAfter": args.after is not None}
-        if args.after is not None:
-            fixed = after[row["path"]]
-            if fixed["sha256"] != row["sha256"]:
-                raise ValueError(f"Input changed: {row['path']}")
-            mesh = args.after / fixed["artifacts"] / "mesh.stl"
-            item["after"] = copy_mesh(mesh, f"{index}-after.stl") if mesh.exists() else None
-            item["afterStatus"] = fixed["status"]
-            item["afterCompletion"] = fixed.get("metrics", {}).get("completion", "unknown")
-            item["afterDistances"] = distances(fixed)
-        if row["path"] in experiments:
-            experiment = experiments[row["path"]]
-            item["experiment"] = copy_mesh(
-                args.experiments / experiment["profile"] / Path(row["path"]).stem / "mesh.stl",
-                f"{index}-experiment.stl")
-            item["experimentName"] = experiment["profile"]
-            item["experimentDistances"] = list(experiment["max"][k] for k in
-                                               ("actual_to_reference", "reference_to_actual"))
+                "beforeDistances": distances(row)}
+        fixed = after[row["path"]]
+        if fixed["sha256"] != row["sha256"]:
+            raise ValueError(f"Input changed: {row['path']}")
+        mesh = args.after / fixed["artifacts"] / "mesh.stl"
+        if not mesh.exists():
+            raise ValueError(f"After mesh missing: {row['path']}")
+        item["after"] = copy_mesh(mesh, f"{index}-after.stl")
+        item["afterStatus"] = fixed["status"]
+        item["afterCompletion"] = fixed.get("metrics", {}).get("completion", "unknown")
+        item["afterDistances"] = distances(fixed)
         rows.append(item)
     (args.output / "report.json").write_text(json.dumps(rows, indent=2) + "\n")
     shutil.copyfile(Path(__file__).with_name("oracle_report.html"), args.output / "index.html")

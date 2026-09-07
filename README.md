@@ -244,11 +244,9 @@ python3 -m http.server 8090 --directory local/visual-report
 ```
 
 Both corpus runs must retain meshes and oracle measurements for the same input
-hashes. Omit `--after` when no fix exists: the report explicitly shows the same
-baseline twice rather than claiming an improvement. `--experiments DIR` can
-include RCA counterfactuals (`summary.json` and per-profile meshes) in a separate,
-clearly labeled middle-pane mode; these are not accepted fixes. The generator
-downloads pinned Three.js 0.180.0 modules and its license once into the output;
+hashes. `--after` is required: every comparison shows genuine baseline, current
+Foxtrot, and OCCT meshes rather than substituting the baseline for a missing
+output. The generator downloads pinned Three.js 0.180.0 modules and its license once into the output;
 viewing needs no external assets. Geometry uses neutral flat shading, not STEP
 colors or the application's vertex-normal pipeline. Serve only the generated
 directory, not the repository or corpus roots. In an orb, use a supervised
