@@ -1,5 +1,16 @@
 # Würth and KiCad STEP repair worklog
 
+### Preserve small curved trims
+
+Keep degree + 1 samples per polynomial trim span and at least three samples
+on conics, in addition to the physical chord bound. A chord budget alone can
+collapse two distinct sub-tolerance curved edges onto one segment and erase
+a valid small face. The capacitor regression replay confirms the previously
+collapsed small faces are retained. NURBS 53 tests and triangulation 56 tests
+pass. Evidence: `/tmp/cohort-curve-tests.log`,
+`/tmp/cohort-partition-tests.log`, `local/cohort-partition-regressions`.
+This is independent of the still-experimental interior refinement below.
+
 ### Reuse feasible inverse upper bounds
 
 Subdivision samples are themselves feasible solutions. Keep improving sample

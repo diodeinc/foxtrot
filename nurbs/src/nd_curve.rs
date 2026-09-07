@@ -75,7 +75,15 @@ impl<const D: usize> NDBSplineCurve<D> {
             for span in self.knots.degree()..self.knots.len()-self.knots.degree()-1 {
                 let a = self.knots[span].max(start.min(end));
                 let b = self.knots[span+1].min(start.max(end));
-                if a < b { cells.push((span,a,b)); }
+                // Degree + 1 samples preserve nonlinearity even when the whole
+                // feature is below the chord budget. Otherwise two distinct
+                // trim curves can become the same segment and erase a face.
+                if a < b {
+                    for i in 0..self.knots.degree() {
+                        let at = |j| a + (b-a)*(j as f64/self.knots.degree() as f64);
+                        cells.push((span, at(i), at(i+1)));
+                    }
+                }
             }
             if start > end { cells.reverse(); }
             for (span,a,b) in cells {

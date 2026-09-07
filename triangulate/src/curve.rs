@@ -189,7 +189,8 @@ impl Curve {
                     glm::vec4_to_vec3(&(world_from_plane * p)).norm()
                 };
                 let mut parameters = vec![t0];
-                let mut pending = vec![(t0,t1)];
+                let middle = (t0+t1)*0.5;
+                let mut pending = vec![(middle,t1),(t0,middle)];
                 while let Some((a,b)) = pending.pop() {
                     let bound = second_derivative(a).max(second_derivative(b)) * (b-a).powi(2) / 8.;
                     if !bound.is_finite() { return Err(Error::InvalidGeometry("nonfinite conic bound")); }
@@ -237,7 +238,7 @@ impl Curve {
                 let radius = world_from_eplane.column(0).xyz().norm()
                     .max(world_from_eplane.column(1).xyz().norm());
                 let max_angle = (8. * tolerance / radius).sqrt().min(std::f64::consts::FRAC_PI_2);
-                let count = ((u_ang-v_ang).abs()/max_angle).ceil() as usize + 1;
+                let count = (((u_ang-v_ang).abs()/max_angle).ceil() as usize + 1).max(3);
 
                 let mut out_world = vec![u];
                 // Walk around the circle, using the true positions for start
