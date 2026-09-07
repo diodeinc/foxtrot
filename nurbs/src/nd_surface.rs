@@ -82,6 +82,22 @@ impl<const D: usize> NDBSplineSurface<D> {
         self.v_knots.max_t()
     }
 
+    pub(crate) fn bezier_cell(&self, spans: [usize; 2]) -> Vec<Vec<TVec<f64, D>>> {
+        let [u, v] = spans;
+        let rows: Vec<_> = self.control_points.iter().map(|row|
+            crate::nd_curve::bezier_controls(&self.v_knots, row, v, self.v_knots[v], self.v_knots[v+1])
+        ).collect();
+        let mut result = vec![Vec::new(); self.u_knots.degree()+1];
+        for j in 0..=self.v_knots.degree() {
+            let column: Vec<_> = rows.iter().map(|row| row[j]).collect();
+            for (i, p) in crate::nd_curve::bezier_controls(&self.u_knots, &column, u,
+                self.u_knots[u], self.u_knots[u+1]).into_iter().enumerate() {
+                result[i].push(p);
+            }
+        }
+        result
+    }
+
     pub(crate) fn span_control_bounds(&self, spans: [usize; 2],
         cartesian: impl Fn(TVec<f64, D>) -> DVec3,
     ) -> [DVec3; 2] {

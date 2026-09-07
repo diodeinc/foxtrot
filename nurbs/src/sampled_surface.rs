@@ -11,16 +11,17 @@ pub struct SampledSurface<const N: usize> {
     /// positions (median at the middle of each range, axis = depth % 3).
     kd: Vec<u32>,
     /// Control-hull bounds and the contiguous sample range of each knot cell.
-    cells: Vec<SurfaceCell>,
+    cells: Vec<SurfaceCell<N>>,
 }
 
 const PROJECTION_TOL: f64 = 64. * f64::EPSILON;
 
 #[derive(Debug, Clone)]
-struct SurfaceCell {
+struct SurfaceCell<const N: usize> {
     spans: [usize; 2],
     bounds: [DVec3; 2],
     samples: std::ops::Range<usize>,
+    controls: Vec<Vec<nalgebra_glm::TVec<f64, N>>>,
 }
 
 struct DistanceModel {
@@ -195,6 +196,7 @@ where
                     spans: [i, j],
                     bounds,
                     samples: start..samples.len(),
+                    controls: surf.bezier_cell([i, j]),
                 });
             }
         }
@@ -487,6 +489,69 @@ where
                 }
             }
         }
+        // A local stationary point is only an upper bound. Refine the actual
+        // homogeneous control hull until no remaining patch can improve the
+        // distance at the geometric resolution of f64 input coordinates.
+        let scale = self.cells.iter().flat_map(|c| c.bounds).map(|p| p.norm()).fold(p.norm(), f64::max);
+        let tolerance = f64::EPSILON.sqrt() * scale;
+        let mut queue = VecDeque::new();
+        if error.sqrt() > tolerance {
+            for cell in &self.cells {
+                queue.push_back((cell.controls.clone(),
+                    DVec2::new(self.surf.u_knots[cell.spans[0]], self.surf.v_knots[cell.spans[1]]),
+                    DVec2::new(self.surf.u_knots[cell.spans[0]+1], self.surf.v_knots[cell.spans[1]+1]),
+                    cell.spans));
+            }
+        }
+        while let Some((controls, lo, hi, spans)) = queue.pop_front() {
+            let mid = (lo + hi) * 0.5;
+            let d = self.surf.derivs_in_span::<1>(mid, spans, p);
+            let normal = d[1][0].cross(&d[0][1]);
+            let normal = if normal.norm_squared() > 0. { normal.normalize() } else { DVec3::zeros() };
+            let mut slab = [f64::INFINITY, f64::NEG_INFINITY];
+            let mut bounds = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
+            for q in controls.iter().flatten().copied().map(crate::nd_curve::cartesian) {
+                bounds[0] = bounds[0].inf(&q); bounds[1] = bounds[1].sup(&q);
+                let offset = (q-p).dot(&normal);
+                slab[0] = slab[0].min(offset); slab[1] = slab[1].max(offset);
+            }
+            let lower = (bounds[0]-p).sup(&(p-bounds[1])).sup(&DVec3::zeros()).norm()
+                .max(slab[0].max(-slab[1]));
+            if lower + tolerance >= error.sqrt() { continue; }
+            for seed in [lo, hi, DVec2::new(lo.x, hi.y), DVec2::new(hi.x, lo.y), mid] {
+                if let Some(uv) = self.newtons_method_inner(p, seed, 256, spans.map(|s| s..s+1)) {
+                    let d = distance(uv);
+                    if d < error { error = d; result = Some(uv); }
+                }
+            }
+            if error.sqrt() <= tolerance { break; }
+            // Split the direction with the larger control polygon variation.
+            let u_size = controls.windows(2).map(|rows| rows[0].iter().zip(&rows[1]).map(|(&a,&b)|
+                (crate::nd_curve::cartesian(a)-crate::nd_curve::cartesian(b)).norm()).fold(0., f64::max)).sum::<f64>();
+            let v_size = controls.iter().map(|row| row.windows(2).map(|w|
+                (crate::nd_curve::cartesian(w[0])-crate::nd_curve::cartesian(w[1])).norm()).sum::<f64>()).fold(0., f64::max);
+            let axis = if u_size >= v_size { 0 } else { 1 };
+            if mid[axis] == lo[axis] || mid[axis] == hi[axis] { continue; }
+            let mut halves = [controls.clone(), controls.clone()];
+            if axis == 0 {
+                for j in 0..controls[0].len() {
+                    let column: Vec<_> = controls.iter().map(|row| row[j]).collect();
+                    for (side, column) in crate::nd_curve::split_bezier(&column).iter().enumerate() {
+                        for (i, &p) in column.iter().enumerate() { halves[side][i][j] = p; }
+                    }
+                }
+            } else {
+                for (i, row) in controls.iter().enumerate() {
+                    let [a,b] = crate::nd_curve::split_bezier(row);
+                    halves[0][i] = a; halves[1][i] = b;
+                }
+            }
+            let mut left_hi = hi; left_hi[axis] = mid[axis];
+            let mut right_lo = lo; right_lo[axis] = mid[axis];
+            let [a,b] = halves;
+            queue.push_back((a, lo, left_hi, spans));
+            queue.push_back((b, right_lo, hi, spans));
+        }
         if result.is_none() {
             error!("Could not find UV coordinates");
         }
@@ -527,6 +592,21 @@ mod tests {
 
     fn close(a: f64, b: f64, tolerance: f64) {
         assert!((a - b).abs() <= tolerance, "{} != {}", a, b);
+    }
+
+    #[test]
+    fn inverse_search_resolves_multiple_sheets_within_one_polynomial_cell() {
+        let surf = NDBSplineSurface::new(true, true,
+            KnotVector::from_multiplicities(3, &[0., 1.], &[4, 4]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [-1., 3., -3., 1.].iter().enumerate().map(|(i,&y)|
+                [0.,1.].iter().map(|&z| DVec3::new(i as f64 * 0.001 / 3., y, z)).collect()).collect());
+        let sampled = SampledSurface::new(surf);
+        for i in 1..40 {
+            let target = sampled.surf.point(DVec2::new(i as f64 / 40., 0.37));
+            let uv = sampled.uv_from_point(target).unwrap();
+            assert!((sampled.surf.point(uv)-target).norm() < 1e-10);
+        }
     }
 
     #[test]

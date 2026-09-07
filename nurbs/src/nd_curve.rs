@@ -2,6 +2,42 @@ use std::cmp::min;
 use nalgebra_glm::TVec;
 use crate::KnotVector;
 
+/// Restrict one polynomial knot span using its blossom. Homogeneous controls
+/// follow the same affine operations, so this also handles rational geometry.
+pub(crate) fn bezier_controls<const D: usize>(
+    knots: &KnotVector, controls: &[TVec<f64, D>], span: usize, a: f64, b: f64,
+) -> Vec<TVec<f64, D>> {
+    let p = knots.degree();
+    (0..=p).map(|i| {
+        let mut d = controls[span-p..=span].to_vec();
+        for r in 1..=p {
+            let t = if r <= p-i { a } else { b };
+            for j in (r..=p).rev() {
+                let lo = knots[span-p+j];
+                let alpha = (t-lo) / (knots[span+j-r+1]-lo);
+                d[j] = d[j-1] * (1.-alpha) + d[j] * alpha;
+            }
+        }
+        d[p]
+    }).collect()
+}
+
+pub(crate) fn split_bezier<const D: usize>(controls: &[TVec<f64, D>]) -> [Vec<TVec<f64, D>>; 2] {
+    let mut d = controls.to_vec();
+    let mut left = vec![d[0]];
+    let mut right = vec![*d.last().unwrap()];
+    for n in (1..d.len()).rev() {
+        for i in 0..n { d[i] = (d[i] + d[i+1]) * 0.5; }
+        left.push(d[0]); right.push(d[n-1]);
+    }
+    right.reverse();
+    [left, right]
+}
+
+pub(crate) fn cartesian<const D: usize>(p: TVec<f64, D>) -> nalgebra_glm::DVec3 {
+    nalgebra_glm::DVec3::new(p[0], p[1], p[2]) / if D == 4 { p[3] } else { 1. }
+}
+
 #[derive(Debug, Clone)]
 pub struct NDBSplineCurve<const D: usize> {
     pub open: bool,
