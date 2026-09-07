@@ -691,8 +691,11 @@ impl PreparedSurface<'_> {
     }
 
     fn sphere_chart(points: &[DVec3], edges: &[(usize, usize)]) -> Result<DVec3, Error> {
-        let mut candidates = Vec::with_capacity(edges.len());
-        for (edge_index, &(i, j)) in edges.iter().enumerate() {
+        // The logarithmic chart is singular at -q. Select q by maximizing the
+        // singularity's clearance from the whole oriented boundary, rather
+        // than placing it a small fixed distance across one edge.
+        let mut candidates = Vec::with_capacity(edges.len() * 8);
+        for &(i, j) in edges {
             let a = *points
                 .get(i)
                 .ok_or(Error::InvalidGeometry("boundary edge index"))?;
@@ -705,37 +708,43 @@ impl PreparedSurface<'_> {
                 return Err(Error::InvalidGeometry("ambiguous antipodal spherical edge"));
             }
             if cross_norm > 32.0 * EPSILON {
-                candidates.push((cross_norm.atan2(a.dot(&b)), edge_index));
+                let normal = a.cross(&b) / cross_norm;
+                candidates.extend([normal, -normal]);
+                let midpoint = (a + b) / sum_norm;
+                candidates.extend([
+                    (normal + midpoint).normalize(),
+                    (normal - midpoint).normalize(),
+                    (-normal + midpoint).normalize(),
+                    (-normal - midpoint).normalize(),
+                ]);
             }
+            let midpoint = (a + b) / sum_norm;
+            candidates.extend([midpoint, -midpoint]);
         }
-        candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
 
-        for (_, selected) in candidates {
-            let (i, j) = edges[selected];
-            let a = points[i];
-            let b = points[j];
-            let m = (a + b).normalize();
-            let n = a.cross(&b).normalize();
-            let mut clearance = Self::angular_distance(m, a).min(Self::angular_distance(m, b));
-            for (edge_index, &(u, v)) in edges.iter().enumerate() {
-                if edge_index != selected {
-                    clearance =
-                        clearance.min(Self::point_minor_arc_distance(m, points[u], points[v])?);
-                }
-            }
-            let clearance_error = 64.0 * EPSILON * (edges.len() as f64 + 1.0);
-            if !clearance.is_finite() || clearance <= clearance_error {
+        let mut best: Option<(f64, DVec3)> = None;
+        for q in candidates {
+            let (inside, inside_error) = Self::spherical_winding_sum(q, points, edges)?;
+            // Positive winding selects the bounded planar representation of
+            // this oriented face rather than its complement. Testing q and -q
+            // as ordinary membership queries would reject antipodal bands.
+            if inside <= inside_error {
                 continue;
             }
-            let delta = clearance * 0.5;
-            let exterior_pole = delta.cos() * m - delta.sin() * n;
-            let q = -exterior_pole.normalize();
-            let (winding, winding_error) = Self::spherical_winding_sum(q, points, edges)?;
-            if winding > winding_error {
-                return Ok(q);
+            let mut clearance = PI;
+            for &(u, v) in edges {
+                clearance = clearance.min(Self::point_minor_arc_distance(-q, points[u], points[v])?);
+            }
+            if clearance.is_finite()
+                && best.as_ref().map_or(true, |(c, _)| clearance > *c)
+            {
+                best = Some((clearance, q));
             }
         }
-        Err(Error::CouldNotLower)
+        let clearance_error = 64.0 * EPSILON * (edges.len() as f64 + 1.0);
+        best.filter(|(clearance, _)| *clearance > clearance_error)
+            .map(|(_, q)| q)
+            .ok_or(Error::CouldNotLower)
     }
 
     fn type_name(&self) -> &'static str {
