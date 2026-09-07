@@ -106,8 +106,9 @@ async function load() {
   const run = ++generation, row = rows[Number($('model').value)];
   const unresolved = row.afterStatus !== 'ok';
   $('status').textContent = 'Loading all three meshes…';
-  $('notice').textContent = `Current Foxtrot status: ${row.afterStatus}; mesh completion: ${row.afterCompletion}. ${row.afterStatus === 'ok' ? 'Passes the sampled oracle check; this is not a correctness proof.' : 'UNRESOLVED — NOT FIXED. Any partial mesh is diagnostic only.'}`;
+  $('notice').textContent = `Current Foxtrot status: ${row.afterStatus}; mesh completion: ${row.afterCompletion}. ${row.afterStatus === 'ok' ? 'Passes the sampled oracle check; this is not a correctness proof.' : 'Does not pass the reference comparison. Any partial mesh is diagnostic only.'} ${row.note || ''}`;
   $('afterBadge').hidden = !unresolved;
+  $('afterBadge').textContent = row.afterCompletion === 'complete' ? 'REFERENCE MISMATCH' : 'PARTIAL MESH · NOT FIXED';
   try {
     const geometries = await Promise.all([row.before, row.after, row.reference].map(url => loader.loadAsync(url)));
     if (run !== generation) { geometries.forEach(g => g.dispose()); return; }
@@ -124,6 +125,7 @@ async function load() {
     const values = [row.beforeDistances, row.afterDistances, null];
     [...document.querySelectorAll('.metrics')].forEach((e,i) => {
       e.textContent = geometries[i].getAttribute('position') ? `${(geometries[i].getAttribute('position').count/3).toLocaleString()} triangles` : 'No mesh produced';
+      if (i < 2) e.append(` · ${i === 0 ? row.beforeCompletion || 'unknown' : row.afterCompletion}`);
       e.append(document.createElement('br'));
       e.append(values[i] ? `${values[i].map(x => x.toFixed(4)).join(' / ')} mm` : i === 2 ? 'Reference deflection: 0.01 mm / 0.1 rad' : 'Oracle distance unavailable');
     });

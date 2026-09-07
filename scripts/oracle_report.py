@@ -13,7 +13,9 @@ def main():
     parser.add_argument("before", type=Path, help="Corpus output directory")
     parser.add_argument("--after", required=True, type=Path, help="Current Foxtrot corpus output")
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--notes", type=Path, help="JSON mapping input paths to investigation notes")
     args = parser.parse_args()
+    notes = json.loads(args.notes.read_text()) if args.notes else {}
     before = json.loads((args.before / "results.json").read_text())
     after = {
         row["path"]: row for row in json.loads((args.after / "results.json").read_text())["results"]
@@ -32,13 +34,15 @@ def main():
         return [d[k]["max_sampled_mm"] for k in ("actual_to_reference", "reference_to_actual")]
 
     for index, row in enumerate(before["results"]):
-        if row["status"] != "oracle_mismatch":
+        if row["status"] not in ("oracle_mismatch", "tessellation_error"):
             continue
         case = args.before / row["artifacts"]
         old = copy_mesh(case / "mesh.stl", f"{index}-before.stl")
         item = {"path": row["path"], "before": old,
                 "reference": copy_mesh(case / "occt.stl", f"{index}-oracle.stl"),
-                "beforeDistances": distances(row)}
+                "beforeDistances": distances(row),
+                "beforeCompletion": row.get("metrics", {}).get("completion", "unknown"),
+                "note": notes.get(row["path"], "")}
         fixed = after[row["path"]]
         if fixed["sha256"] != row["sha256"]:
             raise ValueError(f"Input changed: {row['path']}")

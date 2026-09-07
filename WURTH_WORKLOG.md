@@ -2,6 +2,29 @@
 
 ## Oracle cohort 3 — 2026-09-07
 
+### Final review and resource bookkeeping
+
+Generate `.amp/in/artifacts/oracle-cohort3` with all 15 eligible models in
+before/current/OCCT panes. Include native processing failures in the report,
+label partial versus complete meshes, and show investigation notes rather
+than implying every numerical mismatch proves the native mesh is wrong.
+Exercise all 15 model selections in Chromium; each loads all three meshes.
+Inspect CAIR, WPCC-760308100110 and LED screenshots, including the incomplete
+before cap and unsupported-reference warning. Keep the inspection images in
+`.amp/in/artifacts/cohort3-{cair,wpcc,led}.png`. No tolerance is relaxed.
+
+`local/occt-venv/bin/python -m unittest discover -s scripts -p 'test_*.py'`
+passes all 28 harness tests. The native release checks are recorded above.
+The supervised `oracle-cohort3` service serves the report on port 8766.
+
+Remove the unused debug build profile (1.5 GiB reported by Cargo) and
+losslessly compress 49 superseded intermediate STLs, verifying decompressed
+SHA-256 before deleting originals. Compression recovers 801,419,288 bytes;
+inventory: `local/cohort3/cleanup.json`. Preserve inputs, frozen baseline,
+final meshes, reference meshes, metrics and RCA evidence. About 6.9 GiB
+remains free after generating the self-contained visual report. Close the
+inspection browser; no cohort workers remain running.
+
 ### Represent spindle-torus caps as rational revolutions
 
 Encode the selected apple/lemon meridian as exact rational quadratic arcs
