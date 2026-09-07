@@ -2,6 +2,31 @@
 
 ## Oracle cohort 2 — 2026-09-07
 
+### Centralize spline-chart period conversions
+
+Distinguish raw knot-space periods from mapped translation periods on
+`SplineChart`. Boundary refinement, contour unwrapping, seam cutting and
+Steiner insertion now consume the same mapped-period data. Seam knot
+projection uses the chart's existing forward map instead of a second
+axis-dependent scale formula. Polar/lens charts supply no translation
+periods; their actual geometric pole/seam behavior remains intact.
+
+Verify both cleanup commits with 147 passing release library tests and a
+serial native replay of 53 Würth regressions plus 56 KiCad controls. All 109
+retain exactly the same non-timing geometry metrics. Re-run the frozen
+pre-cleanup worker for the KiCad controls: all 56 STL triangle multisets
+match byte-for-byte, including multiplicity and orientation. Whole files
+match in 55 cases; Bourns 8100 L41.9 differs only in triangle ordering.
+Coilcraft 2222SQ-221's native browser buffer also matches byte-for-byte.
+This establishes preservation of the repaired output, not new OCCT accuracy
+claims or resolution of the four remaining active geometry mismatches.
+
+Evidence: `local/chart-cleanup-{wurth,kicad}` and
+`local/chart-cleanup-parity.json`. No OCCT references are regenerated.
+After checking hashes, remove the 56 redundant new STL exports, reclaiming
+70,688,004 bytes; retain manifests, metrics, logs, hashes and original
+references. Approximately 9 GiB disk space remains free.
+
 ### Simplify physical control-polygon traversal
 
 Keep the Cartesian-per-knot-unit scale calculation and traverse adjacent

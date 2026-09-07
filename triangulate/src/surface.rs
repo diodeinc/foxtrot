@@ -28,7 +28,7 @@ pub enum SplineChart {
 }
 
 impl SplineChart {
-    fn periods(&self) -> [Option<f64>;2] {
+    fn raw_periods(&self) -> [Option<f64>;2] {
         match *self {
             Self::Cartesian { periods,.. } => periods,
             Self::Lens { .. } => [None,None],
@@ -37,6 +37,15 @@ impl SplineChart {
                 periods[angular] = (scale[angular] == bounds[1][angular]-bounds[0][angular]).then_some(scale[angular]);
                 periods
             }
+        }
+    }
+
+    /// Translation periods in the triangulation plane, not knot units.
+    /// Polar charts encode periodicity geometrically rather than by translation.
+    fn mapped_periods(&self) -> [Option<f64>;2] {
+        match *self {
+            Self::Cartesian { v_scale,periods } => [periods[0],periods[1].map(|p|p*v_scale)],
+            Self::Polar { .. } | Self::Lens { .. } => [None,None],
         }
     }
 
@@ -533,13 +542,13 @@ impl PreparedSurface<'_> {
                     raw.x,
                     surf.surf.min_u(),
                     surf.surf.max_u(),
-                    chart.periods()[0].is_none(),
+                    chart.raw_periods()[0].is_none(),
                 ),
                 Self::spline_parameter(
                     raw.y,
                     surf.surf.min_v(),
                     surf.surf.max_v(),
-                    chart.periods()[1].is_none(),
+                    chart.raw_periods()[1].is_none(),
                 ),
             )
         })
@@ -800,14 +809,14 @@ impl PreparedSurface<'_> {
             let length2 = chord.norm_squared();
             let path_error = |mut end: DVec2| {
                 for axis in 0..2 {
-                    if let Some(period) = chart.periods()[axis] {
+                    if let Some(period) = chart.raw_periods()[axis] {
                         end[axis] = Self::unwrap_near(end[axis],seed[axis],period);
                     }
                 }
                 [0.25,0.5,0.75].iter().map(|&t| {
                     let mut uv = seed+(end-seed)*t;
-                    uv.x = Self::spline_parameter(uv.x,surf.surf.min_u(),surf.surf.max_u(),chart.periods()[0].is_none());
-                    uv.y = Self::spline_parameter(uv.y,surf.surf.min_v(),surf.surf.max_v(),chart.periods()[1].is_none());
+                    uv.x = Self::spline_parameter(uv.x,surf.surf.min_u(),surf.surf.max_u(),chart.raw_periods()[0].is_none());
+                    uv.y = Self::spline_parameter(uv.y,surf.surf.min_v(),surf.surf.max_v(),chart.raw_periods()[1].is_none());
                     let q = surf.surf.point(uv)-start;
                     let along = if length2 == 0. { 0. } else { (q.dot(&chord)/length2).clamp(0.,1.) };
                     (q-along*chord).norm()
@@ -885,10 +894,8 @@ impl PreparedSurface<'_> {
                 return Err(Error::InvalidGeometry("boundary chart approximation did not converge"));
             }
             let mut uv = self.lower(pos)?;
-            if let FaceChart::Spline(SplineChart::Cartesian { v_scale,periods }) = &self.chart {
-                for (axis, period) in [
-                    periods[0], periods[1].map(|p| p*v_scale),
-                ].iter().enumerate() {
+            if let FaceChart::Spline(chart) = &self.chart {
+                for (axis, period) in chart.mapped_periods().iter().enumerate() {
                     if let Some(period) = period { uv[axis] = Self::unwrap_near(uv[axis], (pa[axis]+pb[axis])*0.5, *period); }
                 }
             }
@@ -1071,10 +1078,12 @@ impl PreparedSurface<'_> {
     /// to close the contours. This handles winding loops without bending a
     /// long swept parameter direction into the radius of an annulus.
     pub fn cut_periodic(&self, pts: &mut Vec<(f64,f64)>, edges: &mut Vec<(usize,usize)>, verts: &mut Vec<Vertex>, tolerance: f64) -> Result<bool,Error> {
-        let (Surface::NURBS { surf }, FaceChart::Spline(SplineChart::Cartesian { v_scale, periods })) = (self.surface,&self.chart) else { return Ok(false); };
-        let axis = match periods { [Some(_),None] => 0, [None,Some(_)] => 1, _ => return Ok(false) };
-        let scale = if axis == 0 { 1. } else { *v_scale };
-        let period = periods[axis].unwrap()*scale;
+        let (Surface::NURBS { surf }, FaceChart::Spline(chart)) = (self.surface,&self.chart) else { return Ok(false); };
+        let (axis,period) = match chart.mapped_periods() {
+            [Some(period),None] => (0,period),
+            [None,Some(period)] => (1,period),
+            _ => return Ok(false),
+        };
         let mut angles: Vec<_> = pts.iter().map(|&p| Self::uv_coord(p,axis)*2.*PI/period).collect();
         let (start,span) = Self::smallest_circular_arc(&mut angles);
         let min = (start-(2.*PI-span)*0.5)*period/(2.*PI);
@@ -1135,10 +1144,9 @@ impl PreparedSurface<'_> {
                 let at = |t| { let mut uv = DVec2::zeros(); uv[axis] = side; uv[radial] = t; uv };
                 let start = Self::uv_coord(points[pair[0]],radial);
                 let end = Self::uv_coord(points[pair[1]],radial);
-                let knots = if radial == 0 { &surf.surf.u_knots } else { &surf.surf.v_knots };
-                let radial_scale = if radial == 0 { 1. } else { *v_scale };
+                let knots = [&surf.surf.u_knots,&surf.surf.v_knots][radial];
                 let mut cuts = vec![start];
-                cuts.extend((0..knots.len()).map(|i| knots[i]*radial_scale).filter(|&t| t > start && t < end));
+                cuts.extend((0..knots.len()).map(|i| chart.lower(DVec2::repeat(knots[i]))[radial]).filter(|&t| t > start && t < end));
                 cuts.push(end);
                 cuts.dedup();
                 let mut pending: Vec<_> = cuts.windows(2).map(|w| (w[0],w[1])).rev().collect();
@@ -1187,13 +1195,8 @@ impl PreparedSurface<'_> {
         edges: &[(usize, usize)],
         ranges: &[(usize, usize, bool)],
     ) {
-        let FaceChart::Spline(SplineChart::Cartesian { v_scale,periods }) = &self.chart
-        else {
-            return;
-        };
-        let periods = [
-            periods[0], periods[1].map(|p| p*v_scale),
-        ];
+        let FaceChart::Spline(chart) = &self.chart else { return; };
+        let periods = chart.mapped_periods();
 
         for &(start_edge, end_edge, single_edge_bound) in ranges {
             if start_edge >= end_edge || end_edge > edges.len() {
@@ -1403,12 +1406,10 @@ impl PreparedSurface<'_> {
             for &v in &vs {
                 let raw_uv = DVec2::new(u,v);
                 let mut projected = chart.lower(raw_uv);
-                if let SplineChart::Cartesian { v_scale,periods } = chart {
-                    for (axis,period) in [periods[0],periods[1].map(|p|p*v_scale)].iter().enumerate() {
-                        if let Some(period) = period {
-                            let min = [xmin,ymin][axis];
-                            projected[axis] = min+(projected[axis]-min).rem_euclid(*period);
-                        }
+                for (axis,period) in chart.mapped_periods().iter().enumerate() {
+                    if let Some(period) = period {
+                        let min = [xmin,ymin][axis];
+                        projected[axis] = min+(projected[axis]-min).rem_euclid(*period);
                     }
                 }
                 if projected.x < xmin || projected.x > xmax || projected.y < ymin || projected.y > ymax { continue; }
