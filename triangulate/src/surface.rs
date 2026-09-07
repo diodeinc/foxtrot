@@ -749,6 +749,55 @@ impl PreparedSurface<'_> {
         crate::timing::time(name, || self.lower_verts_inner(verts))
     }
 
+    /// Preserve spatial edge chords while resolving their nonlinear chart image.
+    /// Interior refinement cannot fix a constraint drawn through the wrong
+    /// surface region (for example, a polar diameter instead of a rim arc).
+    pub fn refine_boundary(&self, pts: &mut Vec<(f64, f64)>, edges: &mut Vec<(usize, usize)>,
+        verts: &mut Vec<Vertex>, tolerance: f64,
+    ) -> Result<(), Error> {
+        let mut i = 0;
+        while i < edges.len() {
+            let (a, b) = edges[i];
+            let pa = DVec2::new(pts[a].0, pts[a].1);
+            let pb = DVec2::new(pts[b].0, pts[b].1);
+            let va = verts[a];
+            let vb = verts[b];
+            let edge = vb.pos - va.pos;
+            let Some(start) = self.raise(pa) else { i += 1; continue; };
+            let Some(end) = self.raise(pb) else { i += 1; continue; };
+            // Measure chart distortion separately from source curve/surface
+            // offsets. Subdivision cannot remove those offsets and must not
+            // move the original spatial boundary to conceal them.
+            let chord = end - start;
+            let length2 = chord.norm_squared();
+            let needs_split = [0.25, 0.5, 0.75].iter().any(|&t| {
+                self.raise(pa + t*(pb-pa)).iter().any(|p| {
+                    let u = if length2 == 0. { 0. } else { ((p-start).dot(&chord)/length2).clamp(0.,1.) };
+                    (p-start-u*chord).norm() > tolerance
+                })
+            });
+            if !needs_split { i += 1; continue; }
+            let pos = va.pos + edge*0.5;
+            if pos == va.pos || pos == vb.pos || pts.len() >= 1_000_000 {
+                return Err(Error::InvalidGeometry("boundary chart approximation did not converge"));
+            }
+            let mut uv = self.lower(pos)?;
+            if let FaceChart::Spline(SplineChart::Cartesian { v_scale,periods }) = &self.chart {
+                for (axis, period) in [
+                    periods[0], periods[1].map(|p| p*v_scale),
+                ].iter().enumerate() {
+                    if let Some(period) = period { uv[axis] = Self::unwrap_near(uv[axis], (pa[axis]+pb[axis])*0.5, *period); }
+                }
+            }
+            let mid = pts.len();
+            pts.push((uv.x, uv.y));
+            verts.push(Vertex { pos, norm: DVec3::zeros(), color: va.color });
+            edges[i] = (a, mid);
+            edges.push((mid, b));
+        }
+        Ok(())
+    }
+
     fn lower_verts_inner(&self, verts: &[Vertex]) -> Result<Vec<(f64, f64)>, Error> {
         let mut pts = Vec::with_capacity(verts.len());
         for v in verts {

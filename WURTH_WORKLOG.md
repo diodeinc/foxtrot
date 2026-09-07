@@ -1,5 +1,15 @@
 # Würth and KiCad STEP repair worklog
 
+### Resolve trim chart curvature without moving source chords
+
+Subdivide a trim chord when its lifted chart segment departs from the lifted
+endpoint chord beyond the physical budget. Reproject the spatial midpoint;
+keep source curve/surface offsets separate from chart distortion so refinement
+does not try to erase STEP tolerances. This repairs trim connectivity that
+interior Steiner points cannot repair. Exhaustion remains an explicit face
+error. Combined validation: 143 library tests, 53 targeted processing passes,
+and the 55/56 OCCT result recorded below.
+
 ### Cut regular periodic patches in native parameters
 
 The polar annulus chart couples circumferential chord error to the other

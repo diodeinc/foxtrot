@@ -1018,6 +1018,7 @@ fn advanced_face(
     if had_boundary && edges.is_empty() {
         return Err(Error::InvalidGeometry("face boundary cancels completely"));
     }
+    prepared.refine_boundary(&mut pts, &mut edges, &mut mesh.verts, tolerance)?;
     let mut constraints: Vec<_> = edges.iter().map(|&(a, b)| (a, b, true)).collect();
     crate::timing::time("face:resolve_crossing_edges", || {
         resolve_crossing_edges(&mut pts, &mut constraints, &mut mesh.verts)
