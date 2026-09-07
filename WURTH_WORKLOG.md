@@ -2,6 +2,33 @@
 
 ## Oracle cohort 2 — 2026-09-07
 
+### Reject the CMBNC strip experiment; confirm a source schema violation
+
+A face-coverage-selected strip cutter clears both CMBNC processing errors, but
+the new complete OCCT reference rejects its geometry: 0.8300 mm forward and
+0.7482 mm reverse sampled error. The original partial mesh has 0.0137 mm forward
+and 1.6910 mm reverse error. Added geometry is not necessarily correct geometry.
+Reject the prototype, including its synthetic test, despite 148 passing library
+tests and complete native processing. The first synthetic assertion mistakenly
+tested spatial accuracy before interior refinement; its corrected assertion
+checks exact parameter-domain coverage. Neither substitutes for the real-part
+oracle. Production Rust sources are restored, not committed as a partial fix.
+Retain `local/cohort2-strip-prototype.patch`, `local/cohort2-strip-worker`,
+`local/cohort2-strip-cmbnc/`, and `local/cohort2-cmbnc-partial-comparison.json`.
+
+The original CMBNC source has two FACE_OUTER_BOUNDs on each failing face:
+#3039 references #6922 and #6923; #3187 references #7215 and #7216. Both pairs
+are explicitly FACE_OUTER_BOUND entities in the input, not inferred OCCT types.
+[ISO 10303-42:2021 topology_schema, face.WR2](https://www.steptools.com/stds/smrl/data/resource_docs/geometric_and_topological_representation/sys/5_schema.htm)
+requires `SIZEOF(QUERY(temp <* bounds | 'TOPOLOGY_SCHEMA.FACE_OUTER_BOUND' IN TYPEOF(temp))) <= 1`.
+This proves source nonconformance independently of healing, source/surface gaps,
+or native failure. Per the user's invalid-input policy, do not add recovery for
+this input. This schema violation does not itself explain every numerical
+discrepancy: many passing FI faces also violate it. It does not discredit the
+general chart-conditioning fix or justify treating other unresolved inputs as
+invalid. The broader doubly-periodic trimming limitation remains unsupported,
+not claimed fixed by this rejected experiment.
+
 ### Resource checkpoint and complete 17-case replay
 
 The bounded-oracle replay finishes all 17 cases with one job and one native
