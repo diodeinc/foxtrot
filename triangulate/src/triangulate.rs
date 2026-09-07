@@ -1382,6 +1382,68 @@ fn revolution_surface(
     Ok(Surface::new_nurbs(SampledSurface::new(surface)))
 }
 
+// A spindle torus's selected sheet is a circular arc revolved about its
+// axis. Encode its poles as collapsed rational boundaries, not annular rims.
+fn degenerate_torus_surface(
+    origin: DVec3,
+    axis: DVec3,
+    radial: DVec3,
+    major: f64,
+    minor: f64,
+    boundary: &[DVec3],
+) -> Result<Surface, Error> {
+    let axis = axis.normalize();
+    let radial = (radial - axis * radial.dot(&axis)).normalize();
+    let pole = (-major / minor).acos();
+    let mut range = (f64::INFINITY, f64::NEG_INFINITY);
+    for point in boundary {
+        let offset = point - origin;
+        let height = offset.dot(&axis);
+        let radius = (offset - axis * height).norm();
+        let angle = if radius == 0.0 {
+            pole.copysign(height)
+        } else {
+            height.atan2(radius - major).clamp(-pole, pole)
+        };
+        range.0 = range.0.min(angle);
+        range.1 = range.1.max(angle);
+    }
+    if range.0 >= range.1 {
+        range = (-pole, pole);
+    }
+    let spans = ((range.1 - range.0) / std::f64::consts::FRAC_PI_2).ceil() as usize;
+    let mut angles: Vec<_> = (0..=spans)
+        .map(|i| range.0 + (range.1 - range.0) * i as f64 / spans as f64)
+        .collect();
+    angles[spans] = range.1;
+    let mut controls = Vec::with_capacity(2 * spans + 1);
+    for i in 0..=2 * spans {
+        let (angle, weight) = if i % 2 == 0 {
+            (angles[i / 2], 1.0)
+        } else {
+            let a = angles[i / 2];
+            let b = angles[i / 2 + 1];
+            ((a + b) * 0.5, ((b - a) * 0.5).cos())
+        };
+        let radius = if i % 2 == 0 && angle.abs() == pole {
+            0.0
+        } else {
+            major + minor * angle.cos() / weight
+        };
+        let point = origin + radial * radius + axis * (minor * angle.sin() / weight);
+        controls.push(DVec4::new(point.x * weight, point.y * weight, point.z * weight, weight));
+    }
+    let knots: Vec<_> = (0..=spans).map(|i| i as f64 / spans as f64).collect();
+    let mut multiplicities = vec![2; spans + 1];
+    multiplicities[0] = 3;
+    multiplicities[spans] = 3;
+    revolution_surface(HomogeneousCurve {
+        open: true,
+        knots: KnotVector::from_multiplicities(2, &knots, &multiplicities),
+        control_points: controls,
+    }, origin, axis)
+}
+
 fn spline_surface(
     b: &BSplineSurfaceWithKnots_,
     controls: Vec<Vec<DVec4>>,
@@ -1458,12 +1520,13 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, boundary: &[DVec3]) -> Result
             // negative radial branch into a positive one with major radius
             // -R. This also selects the spec's outward normal: away from the
             // furthest, rather than nearest, point on the major circle.
-            Surface::new_torus_with_ref_direction(
+            degenerate_torus_surface(
                 location,
                 axis,
                 ref_direction,
                 if c.select_outer { major } else { -major },
                 minor,
+                boundary,
             )
         }
         Entity::Plane(p) => {
@@ -2524,6 +2587,34 @@ mod tests {
         match surface {
             Surface::NURBS { surf, .. } => surf,
             _ => panic!("expected NURBS"),
+        }
+    }
+
+    #[test]
+    fn degenerate_torus_caps_preserve_meridian_and_collapse_poles() {
+        for major in [-1.0_f64, 1.0] {
+            for sign in [-1.0, 1.0] {
+                let minor = 2.0;
+                let pole = (-major / minor).acos();
+                let boundary = [
+                    DVec3::new(major + minor * 0.2_f64.cos(), 0., sign * minor * 0.2_f64.sin()),
+                    DVec3::new(0., 0., sign * minor * pole.sin()),
+                ];
+                let surface = degenerate_torus_surface(
+                    DVec3::zeros(), DVec3::z(), DVec3::x(), major, minor, &boundary,
+                ).unwrap();
+                let prepared = surface.prepare(&[], &[], true, 0., false).unwrap();
+                assert!((prepared.raise(DVec2::zeros()).unwrap() - boundary[1]).norm() < 1e-12);
+                let sampled = nurbs(surface);
+                for i in 0..=20 {
+                    for j in 0..=20 {
+                        let p = sampled.surf.point(DVec2::new(i as f64 / 20., j as f64 / 20.));
+                        let radius = p.xy().norm();
+                        assert!(((radius - major).hypot(p.z) - minor).abs() < 1e-12);
+                        assert!(sign * p.z >= sign * boundary[0].z - 1e-12);
+                    }
+                }
+            }
         }
     }
 

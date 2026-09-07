@@ -2,6 +2,47 @@
 
 ## Oracle cohort 3 — 2026-09-07
 
+### Represent spindle-torus caps as rational revolutions
+
+Encode the selected apple/lemon meridian as exact rational quadratic arcs
+and reuse the existing surface-of-revolution and spline-pole charts. A pole
+is a collapsed boundary, not a finite annular rim. Signed major radius keeps
+the inner sheet's outward-normal convention. Restrict the generator to the
+face's boundary interval and preserve exact arc endpoints at the poles.
+
+LED-SMDC-3535 now completes all 27 faces in about 32 ms, with 1,616 triangles,
+no f64/browser degenerates and no zero browser normals. The 152 release
+library tests pass, including upper/lower poles on both selected sheets,
+the circular-meridian equation and outward normals. The final 348-input
+native replay has 347 completions and only the existing invalid EE13
+rejection. Its harness exits 1 because that invalid input remains present;
+there are no status regressions. Evidence: `local/cohort3/final-controls`.
+
+The LED's retained OCCT comparison does NOT pass (0.0145/0.6000 mm).
+Investigation finds reference face 7 has minor UV interval
+[0.195062621, 4.735313011], extending through the lower lobe. The source cap
+ends at the upper pole acos(-R/r) = 1.593720358. OCCT's imported face reaches
+z=-0.6000 mm although the native solid's bottom is z=0. This is not evidence
+that the cap should be extended downwards. `led-occt-faces.json` records the
+imported bounds; `pole-led-oracle.json` retains the failing comparison.
+
+OCCT source inspection confirms `select_outer` survives STEP parsing but is
+discarded by generic elementary-surface conversion: the derived degenerate
+torus dispatches as a ToroidalSurface, and MakeToroidalSurface constructs an
+unrestricted Geom_ToroidalSurface without consulting SelectOuter(). The pole
+formulas themselves are correct; the observed 4.7353 bound is not a pole.
+Source: https://github.com/Open-Cascade-SAS/OCCT/blob/master/src/DataExchange/TKDESTEP/StepToGeom/StepToGeom.cxx
+and https://github.com/Open-Cascade-SAS/OCCT/blob/master/src/ModelingAlgorithms/TKShHealing/ShapeAnalysis/ShapeAnalysis_Surface.cxx
+Keep this unsupported reference mismatch visible rather than weakening
+acceptance or labeling the valid STEP cap invalid.
+
+Final retained-reference replay: all 15 native meshes complete; 13 oracle
+passes (CAIR and all 12 WPCC), two reference-limited mismatches. RSTV's final
+forward sample is 0.10000078 mm, versus 0.09217 in the strip replay; both have
+43,139 triangles and reverse distance 0.09889 mm. Earlier direct source
+projection already contradicts the diagnosis of a bad native surface.
+Keep this borderline sampled result as a mismatch, not a certified fix.
+
 ### Use intrinsic strips for regular tori
 
 The remaining WPCC area excess comes from an ill-conditioned annulus: a
