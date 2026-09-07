@@ -231,6 +231,29 @@ dependencies or failed conversion is an explicit failure, never a skipped check.
 Reports record comparison settings and dependency versions. Re-record old OCCT
 baselines: aggregate-only acceptance is not equivalent to surface agreement.
 
+### Visual oracle review
+
+Generate a three-pane browser report for every `oracle_mismatch` in a retained
+corpus run. The panes share camera, scale and lighting; rotation, zoom and
+wireframe controls support inspection beyond the initial view.
+
+```sh
+python3 scripts/oracle_report.py local/before --after local/after \
+  --output local/visual-report
+python3 -m http.server 8090 --directory local/visual-report
+```
+
+Both corpus runs must retain meshes and oracle measurements for the same input
+hashes. Omit `--after` when no fix exists: the report explicitly shows the same
+baseline twice rather than claiming an improvement. `--experiments DIR` can
+include RCA counterfactuals (`summary.json` and per-profile meshes) in a separate,
+clearly labeled middle-pane mode; these are not accepted fixes. The generator
+downloads pinned Three.js 0.180.0 modules and its license once into the output;
+viewing needs no external assets. Geometry uses neutral flat shading, not STEP
+colors or the application's vertex-normal pipeline. Serve only the generated
+directory, not the repository or corpus roots. In an orb, use a supervised
+service with a portal to share the report.
+
 Harness tests (no Rust build or corpus download required):
 ```sh
 python3 -m unittest discover -s scripts -p 'test_corpus*.py'

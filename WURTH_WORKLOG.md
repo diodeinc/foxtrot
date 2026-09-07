@@ -1,5 +1,27 @@
 # Würth and KiCad STEP repair worklog
 
+## Three-pane visual report — 2026-09-07
+
+Added `scripts/oracle_report.py` and its HTML viewer. The generated report in
+`local/oracle-visual-report` covers all 16 oracle mismatches with synchronized
+Before / After / OCCT panes, shared bounds/cameras, neutral flat shading,
+wireframe, triangle counts and directional distance metrics. No accepted fix
+exists yet, so After explicitly duplicates Before. A separate middle-pane
+selector shows the rejected sphere-mean / spline64 experiments. Future runs
+can supply `--after` with a new corpus output; input hashes must match.
+
+Generated the report successfully and loaded all 16 cases in both modes
+(32 browser states), with three canvases and no browser errors. Inspected
+the complete 16-model screenshot overview, baseline state, Disc16 improvement,
+Sharp regression, wireframe, and linked rotation after dragging the left pane.
+Captures are in `.amp/in/artifacts/oracle-comparisons` and
+`.amp/in/artifacts/oracle-review-*.png`. This verifies the report rendering,
+not geometry correctness. Python compilation and `git diff --check` pass.
+The `oracle-review` supervised service serves only the generated directory on
+port 8090. The report vendors pinned Three.js modules and license; no external
+requests are needed when viewing. It occupies 167 MiB; obsolete blank capture
+removed, current RCA evidence retained, 19 GiB disk space remains free.
+
 ## OCCT failure batch and root causes — 2026-09-07
 
 The oracle implementation and initial samples are committed. The next targeted
