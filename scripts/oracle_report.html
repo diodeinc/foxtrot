@@ -19,6 +19,8 @@
   article { min-width: 0; background: #192331; border: 1px solid #35455b; border-radius: 8px; overflow: hidden; }
   h2 { font-size: 17px; padding: 15px; margin: 0; }
   .viewport { height: 440px; position: relative; background: #192331; }
+  .badge { position: absolute; z-index: 1; top: 12px; left: 12px; padding: 6px 9px; border-radius: 4px; background: #8d2f36; color: white; font-weight: 700; letter-spacing: .04em; }
+  .badge[hidden] { display: none; }
   canvas { width: 100%; height: 100%; display: block; }
   .metrics { padding: 15px; min-height: 90px; color: #bfccdb; line-height: 1.6; font-variant-numeric: tabular-nums; }
   #status { color: #a9d9ca; min-height: 24px; }
@@ -28,14 +30,14 @@
 <script type="importmap">{"imports":{"three":"./three.module.js"}}</script>
 <header>
   <h1>Foxtrot / Surface oracle review</h1>
-  <p>All failed models · matched camera, scale and lighting · drag any pane to rotate all three; scroll to zoom.</p>
+  <p>Candidate report for all original failures · matched camera, scale and lighting · drag any pane to rotate all three; scroll to zoom.</p>
   <div class="toolbar">
     <button id="previous" aria-label="Previous model">←</button>
     <select id="model" aria-label="Failed model"></select>
     <button id="next" aria-label="Next model">→</button>
   </div>
   <div class="toolbar">
-    <label>Middle pane <select id="mode"><option value="after">After / accepted code</option><option value="experiment">RCA experiment — NOT an accepted fix</option></select></label>
+    <label>Middle pane <select id="mode"><option value="after">After / candidate output</option><option value="experiment">RCA experiment — NOT an accepted fix</option></select></label>
     <label><input type="checkbox" id="wire"> Wireframe</label>
     <button id="reset">Reset camera</button>
   </div>
@@ -45,7 +47,7 @@
   <div id="status" role="status">Loading report…</div>
   <div class="panes">
     <article><h2>01 / Before · Foxtrot</h2><div class="viewport"></div><div class="metrics"></div></article>
-    <article><h2 id="middleTitle">02 / After · Foxtrot</h2><div class="viewport"></div><div class="metrics"></div></article>
+    <article><h2 id="middleTitle">02 / After · candidate Foxtrot</h2><div class="viewport"><strong id="afterBadge" class="badge" hidden>UNRESOLVED · NOT FIXED</strong></div><div class="metrics"></div></article>
     <article><h2>03 / Oracle · OCCT</h2><div class="viewport"></div><div class="metrics"></div></article>
   </div>
   <p class="legend">Distances: maximum sampled Foxtrot → OCCT / OCCT → Foxtrot, in mm. Acceptance threshold: 0.1 mm. Sampling is not a correctness proof. Neutral, double-sided, flat-shaded STL rendering compares geometry, not original STEP colors or browser vertex normals. No independent alignment or scaling is applied.</p>
@@ -104,11 +106,13 @@ function reset() {
 async function load() {
   const run = ++generation, row = rows[Number($('model').value)];
   const experimental = $('mode').value === 'experiment' && row.experiment;
+  const unresolved = !experimental && row.hasAfter && row.afterStatus !== 'ok';
   $('status').textContent = 'Loading all three meshes…';
-  $('notice').textContent = experimental ? `Diagnostic only: ${row.experimentName}. This experiment was not accepted; improvements and regressions are both shown.` : row.hasAfter ? 'After uses the supplied post-fix corpus output. Compare the measured errors, not appearance alone.' : 'No accepted geometry fixes yet. Before and After intentionally show the same baseline. Select the RCA experiment to inspect the rejected trial.';
-  $('middleTitle').textContent = experimental ? '02 / Experiment · NOT a fix' : '02 / After · Foxtrot';
+  $('notice').textContent = experimental ? `Diagnostic only: ${row.experimentName}. This experiment was not accepted; improvements and regressions are both shown.` : row.hasAfter ? `Candidate status: ${row.afterStatus}; mesh completion: ${row.afterCompletion}. ${row.afterStatus === 'ok' ? 'Passes the sampled oracle check, but is not accepted and is not a correctness proof.' : 'UNRESOLVED — NOT FIXED. Any partial mesh is diagnostic only; the Before mesh is never substituted.'}` : 'No candidate geometry output supplied. Before and After intentionally show the same baseline. Select the RCA experiment to inspect the rejected trial.';
+  $('middleTitle').textContent = experimental ? '02 / Experiment · NOT a fix' : '02 / After · candidate Foxtrot';
+  $('afterBadge').hidden = !unresolved;
   try {
-    const geometries = await Promise.all([row.before, experimental || row.after, row.reference].map(url => loader.loadAsync(url)));
+    const geometries = await Promise.all([row.before, experimental || row.after, row.reference].map(url => url ? loader.loadAsync(url) : new THREE.BufferGeometry()));
     if (run !== generation) { geometries.forEach(g => g.dispose()); return; }
     meshes.forEach((m,i) => { views[i].scene.remove(m); m.geometry.dispose(); m.material.dispose(); });
     meshes = geometries.map((geometry,i) => {
@@ -122,9 +126,9 @@ async function load() {
     home = {center, radius, distance: radius * 1.15 / Math.sin(Math.atan(Math.tan(THREE.MathUtils.degToRad(17.5)) * Math.min(1,aspect)))};
     const values = [row.beforeDistances, experimental ? row.experimentDistances : row.afterDistances, null];
     [...document.querySelectorAll('.metrics')].forEach((e,i) => {
-      e.textContent = `${(geometries[i].getAttribute('position').count/3).toLocaleString()} triangles`;
+      e.textContent = geometries[i].getAttribute('position') ? `${(geometries[i].getAttribute('position').count/3).toLocaleString()} triangles` : 'No mesh produced';
       e.append(document.createElement('br'));
-      e.append(values[i] ? `${values[i].map(x => x.toFixed(4)).join(' / ')} mm` : 'Reference deflection: 0.01 mm / 0.1 rad');
+      e.append(values[i] ? `${values[i].map(x => x.toFixed(4)).join(' / ')} mm` : i === 2 ? 'Reference deflection: 0.01 mm / 0.1 rad' : 'Oracle distance unavailable');
     });
     reset(); $('status').textContent = `${Number($('model').value)+1} / ${rows.length} — ${row.path}`;
     document.body.dataset.ready = String(run);

@@ -11,7 +11,7 @@ import urllib.request
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("before", type=Path, help="Corpus output directory")
-    parser.add_argument("--after", type=Path, help="Fixed worker's corpus output; omit if no fix exists")
+    parser.add_argument("--after", type=Path, help="Candidate worker's corpus output; omit if unavailable")
     parser.add_argument("--experiments", type=Path, help="Optional counterfactual directory with summary.json")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
@@ -30,7 +30,9 @@ def main():
         return name
 
     def distances(row):
-        d = row["oracle"]["surface_distance"]
+        d = row.get("oracle", {}).get("surface_distance")
+        if d is None:
+            return None
         return [d[k]["max_sampled_mm"] for k in ("actual_to_reference", "reference_to_actual")]
 
     for index, row in enumerate(before["results"]):
@@ -46,7 +48,10 @@ def main():
             fixed = after[row["path"]]
             if fixed["sha256"] != row["sha256"]:
                 raise ValueError(f"Input changed: {row['path']}")
-            item["after"] = copy_mesh(args.after / fixed["artifacts"] / "mesh.stl", f"{index}-after.stl")
+            mesh = args.after / fixed["artifacts"] / "mesh.stl"
+            item["after"] = copy_mesh(mesh, f"{index}-after.stl") if mesh.exists() else None
+            item["afterStatus"] = fixed["status"]
+            item["afterCompletion"] = fixed.get("metrics", {}).get("completion", "unknown")
             item["afterDistances"] = distances(fixed)
         if row["path"] in experiments:
             experiment = experiments[row["path"]]
