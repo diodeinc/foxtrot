@@ -1,5 +1,41 @@
 # Würth and KiCad STEP repair worklog
 
+### Full replay exposes refinement regressions; preserve red owners
+
+The committed `cohort-clean-worker` completes all 7,328 Würth inputs with
+7,046 ok / 164 tessellation errors / 115 timeouts / 3 input errors. Relative
+to `architecture-wurth`, 272 previously passing cases regress. The original
+55/56 oracle result is not a claim of corpus-wide reliability. Exact replay
+inputs are retained in `local/cohort-new-regressions-manifest.json`.
+
+RCA: permanent green completion triangles can retain their diameter while
+their altitude vanishes under repeated neighbor-driven splits. Surface 1145
+of MJ615004141121 reaches a chart altitude/diameter ratio of 2.10e-8 at round
+30; surface 1141 reaches 6.84e-8. The midpoint table partitions correctly;
+ownership, not the table or inverse projection, is wrong.
+
+Retain red leaves and rebuild temporary green completion. A failing child
+promotes its owner; a second hanging midpoint level promotes the coarser
+neighbor. No nested tree or adjacency layer is needed. If one tiny edge has
+no representable midpoint, refine the other edges without moving either
+endpoint; exhaustion of all usable edges remains an explicit error.
+
+MJ615004141121 now completes in 31.22 s with 191,366 triangles. All 53 targeted
+processing cases and the unchanged 56-file OCCT replay pass as before
+(55 ok / one invalid-source mismatch). Evidence: `local/cohort-owner2-*`.
+The broader 272-case replay is still running and already has remaining
+failures. No global all-clear is claimed.
+
+Rejected exact-global and distance-budget inverse queries do not repair the
+refinement invariant. Longest-edge closure with incremental adjacency times
+out on the same part; batch closure completes but produces 1.72M triangles.
+Their patches/workers remain diagnostic evidence, not implementation.
+
+Housekeeping removes a stale 422,211,072-byte Cargo cache at
+`local/wurth-corrected-target`, 19,591,168 bytes of Python bytecode caches and
+9,216 bytes of Ruff cache. Inputs, workers, meshes, reports and diagnostics
+remain intact. Total reclaimed: 441,811,456 bytes.
+
 ### Refine curved face interiors with conforming subdivision
 
 Use one CDT, then shared edge midpoints and an eight-entry subdivision table.

@@ -1075,60 +1075,78 @@ fn advanced_face(
     ];
     let mut surface_positions: Vec<_> = pts.iter().zip(&mesh.verts)
         .map(|(&(u,v), vertex)| prepared.raise(DVec2::new(u,v)).unwrap_or(vertex.pos)).collect();
-    let mut rounds = 0;
+    let children = |[a,b,c]: [usize;3], splits: &HashMap<(usize,usize),usize>| {
+        let mut nodes = [a,b,c,0,0,0];
+        let mut mask = 0;
+        for (i,(a,b)) in [(a,b),(b,c),(c,a)].iter().copied().enumerate() {
+            if let Some(&mid) = splits.get(&edge_key(a,b)) { nodes[3+i] = mid; mask |= 1<<i; }
+        }
+        SPLITS[mask].iter().map(|t| t.map(|i| nodes[i])).collect::<Vec<_>>()
+    };
+    // Keep red leaves, not their temporary green completion. Refining a
+    // failing green child promotes its owner; repeated green-only splitting
+    // can otherwise preserve diameter while its altitude tends to zero.
+    let mut splits = HashMap::new();
     loop {
-        let mut splits = HashMap::new();
-        let mut centers = HashMap::new();
+        let mut marked = Vec::with_capacity(triangles.len());
+        let mut conforming = Vec::new();
+        for &[a,b,c] in &triangles {
+            // One hanging midpoint per leaf edge is enough for the completion
+            // table. Promote a coarser owner before a second hanging level.
+            let balance = [(a,b),(b,c),(c,a)].iter().any(|&(a,b)| {
+                splits.get(&edge_key(a,b)).is_some_and(|&mid|
+                    splits.contains_key(&edge_key(a,mid)) || splits.contains_key(&edge_key(mid,b)))
+            });
+            let completed = children([a,b,c], &splits);
+            let inaccurate = completed.iter().any(|&[a,b,c]| {
+                let samples = [a,b,c].map(|i| (DVec2::new(pts[i].0,pts[i].1),1./3.));
+                let Some((uv,pos)) = prepared.sample(&samples) else { return false; };
+                let center = (surface_positions[a] + surface_positions[b] + surface_positions[c]) / 3.;
+                prepared.deviation(center, uv, pos) > tolerance
+            });
+            marked.push(balance || inaccurate);
+            conforming.extend(completed);
+        }
+        if !marked.iter().any(|&m| m) { triangles = conforming; break; }
         let mut pending = Vec::new();
+        let mut next = Vec::new();
         for (index, &[a,b,c]) in triangles.iter().enumerate() {
-            let samples = [a,b,c].map(|i| (DVec2::new(pts[i].0,pts[i].1),1./3.));
-            let Some((uv,pos)) = prepared.sample(&samples) else { continue; };
-            let center = (surface_positions[a] + surface_positions[b] + surface_positions[c]) / 3.;
-            // This is a refinement probe, not a certified maximum error bound.
-            let deviation = prepared.deviation(center, uv, pos);
-            if deviation > tolerance {
-                let mut interior = false;
-                for (a,b) in [(a,b),(b,c),(c,a)] {
-                    if boundary.contains(&edge_key(a,b)) { continue; }
-                    interior = true;
-                    splits.entry(edge_key(a,b)).or_insert_with(|| {
-                        let samples = [a,b].map(|i| (DVec2::new(pts[i].0,pts[i].1),0.5));
-                        let (uv,pos) = prepared.sample(&samples).unwrap_or((
-                            (samples[0].0+samples[1].0)*0.5,
-                            (surface_positions[a]+surface_positions[b])*0.5));
-                        let i = pts.len()+pending.len();
-                        pending.push((uv,pos));
-                        i
-                    });
+            if !marked[index] { next.push([a,b,c]); continue; }
+            let mut interior = false;
+            for (a,b) in [(a,b),(b,c),(c,a)] {
+                let key = edge_key(a,b);
+                if boundary.contains(&key) { continue; }
+                interior = true;
+                if splits.contains_key(&key) { continue; }
+                let samples = [a,b].map(|i| (DVec2::new(pts[i].0,pts[i].1),0.5));
+                let (uv,pos) = prepared.sample(&samples).ok_or(Error::CouldNotLower)?;
+                if (uv.x,uv.y) == pts[a] || (uv.x,uv.y) == pts[b] {
+                    continue;
                 }
-                if !interior {
-                    centers.insert(index,pts.len()+pending.len());
-                    pending.push((uv,pos));
+                splits.insert(key,pts.len()+pending.len());
+                pending.push((uv,pos));
+            }
+            if interior {
+                let refined = children([a,b,c], &splits);
+                if refined.len() == 1 {
+                    return Err(Error::InvalidGeometry("surface refinement midpoint is not representable"));
                 }
+                next.extend(refined);
+            } else {
+                let samples = [a,b,c].map(|i| (DVec2::new(pts[i].0,pts[i].1),1./3.));
+                let (uv,pos) = prepared.sample(&samples).ok_or(Error::CouldNotLower)?;
+                let center = pts.len()+pending.len();
+                pending.push((uv,pos));
+                next.extend([[a,b,center],[b,c,center],[c,a,center]]);
             }
         }
-        if pending.is_empty() { break; }
-        rounds += 1;
-        if rounds == 32 || pts.len() + pending.len() > 1_000_000 {
+        if pts.len() + pending.len() > 1_000_000 {
             return Err(Error::InvalidGeometry("surface approximation did not converge"));
         }
         for (uv, pos) in pending {
             pts.push((uv.x, uv.y));
             surface_positions.push(pos);
             mesh.verts.push(mesh::Vertex { pos, norm: DVec3::zeros(), color: face_color });
-        }
-        let mut next = Vec::new();
-        for (index, &[a,b,c]) in triangles.iter().enumerate() {
-            if let Some(&center) = centers.get(&index) {
-                next.extend([[a,b,center],[b,c,center],[c,a,center]]);
-                continue;
-            }
-            let mut nodes = [a,b,c,0,0,0];
-            let mut mask = 0;
-            for (i,(a,b)) in [(a,b),(b,c),(c,a)].iter().copied().enumerate() {
-                if let Some(&mid) = splits.get(&edge_key(a,b)) { nodes[3+i] = mid; mask |= 1<<i; }
-            }
-            next.extend(SPLITS[mask].iter().map(|t| t.map(|i| nodes[i])));
         }
         triangles = next;
     }
