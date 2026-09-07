@@ -2,6 +2,29 @@
 
 ## Oracle cohort 3 — 2026-09-07
 
+### Measure torus chord error against its meridian
+
+Residual WPCC-760308100110 has correct reverse coverage but folded/excess
+facets. A tangent-plane dot product is not a distance bound: displacement
+can be tangent to the sampled normal while the chord is far from the surface.
+Reduce closest-point distance to the torus's circular meridian, clamping its
+angle at the apple/lemon poles. This uses actual spatial distance and does
+not confuse tangential chart distortion with geometric error.
+
+A full point-to-parameter-sample norm experiment stalls on this model and is
+rejected; stop that unproductive worker and retain no such acceptance rule.
+The meridian calculation completes in 10.84 s. Forward sampled error falls
+from 0.1721 to 0.02441 mm; reverse stays 0.01820 mm. Area excess remains
+659.12 mm², so the model is still unresolved. Investigation isolates folded
+facets on the toroidal faces, not off-surface vertex-loop input points.
+Evidence: `local/cohort3/wpcc-residual-rca` and `meridian110-oracle.json`.
+
+151 release library tests pass, including a tangential chord whose exact
+distance exceeds tolerance although its tangent-plane residual is zero.
+The 56 KiCad controls complete, and the 15-case eligible replay has only the
+existing LED processing error. This change does not claim to fix the cap's
+chart topology or certify orientation/coverage.
+
 Freeze `local/cohort3/before-worker` before discovery. Scan 240 previously
 unscanned Würth inputs by deterministic hash ranking, then 40 unscanned
 members of the failing CAIR/WPCC/TBL/RSTV/LED/EE13 families. Each oracle batch

@@ -855,17 +855,27 @@ impl PreparedSurface<'_> {
         self.raise(uv).map(|p| (uv,p))
     }
 
-    /// Distance to a feasible surface point, using the parameter sample as
-    /// a local projection seed. Tangential parameter distortion is not mesh
-    /// error; only spatial distance should drive subdivision.
+    /// Measure spatial error without treating tangential parameter distortion
+    /// as chord error. A torus reduces to its circular meridian; a spline uses
+    /// the parameter sample as a local projection seed.
     pub fn deviation(&self, point: DVec3, uv: DVec2, sample: DVec3) -> f64 {
+        if let Surface::Torus { mat_i,major_radius,minor_radius,.. } = self.surface {
+            let p = (*mat_i*DVec4::new(point.x,point.y,point.z,1.)).xyz();
+            let radius = p.y.hypot(p.z);
+            // Ring tori use the whole meridian. Apple/lemon branches stop at
+            // their poles, where the meridian meets the revolution axis.
+            let limit = (-major_radius/minor_radius).clamp(-1.,1.).acos();
+            let angle = p.x.atan2(radius-major_radius).clamp(-limit,limit);
+            return (radius-major_radius-minor_radius*angle.cos())
+                .hypot(p.x-minor_radius*angle.sin());
+        }
         if let (Surface::NURBS { surf }, FaceChart::Spline(chart)) = (self.surface, &self.chart) {
             if let Some(raw) = Self::spline_raw(surf, chart, uv) {
                 if let Some(closest) = surf.uv_from_point_newtons_method(point, raw) {
                     return (surf.surf.point(closest) - point).norm().min((sample-point).norm());
                 }
             }
-            return (sample - point).norm();
+            return (sample-point).norm();
         }
         (sample-point).dot(&self.normal(sample,uv)).abs()
     }
@@ -2677,6 +2687,22 @@ mod tests {
             0.1,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn torus_refinement_does_not_accept_tangential_chord_error() {
+        let surface = test_torus();
+        let prepared = PreparedSurface {
+            surface: &surface,
+            chart: FaceChart::Torus { polar_major: true, radial_start: 0. },
+            uncertainty: 0.,
+        };
+        let sample = torus_point(0.,0.);
+        let point = sample+DVec3::new(0.05,0.,0.);
+        let uv = prepared.lower(sample).unwrap();
+        let exact_distance = 0.1_f64.hypot(0.05)-0.1;
+        assert!(exact_distance > 0.01);
+        assert!((prepared.deviation(point,uv,sample)-exact_distance).abs() < 1e-12);
     }
 
     #[test]
