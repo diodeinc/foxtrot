@@ -17,14 +17,15 @@ impl NDBSplineSurface<4> {
     pub fn v_parameter_scale(&self) -> f64 {
         let mut u_length = 0.;
         let mut v_length = 0.;
-        let point = |i: usize,j: usize| {
-            let p = self.control_points[i][j];
-            p.xyz()/p.w
-        };
-        for i in 0..self.control_points.len() {
-            for j in 0..self.control_points[i].len() {
-                if i > 0 { u_length += (point(i,j)-point(i-1,j)).norm(); }
-                if j > 0 { v_length += (point(i,j)-point(i,j-1)).norm(); }
+        let point = |p: &TVec<f64,4>| p.xyz()/p.w;
+        for rows in self.control_points.windows(2) {
+            for (a,b) in rows[1].iter().zip(&rows[0]) {
+                u_length += (point(a)-point(b)).norm();
+            }
+        }
+        for row in &self.control_points {
+            for pair in row.windows(2) {
+                v_length += (point(&pair[1])-point(&pair[0])).norm();
             }
         }
         let u_speed = u_length / self.control_points[0].len() as f64 / (self.max_u()-self.min_u());

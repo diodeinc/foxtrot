@@ -2,6 +2,14 @@
 
 ## Oracle cohort 2 — 2026-09-07
 
+### Simplify physical control-polygon traversal
+
+Keep the Cartesian-per-knot-unit scale calculation and traverse adjacent
+control rows/points directly with slice windows. This removes both per-point
+boundary checks, preserves accumulation order within each axis, and allocates
+no additional control net. Rational dehomogenization and knot-range division
+remain unchanged. `cargo test --release --workspace --lib`: 147 passed.
+
 ### Reopen Coilcraft 2222SQ-221: stale views and real facet error
 
 The user reports that 2222SQ-221 still looks wrong. Investigate it explicitly,
