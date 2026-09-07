@@ -1,5 +1,70 @@
 # Würth and KiCad STEP repair worklog
 
+## Oracle cohort 3 — 2026-09-07
+
+Freeze `local/cohort3/before-worker` before discovery. Scan 240 previously
+unscanned Würth inputs by deterministic hash ranking, then 40 unscanned
+members of the failing CAIR/WPCC/TBL/RSTV/LED/EE13 families. Each oracle batch
+uses one job, one native thread, serial OCCT, a 360-second per-process timeout
+and an 8 GiB virtual-memory limit. Retain failed meshes and delete passing
+exports through the harness. The 280 inputs yield 248 passes, 17 numerical
+mismatches, five native tessellation failures and ten OCCT errors. These are
+discovery outcomes, not 32 proven native bugs.
+
+### Batch RCA and oriented ring-torus cuts
+
+CAIR-1340 faces #425/#435/#437 and WPCC-760308100111's eight implicated ring
+faces select complementary toroidal bands from unoriented boundary angles.
+Consult the oracle on the exact exterior-cut invariant: signed angular area
+determines exterior membership only when the cut does not cross a boundary.
+Select a boundary-free cut using the directed angular-area integral and face
+sense; do not special-case antipodal angles. Reuse existing retraced-segment
+cancellation so opposite seam traversals do not obstruct a physical cut.
+Apple/lemon surfaces are not ring tori: their restricted minor domain and
+poles remain a separate issue, not inputs to the periodic-area argument.
+
+Initial retained-reference comparisons: CAIR reverse error 0.46735 to
+0.01106 mm; WPCC reverse error 1.62496 to 0.01244 mm. Both pass the original
+10,000-sample oracle check. CAIR retains its original 22,360 triangles.
+Evidence: `local/cohort3/{cair-rca,wpcc-rca}` and the after comparison JSONs.
+
+Verification: 150 release library tests pass, including complementary and
+greater-than-half toroidal bands, reversed face sense, a disconnected patch
+whose edges cross the apparent vertex gap, and opposite seam traversals.
+Replay 348 discovery/regression/control inputs serially: 346 complete, with
+only the two pre-existing LED/invalid-EE13 processing failures. An intermediate
+selector incorrectly treated apple/lemon poles as periodic and blocked cuts
+at retraced seams; both regressions are corrected before committing.
+
+The full 19-case initial replay has five numerical passes after this fix
+(CAIR and four WPCC models). Eight WPCC variants now have good reverse
+coverage but retain surface-area/forward-distance failures; those are not
+claimed fixed. Retained-reference results: `local/cohort3/torus-after`.
+
+Further investigations distinguish reference and source problems:
+
+- The three EE13 processing rejections serialize equal 0.127 major/minor
+  radii as `DEGENERATE_TOROIDAL_SURFACE`, violating ISO 10303-42
+  degenerate_toroidal_surface.WR1 (`major_radius < minor_radius`). Keep the
+  rejection; exclude these source-invalid records rather than loosen it.
+  Reference: https://www.steptools.com/stds/stp_aim/html/t_degenerate_toroidal_surface.html
+- LED-SMDC-3535 has a valid apple-torus cap with one collapsed pole. Its
+  analytic annular chart maps that pole to a finite-radius point, causing
+  subdivision to exhaust representable midpoints. OCCT meshes it completely.
+  Evidence and exact pole/bound coordinates: `local/cohort3/led-rca`.
+- TBL-691309310008 differs on nine OCCT transfer-generated closure patches;
+  no direct STEP ownership was found. Investigate the transfer semantics
+  before inventing native faces or declaring the source invalid.
+- RSTV-471017268142 initially appears to exceed approximation tolerance.
+  Direct OCCT surface projection contradicts that diagnosis: the native
+  worst facet centroid is only 0.00150 mm from the underlying source surface
+  and classifies inside the trimmed face, versus 0.10374 mm from the OCCT
+  mesh. Its three edge-midpoint distances are all below 0.00218 mm. Tighter
+  OCCT meshing changes the witness discrepancy to 0.07054/0.07926 mm rather
+  than converging monotonically. Do not inflate native mesh density to fit
+  a questionable reference. Evidence: `switch-probes.json` and
+  `switch-reference-refinement.json` under `local/cohort3`.
+
 ## Oracle cohort 2 — 2026-09-07
 
 ### Centralize spline-chart period conversions

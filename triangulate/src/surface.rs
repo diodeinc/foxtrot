@@ -490,31 +490,40 @@ impl Surface {
             Surface::Torus {
                 mat_i,
                 major_radius,
+                minor_radius,
                 ..
             } => {
                 if verts.is_empty() {
                     return Err(Error::InvalidGeometry("surface has no vertices"));
                 }
-                let mut major_angles = Vec::with_capacity(verts.len());
-                let mut minor_angles = Vec::with_capacity(verts.len());
+                let mut angles = Vec::with_capacity(verts.len());
                 for vertex in verts {
                     let (major, minor) =
                         PreparedSurface::torus_angles(*mat_i, vertex.pos, *major_radius)?;
-                    major_angles.push(major);
-                    minor_angles.push(minor);
+                    angles.push([major, minor]);
                 }
-                let (major_start, major_span) =
-                    PreparedSurface::smallest_circular_arc(&mut major_angles);
-                let (minor_start, minor_span) =
-                    PreparedSurface::smallest_circular_arc(&mut minor_angles);
+                let arcs = [0,1].map(|axis| {
+                    let mut coordinates: Vec<_> = angles.iter().map(|p|p[axis]).collect();
+                    PreparedSurface::smallest_circular_arc(&mut coordinates)
+                });
+                let [(_,major_span), (_,minor_span)] = arcs;
                 let polar_major = major_span >= minor_span;
-                let (start, span) = if polar_major { (minor_start, minor_span) }
-                    else { (major_start, major_span) };
-                FaceChart::Torus {
-                    polar_major,
-                    // Put the cut inside the unused angular gap, not directly
-                    // on a boundary that projection roundoff can cross.
-                    radial_start: (start - (2.*PI-span)*0.5).rem_euclid(2.*PI),
+                if major_radius > minor_radius {
+                    // Opposite seam traversals are not physical trims. They
+                    // must not prohibit an otherwise exterior chart cut.
+                    let canonical: Vec<_> = angles.iter().map(|p|
+                        (p[0].rem_euclid(2.*PI),p[1].rem_euclid(2.*PI))).collect();
+                    let mut trims = boundary_edges.to_vec();
+                    crate::triangulate::cancel_retraced_edges(&canonical, &mut trims);
+                    [polar_major, !polar_major].iter().copied().find_map(|polar_major| {
+                        PreparedSurface::torus_cut(&angles, &trims, same_sense, polar_major)
+                            .map(|radial_start| FaceChart::Torus { polar_major, radial_start })
+                    }).ok_or(Error::CouldNotLower)?
+                } else {
+                    // Apple/lemon surfaces have poles and a restricted minor
+                    // domain, not the doubly periodic domain of a ring torus.
+                    let (start,span) = arcs[usize::from(polar_major)];
+                    FaceChart::Torus { polar_major, radial_start: (start-(2.*PI-span)*0.5).rem_euclid(2.*PI) }
                 }
             }
             Surface::NURBS { surf } => {
@@ -928,6 +937,41 @@ impl PreparedSurface<'_> {
         } else {
             Err(Error::InvalidGeometry("non-finite torus angle"))
         }
+    }
+
+    /// Choose an exterior cut from directed trims, not the smaller of two
+    /// complementary bands. A boundary-free cut is wholly inside or outside;
+    /// the oriented integral of radial angle d(polar angle) distinguishes them.
+    fn torus_cut(angles: &[[f64;2]], edges: &[(usize,usize)], same_sense: bool, polar_major: bool) -> Option<f64> {
+        let period = 2.*PI;
+        let polar = usize::from(!polar_major);
+        let radial = 1-polar;
+        let mut coordinates: Vec<_> = angles.iter().map(|p|p[radial].rem_euclid(period)).collect();
+        coordinates.sort_by(f64::total_cmp);
+        coordinates.dedup();
+        let mut gaps: Vec<_> = (0..coordinates.len()).map(|i| {
+            let next = coordinates[(i+1)%coordinates.len()];
+            let gap = next + if i+1 == coordinates.len() { period } else { 0. } - coordinates[i];
+            (gap, (next-gap*0.5).rem_euclid(period))
+        }).collect();
+        gaps.sort_by(|a,b| b.0.total_cmp(&a.0));
+        let orientation = (if same_sense { 1. } else { -1. }) * (if polar_major { 1. } else { -1. });
+        let roundoff = 32.*EPSILON*period*period*edges.len() as f64;
+        gaps.into_iter().find_map(|(_,cut)| {
+            let mut area = 0.;
+            for &(a,b) in edges {
+                let a_radial = (angles[a][radial]-cut).rem_euclid(period);
+                let b_radial = (angles[b][radial]-cut).rem_euclid(period);
+                // Curve sampling resolves the short angular branch of each
+                // segment. A period jump means this cut crosses that segment.
+                if (b_radial-a_radial).abs() >= PI || a_radial == 0. || b_radial == 0. {
+                    return None;
+                }
+                let delta = (angles[b][polar]-angles[a][polar]+PI).rem_euclid(period)-PI;
+                area += (a_radial+b_radial)*0.5*delta;
+            }
+            (orientation*area > roundoff).then_some(cut.rem_euclid(period))
+        })
     }
 
     fn smallest_circular_arc(angles: &mut [f64]) -> (f64, f64) {
@@ -2423,34 +2467,10 @@ mod tests {
                     scale,
                 )
                 .unwrap();
-                let vertices: Vec<_> = (0..32)
-                    .map(|i| {
-                        let angle = 2. * PI * i as f64 / 32.;
-                        let (major, minor) = if polar_major {
-                            (angle, PI * i as f64 / 31.)
-                        } else {
-                            (PI * i as f64 / 31., angle)
-                        };
-                        Vertex {
-                            pos: DVec3::new(
-                                scale * minor.sin(),
-                                (4. * scale + scale * minor.cos()) * major.sin(),
-                                (4. * scale + scale * minor.cos()) * major.cos(),
-                            ),
-                            norm: DVec3::zeros(),
-                            color: DVec3::zeros(),
-                        }
-                    })
-                    .collect();
-                let prepared = surface
-                    .prepare(&vertices, &[], true, 0., false)
-                    .unwrap();
-                let FaceChart::Torus {
-                    polar_major,
-                    ..
-                } = prepared.chart
-                else {
-                    unreachable!()
+                let prepared = PreparedSurface {
+                    surface: &surface,
+                    chart: FaceChart::Torus { polar_major, radial_start: 0. },
+                    uncertainty: 0.,
                 };
                 let (base, radial_scale) = if polar_major {
                     (4. * scale, scale)
@@ -2657,6 +2677,80 @@ mod tests {
             0.1,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn torus_chart_cut_ignores_opposite_seam_traversals() {
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        append_ring(&mut vertices,&mut edges,0.37,false,false);
+        append_ring(&mut vertices,&mut edges,0.37+PI,false,true);
+        let surface = test_torus();
+        let prepared = surface.prepare(&vertices,&edges,true,0.,false).unwrap();
+        let FaceChart::Torus { radial_start: expected,.. } = prepared.chart else { unreachable!() };
+        let start = vertices.len();
+        vertices.extend([vertices[0].clone(),vertices[32].clone()]);
+        edges.extend([(start,start+1),(start+1,start)]);
+        let prepared = surface.prepare(&vertices,&edges,true,0.,true).unwrap();
+        let FaceChart::Torus { radial_start,.. } = prepared.chart else { unreachable!() };
+        assert_eq!(radial_start,expected);
+    }
+
+    #[test]
+    fn torus_cut_cannot_cross_edges_of_a_smaller_disconnected_patch() {
+        let mut angles = Vec::new();
+        let mut edges = Vec::new();
+        for (radial,reverse) in [(2.,true),(2.5,false)] {
+            let start = angles.len();
+            for i in 0..32 {
+                angles.push([2.*PI*i as f64/32.,radial]);
+                let (a,b) = (start+i,start+(i+1)%32);
+                edges.push(if reverse { (b,a) } else { (a,b) });
+            }
+        }
+        let start = angles.len();
+        angles.extend([[-0.1,-1.4],[-0.1,1.4],[0.1,1.4],[0.1,-1.4]]);
+        edges.extend((0..4).map(|i|(start+i,start+(i+1)%4)));
+        // The largest vertex gap straddles zero, but both radial patch edges
+        // cross it. The larger band's positive area must not hide that fact.
+        let cut = PreparedSurface::torus_cut(&angles,&edges,true,true).unwrap();
+        assert!(cut > 2.5 && cut < 2.*PI-1.4);
+    }
+
+    #[test]
+    fn torus_trim_orientation_selects_complementary_and_wide_bands() {
+        for polar_major in [false, true] {
+            for width in [PI, 1.5*PI] {
+                let start = 0.37;
+                let mut vertices = Vec::new();
+                let mut edges = Vec::new();
+                append_ring(&mut vertices, &mut edges, start, polar_major, polar_major);
+                append_ring(&mut vertices, &mut edges, start+width, polar_major, !polar_major);
+                let surface = test_torus();
+                for reverse in [false, true] {
+                    let directed: Vec<_> = edges.iter().map(|&(a,b)| if reverse { (b,a) } else { (a,b) }).collect();
+                    for same_sense in [true, false] {
+                        let prepared = surface.prepare(&vertices, &directed, same_sense, 0., false).unwrap();
+                        let FaceChart::Torus { polar_major: selected, radial_start } = prepared.chart else { unreachable!() };
+                        assert_eq!(selected, polar_major);
+                        let complement = reverse == same_sense;
+                        assert_eq!((radial_start-start).rem_euclid(2.*PI) < width, complement);
+                        let points = prepared.lower_verts(&vertices).unwrap();
+                        let radii: Vec<_> = points.iter().map(|&(x,y)| x.hypot(y)).collect();
+                        let min = radii.iter().copied().fold(f64::INFINITY, f64::min);
+                        let max = radii.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                        let scale = if polar_major { 0.1 } else { 4.9 };
+                        let expected = if complement { 2.*PI-width } else { width };
+                        assert!(((max-min)/scale-expected).abs() < 1e-10);
+                        // The middle of the annulus must raise into the intended
+                        // source interval, not merely roundtrip its shared bounds.
+                        let p = prepared.raise(DVec2::new((min+max)*0.5, 0.)).unwrap();
+                        let angle = if polar_major { p.x.atan2(p.y.hypot(p.z)-4.9) } else { p.y.atan2(p.z) };
+                        assert_eq!((angle-start).rem_euclid(2.*PI) < width, !complement);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -1771,7 +1771,7 @@ fn vertex_point(s: &StepFile, v: Vertex) -> Result<DVec3, Error> {
 /// identical segments before intersection construction, not afterward: rounded
 /// intersections can otherwise turn a retraced seam into spurious slivers.
 /// Work in the chosen chart so distinct representatives of a cut stay distinct.
-fn cancel_retraced_edges(pts: &[(f64, f64)], edges: &mut Vec<(usize, usize)>) {
+pub(crate) fn cancel_retraced_edges(pts: &[(f64, f64)], edges: &mut Vec<(usize, usize)>) {
     let mut vertices = HashMap::new();
     let canonical: Vec<_> = pts
         .iter()
