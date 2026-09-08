@@ -10,6 +10,15 @@ NEW = """        Ok(Ok((mesh, diag))) => {
             log::info!("foxtrot_bench_diagnostics faces={} errors={} panics={}", diag.num_faces, diag.num_errors(), diag.num_panics());
             Ok(mesh)
         }"""
+CALL_OLD = """    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        colored_mesh::tessellate_step_bytes(step_bytes)
+    })) {"""
+CALL_NEW = """    let bench_start = std::time::Instant::now();
+    let bench_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        colored_mesh::tessellate_step_bytes(step_bytes)
+    }));
+    log::info!("foxtrot_bench_call_ms {}", bench_start.elapsed().as_secs_f64() * 1000.0);
+    match bench_result {"""
 
 
 def run(*args, cwd=None, env=None):
@@ -36,31 +45,62 @@ def git_info(path):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--diode", type=pathlib.Path, default=ROOT / "local/diode-benchmark")
+    p.add_argument("--foxtrot", type=pathlib.Path, default=ROOT)
+    p.add_argument("--diagnostics", choices=("methods", "fields"), default="methods")
     p.add_argument(
         "--output", type=pathlib.Path, default=ROOT / "local/board-worker-build"
     )
     a = p.parse_args()
     diode = a.diode.resolve()
+    foxtrot = a.foxtrot.resolve()
     out = a.output.resolve()
     scene = diode / "projects/editor/crates/pcb3d-scene/src/lib.rs"
     if not (diode / "Cargo.toml").is_file() or not scene.is_file():
         sys.exit(f"invalid Diode checkout: {diode}")
     content = scene.read_text()
-    if OLD in content:
-        if content.count(OLD) != 1:
-            sys.exit("refusing instrumentation: expected exactly one source match")
-        scene.write_text(content.replace(OLD, NEW))
-    elif NEW not in content or content.count(NEW) != 1:
+    fields = NEW.replace("diag.num_errors()", "diag.num_errors").replace(
+        "diag.num_panics()", "diag.num_panics"
+    )
+    desired = fields if a.diagnostics == "fields" else NEW
+    matches = [s for s in (OLD, NEW, fields) if s in content]
+    if len(matches) != 1 or content.count(matches[0]) != 1:
         sys.exit("refusing instrumentation: scene source has unknown drift")
+    content = content.replace(matches[0], desired)
+    if content.count(CALL_OLD) == 1:
+        content = content.replace(CALL_OLD, CALL_NEW)
+    elif content.count(CALL_NEW) != 1:
+        sys.exit("refusing call instrumentation: scene source has unknown drift")
+    scene.write_text(content)
     out.mkdir(parents=True, exist_ok=True)
     (out / "src").mkdir(exist_ok=True)
     shutil.copy2(SOURCE, out / "src/main.rs")
     rel = lambda x: os.path.relpath(x, out)
-    manifest = f"""[workspace]\n\n[package]\nname="foxtrot-board-worker"\nversion="0.1.0"\nedition="2024"\n\n[dependencies]\nanyhow="1"\nlibc="0.2"\nlog="0.4"\nserde_json="1"\neditor-kicad={{path={json.dumps(rel(diode / "projects/editor/crates/kicad"))}}}\neditor-pcb3d-scene={{path={json.dumps(rel(diode / "projects/editor/crates/pcb3d-scene"))},features=["scene-prep"]}}\n\n[patch."https://github.com/diodeinc/foxtrot.git"]\ntriangulate={{path={json.dumps(str(ROOT / "triangulate"))}}}\nstep={{path={json.dumps(str(ROOT / "step"))}}}\n\n[profile.release]\nincremental=false\n"""
+    manifest = f"""[workspace]
+
+[package]
+name="foxtrot-board-worker"
+version="0.1.0"
+edition="2024"
+
+[dependencies]
+anyhow="1"
+libc="0.2"
+log="0.4"
+serde_json="1"
+editor-kicad={{path={json.dumps(rel(diode / "projects/editor/crates/kicad"))}}}
+editor-pcb3d-scene={{path={json.dumps(rel(diode / "projects/editor/crates/pcb3d-scene"))},features=["scene-prep"]}}
+
+[patch."https://github.com/diodeinc/foxtrot.git"]
+triangulate={{path={json.dumps(str(foxtrot / "triangulate"))}}}
+step={{path={json.dumps(str(foxtrot / "step"))}}}
+
+[profile.release]
+incremental=false
+"""
     (out / "Cargo.toml").write_text(manifest)
     metadata = json.loads(run("cargo", "metadata", "--format-version=1", cwd=out))
     tri = [x for x in metadata["packages"] if x["name"] == "triangulate"]
-    expected = (ROOT / "triangulate/Cargo.toml").resolve()
+    expected = (foxtrot / "triangulate/Cargo.toml").resolve()
     if len(tri) != 1 or pathlib.Path(tri[0]["manifest_path"]).resolve() != expected:
         sys.exit(f"triangulate did not resolve to current Foxtrot: {tri}")
     env = os.environ.copy()
@@ -80,11 +120,15 @@ def main():
             for p in lock["packages"]
         }
     )
-    instrument = hashlib.sha256(NEW.encode()).hexdigest()
+    instrument = hashlib.sha256((desired + CALL_NEW).encode()).hexdigest()
     info = {
         "schema": 1,
         "diode": git_info(diode),
-        "foxtrot": git_info(ROOT),
+        "foxtrot": git_info(foxtrot),
+        "diagnostics_api": a.diagnostics,
+        "diode_scene_uninstrumented_sha256": sha(
+            content.replace(desired, OLD).replace(CALL_NEW, CALL_OLD).encode()
+        ),
         "compiler": run("rustc", "-Vv"),
         "source_sha256": sha(SOURCE.read_bytes()),
         "worker_sha256": sha(worker.read_bytes()),

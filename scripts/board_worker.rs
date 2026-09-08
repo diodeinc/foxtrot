@@ -11,6 +11,8 @@ struct Fox {
     panics: u64,
     failed_instances: u64,
     skipped_instances: u64,
+    call_ms: f64,
+    calls: u64,
 }
 struct BenchLogger {
     fox: Mutex<Fox>,
@@ -24,6 +26,8 @@ static LOGGER: BenchLogger = BenchLogger {
         panics: 0,
         failed_instances: 0,
         skipped_instances: 0,
+        call_ms: 0.0,
+        calls: 0,
     }),
     messages: Mutex::new(Vec::new()),
 };
@@ -37,6 +41,13 @@ impl Log for BenchLogger {
             return;
         }
         let message = r.args().to_string();
+        if let Some(ms) = message.strip_prefix("foxtrot_bench_call_ms ") {
+            let mut total = self.fox.lock().unwrap();
+            total.call_ms += ms
+                .parse::<f64>()
+                .expect("Foxtrot call timing format changed");
+            total.calls += 1;
+        }
         if let Some(rest) = message.strip_prefix("foxtrot_bench_diagnostics ") {
             let mut event = Fox::default();
             for item in rest.split_whitespace() {
@@ -178,10 +189,11 @@ fn run(input: &str) -> anyhow::Result<Value> {
         "unique_models":scene.stats.unique_models,"total_instances":scene.stats.total_instances,"resolved_instances":scene.resolved_instances,
         "placeholder_instances":scene.placeholder_instances,"batches":scene.batches.len(),"vertices":vertices,"triangles":triangles,"instances":all_instances},
       "timings":{"embedded_extraction_secs":scene.stats.embed_extract_secs,"component_tessellation_secs":scene.stats.component_tess_secs,
-        "board_geometry_secs":scene.stats.board_geom_secs,"total_preparation_secs":scene.stats.total_prep_secs},
+        "board_geometry_secs":scene.stats.board_geom_secs,"total_preparation_secs":scene.stats.total_prep_secs,
+        "foxtrot_call_secs":fox.call_ms / 1000.0},
       "storage":{"mesh_bytes":mesh_bytes,"mesh_capacity_bytes":capacity_bytes},"serialized_bytes":serialized.len(),
       "validation":{"nonfinite_vertices":nonfinite,"nonfinite_instances":nonfinite_instances,"invalid_indices":invalid,"empty_batches":empty},
-      "foxtrot":{"models":fox.models,"faces":fox.faces,"errors":fox.errors,"panics":fox.panics,"failed_instances":fox.failed_instances,"skipped_instances":fox.skipped_instances},"logs":messages,
+      "foxtrot":{"models":fox.models,"faces":fox.faces,"errors":fox.errors,"panics":fox.panics,"failed_instances":fox.failed_instances,"skipped_instances":fox.skipped_instances,"calls":fox.calls},"logs":messages,
       "completion":if partial{"partial"}else if fox.skipped_instances>0{"missing_models"}else{"complete"},"status":"ok"}))
 }
 

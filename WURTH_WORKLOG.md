@@ -1,5 +1,57 @@
 # Würth and KiCad STEP repair worklog
 
+## Foxtrot-only remote baseline comparison — 2026-09-08
+
+The remote has no `main`; fetch and compare its default `origin/master`
+(deb743b1aa8b2a8c63e0b370a5f7467d70168387) against task-start HEAD
+(c3ff25ec222aafc89690208e79561697c46b6c11). Build from clean detached
+worktrees. Keep Diode, worker source, compiler, inputs, model calls and
+placements fixed. All non-Foxtrot registry dependency identities match;
+Foxtrot's Spade migration and transitive dependencies remain part of HEAD.
+
+Add direct wall timing around `colored_mesh::tessellate_step_bytes`, excluding
+Diode model decoding, instancing, board geometry and serialization. Adapt
+only diagnostic field-versus-method access outside the timer. Verify both
+builds have the same uninstrumented Diode scene source hash. Preserve both
+executables, build metadata and lockfiles under `local/board-comparison`.
+
+Run all 32 accessible boards in baseline–HEAD–HEAD–baseline blocks, three
+fresh serial processes per board per block: six samples per board per
+revision. All four captures take 80.0 seconds excluding builds. All 384
+scenes return, with finite attributes/valid indices; no timing samples are
+dropped for the baseline's partial faces. Model coverage stays at 178 calls
+per corpus pass. Thirty-three requested repositories remain inaccessible.
+
+Sum of per-board median Foxtrot API times: baseline 2.149 seconds, HEAD
+2.443 seconds, **13.7% slower**. Reported face errors fall from nine to zero;
+neither revision has panics or whole-model failures. Component output falls
+from 1,027,090 to 286,030 triangles per pass (each model once per board).
+These are materially different outputs, not an equal-mesh microbenchmark.
+Do not claim this sample proves overall speed improvement or visual accuracy.
+
+| Primary board | Baseline / HEAD API ms | Change |
+| --- | ---: | ---: |
+| Bramble | 651.3 / 784.7 | +20.5% |
+| Demeter | 284.7 / 234.9 | -17.5% |
+| Feign | 85.6 / 101.2 | +18.2% |
+| Governor | 219.8 / 325.1 | +47.9% |
+| Marlow | 70.7 / 84.3 | +19.3% |
+| Renfield | 135.1 / 120.0 | -11.1% |
+| Seward | 141.6 / 135.2 | -4.5% |
+
+Bramble's Ethernet sub-layout is the largest relative regression: 60.51 to
+158.12 ms (2.61x). Main Bramble and Governor add about 133 and 105 ms
+respectively. This task collects the comparison; it does not change algorithms
+to hide those costs. Whole-scene RSS is in the report only as context, not
+Foxtrot-only attribution (worst 180.9 to 177.4 MiB).
+
+Evidence: `.amp/in/artifacts/foxtrot-board-comparison/{report.md,results.json}`
+contains all boards, six raw API times per revision, model triangle/error
+counts, input hashes and build identities. Full per-process logs remain in
+`local/board-comparison/{baseline,head}/{run,reverse}`. Both native builds
+pass; Python discovery runs 39 tests without failures, seven optional skips.
+No Foxtrot production algorithm changes in this comparison.
+
 ## Production Diode board benchmark — 2026-09-08
 
 Inspect Diode's actual consumer before extending the benchmark. It calls

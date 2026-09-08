@@ -171,15 +171,26 @@ python3 scripts/board_benchmark.py run --output local/board-bench/after \
   --compare local/board-bench/before/results.json
 ```
 
-Use a dedicated Diode checkout. The builder inserts one asserted, recorded
-diagnostic log into its STEP adapter, because the production adapter otherwise
-discards Foxtrot's partial-tessellation diagnostics. This does not change scene
+Use a dedicated Diode checkout. The builder inserts asserted, recorded
+diagnostic logging and a timer around its Foxtrot API call, because the
+production adapter otherwise discards partial-tessellation diagnostics.
+`timings.foxtrot_call_secs` excludes Diode model decoding, placement, board
+geometry and scene serialization. This does not change scene
 generation or error handling. Unknown source drift is rejected. `build.json`
 records revisions, diff/source/worker hashes, compiler and resolved dependency
 identities; the generated Cargo lockfile is retained in the build directory.
 Cargo metadata verifies Diode uses **this checkout's** Foxtrot, not its pinned
 upstream dependency. Initial integration uses Diode revision
 `0bc053a26e30019465eccb14c9210dd06eb2c87f`.
+
+To measure another Foxtrot revision, pass `--foxtrot /path/to/worktree` to the
+builder. Older revisions returning diagnostic fields rather than methods
+also need `--diagnostics fields`. Keep separate copies of each executable,
+build metadata and lockfile before rebuilding. Cross-version comparisons must
+check the recorded Diode revision and uninstrumented source hash; the logging
+adapter differs only to read the two diagnostic APIs. Report changed face
+coverage and component triangle counts alongside API time, rather than calling
+different meshes equivalent work. Whole-scene RSS is not Foxtrot-only memory.
 
 The worker calls the actual web pipeline: `parse_kicad_pcb`,
 `placements_with_dnp(..., true)`, full `prepare_scene`, then `serialize_scene`.
