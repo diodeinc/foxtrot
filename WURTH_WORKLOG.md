@@ -1,5 +1,66 @@
 # Würth and KiCad STEP repair worklog
 
+## Production Diode board benchmark — 2026-09-08
+
+Inspect Diode's actual consumer before extending the benchmark. It calls
+`colored_mesh::tessellate_step_bytes`, not the normalized demo buffer. Each
+embedded STEP name is decoded/tessellated once per board and instanced at
+authored placements. PCB geometry, viewer metadata and scene serialization
+are significant work outside Foxtrot.
+
+Add a serial board suite and native worker using Diode's real web pipeline:
+parse, DNP-inclusive placements, full `prepare_scene`, and `serialize_scene`.
+Build against an explicit dedicated Diode checkout with local Foxtrot path
+patches verified by Cargo metadata. Record source revisions, dirty diffs,
+instrumentation and executable hashes, compiler and resolved dependencies.
+The sole Diode instrumentation change exposes the Foxtrot diagnostics its
+adapter normally discards; it does not alter processing or failure handling.
+Retain per-board subprocess logs and JSON, not bulky serialized mesh files.
+The default two-repeat capture has a 240-second budget; timeouts and budget
+skips remain explicit. Measure validation separately from processing.
+
+Attempt all 40 requested repositories. Seven shallow clones succeed: Bramble,
+Demeter, Feign, Governor, Marlow, Renfield and Seward. The other 33 require
+unavailable code.diode.computer credentials, including Amoeba and Fulmar.
+Keep all requested sources in the manifest/report. The seven accessible
+repositories contain 32 board files, including reference/vendor modules;
+none are LFS pointers. Do not silently substitute external model libraries.
+
+Final capture: 13.76 seconds for 64/64 generated scenes. Replay: 13.67 seconds,
+with all 32 boards comparable and unchanged geometry/coverage counts.
+Per pass, 178 per-board model tessellations cover 31,619 STEP faces, with zero
+face errors, panics or failed model instances. Fifteen boards have missing,
+unsupported or absent footprint model references; 17 have no such gaps.
+Report those separately from processing failures. Exit 1 is intentional for
+the incomplete source/model coverage, not a crash. Across the two repetitions,
+30 samples are `missing_models` and 34 are `ok`; all mesh validations pass.
+
+| Primary board | Median seconds | Unique STEP names |
+| --- | ---: | ---: |
+| Bramble | 2.658 | 29 |
+| Demeter | 0.446 | 14 |
+| Feign | 0.268 | 13 |
+| Governor | 0.952 | 25 |
+| Marlow | 0.290 | 14 |
+| Renfield | 0.361 | 11 |
+| Seward | 0.330 | 11 |
+
+Bramble peaks at about 177 MiB and serializes 28.92 MiB. Its 1.56 seconds
+of board geometry exceeds its 0.90 seconds of component tessellation; future
+production optimization must measure both. These are native measurements,
+not browser latency or visual/OCCT correctness certification.
+
+Verification: release worker build succeeds and confirms the local Foxtrot
+dependency; six new harness tests cover partial diagnostics, invalid instance
+transforms, coverage, source drift, deadline accounting, acquisition failures
+and malformed worker output. Full Python discovery runs 39 tests with seven
+optional-dependency skips and no failures. No production Foxtrot code changes.
+Evidence: `local/board-bench/final` and `local/board-bench/replay`; user-facing
+report/data under `.amp/in/artifacts/diode-board-benchmark`. New retained data
+uses about 285 MiB for boards, 187 MiB for Diode, 405 MiB for the isolated
+reusable release build, and 2.5 MiB for reports. No full-scene mesh
+blobs are written. Completing the other 33 repositories requires credentials.
+
 ## Performance iteration 4 — 2026-09-08
 
 Share control-point coordinate differences across surface derivative orders.

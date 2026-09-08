@@ -151,6 +151,65 @@ comparisons, and run the correctness harness separately before accepting a
 speedup. The profiler takes its thread-local timing snapshot inside the same
 single-worker pool that performs tessellation.
 
+### Real Diode board-to-scene benchmark
+
+`scripts/board-corpus.json` lists 40 Diode board repositories. The acquisition
+command shallow-clones them and inventories **every** `.kicad_pcb`, including
+reference and vendored module layouts. Existing checkouts are not updated.
+Unavailable repositories and LFS pointers remain explicit coverage gaps.
+Configure Git credentials outside the transcript for private repositories.
+
+```sh
+python3 scripts/board_benchmark.py fetch
+gh repo clone diodeinc/diode local/diode-benchmark -- --depth 1
+python3 scripts/build_board_worker.py --diode local/diode-benchmark
+python3 scripts/board_benchmark.py run --output local/board-bench/before
+
+# After changing Foxtrot, rebuild the worker, then compare identical boards:
+python3 scripts/build_board_worker.py --diode local/diode-benchmark
+python3 scripts/board_benchmark.py run --output local/board-bench/after \
+  --compare local/board-bench/before/results.json
+```
+
+Use a dedicated Diode checkout. The builder inserts one asserted, recorded
+diagnostic log into its STEP adapter, because the production adapter otherwise
+discards Foxtrot's partial-tessellation diagnostics. This does not change scene
+generation or error handling. Unknown source drift is rejected. `build.json`
+records revisions, diff/source/worker hashes, compiler and resolved dependency
+identities; the generated Cargo lockfile is retained in the build directory.
+Cargo metadata verifies Diode uses **this checkout's** Foxtrot, not its pinned
+upstream dependency. Initial integration uses Diode revision
+`0bc053a26e30019465eccb14c9210dd06eb2c87f`.
+
+The worker calls the actual web pipeline: `parse_kicad_pcb`,
+`placements_with_dnp(..., true)`, full `prepare_scene`, then `serialize_scene`.
+It includes board geometry, color-grouped world-space component meshes,
+instancing, viewer metadata and serialization. It does not use the normalized
+Foxtrot demo buffer or the metadata-omitting `prepare_scene_headless` shortcut.
+Only embedded STEP models are resolved, matching Diode; external library paths
+are not silently replaced or fetched. Each unique embedded name is tessellated
+once per board, with no cross-board mesh cache.
+
+The suite runs fresh processes serially, twice per board, with a 240-second
+capture budget and 120-second per-board timeout. Increase `--budget` for a
+larger full sweep; exhausted samples are listed, never omitted. Native wall,
+CPU and peak RSS measurements exclude builds, network access, GPU rendering
+and browser/WASM startup. Validation runs after the timed scene serialization.
+The first accessible subset (32 boards in seven repositories) takes about
+14 seconds for 64 samples. This is not a browser latency measurement.
+
+JSON retains stage times, model/placement/mesh counts, output sizes, diagnostics
+and per-sample logs. `missing_models` includes footprints without models or
+with unresolved/unsupported sources; it is distinct from `partial` Foxtrot
+processing. Exit 1 indicates incomplete corpus/model coverage or a processing
+failure, even when all accessible boards generate scenes. Comparisons require
+matching inputs and instrumentation, and omit timing ratios when processing
+coverage or mesh counts change. No mesh blobs are retained by default.
+
+```sh
+python3 -m unittest discover -s scripts -p 'test_board_benchmark.py'
+```
+
 ### Select, benchmark, compare
 
 ```sh
