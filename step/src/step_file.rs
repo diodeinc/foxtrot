@@ -106,32 +106,26 @@ impl<'a> StepFile<'a> {
         let mut out = Vec::with_capacity(data.len());
         let mut i = 0;
         let mut in_string = false;
-        let mut in_comment = false;
         while i < data.len() {
-            if in_comment {
-                if data[i..].starts_with(b"*/") {
-                    in_comment = false;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-                continue;
-            }
-
+            // Copy ordinary text in runs instead of growing/checking the
+            // output for every byte. Only lexical boundaries need state.
+            let length = data[i..].iter().position(|c| *c == b'\'' || !c.is_ascii()
+                || (!in_string && (*c == b'/' || c.is_ascii_whitespace())))
+                .unwrap_or(data.len() - i);
+            out.extend_from_slice(&data[i..i + length]);
+            i += length;
+            if i == data.len() { break; }
             if !in_string && data[i..].starts_with(b"/*") {
-                in_comment = true;
-                i += 2;
+                let length = memchr::memmem::find(&data[i + 2..], b"*/")
+                    .ok_or_else(|| StepParseError::new("unterminated comment"))?;
+                i += length + 4;
                 continue;
             }
 
             let c = data[i];
             if c == b'\'' {
                 out.push(c);
-                if in_string && data.get(i + 1) == Some(&b'\'') {
-                    out.push(b'\'');
-                    i += 2;
-                    continue;
-                }
+                // Escaped quotes toggle twice with no bytes between them.
                 in_string = !in_string;
             } else if !in_string && c.is_ascii_whitespace() {
                 // Whitespace is insignificant outside literals.
@@ -144,9 +138,7 @@ impl<'a> StepFile<'a> {
             }
             i += 1;
         }
-        if in_comment {
-            Err(StepParseError::new("unterminated comment"))
-        } else if in_string {
+        if in_string {
             Err(StepParseError::new("unterminated string literal"))
         } else {
             Ok(out)
@@ -258,6 +250,8 @@ mod tests {
     fn flatten_respects_literals_and_comments() {
         let flat = StepFile::strip_flatten(b" A /* remove; ' */ 'two words; /* keep */ it''s' ").unwrap();
         assert_eq!(flat, b"A'two words; /* keep */ it''s'");
+        let flat = StepFile::strip_flatten(b"A/\xff /*'*/'two\xfe words''/*keep*/'\tB").unwrap();
+        assert_eq!(flat, b"A/?'two? words''/*keep*/'B");
     }
 
     #[test]

@@ -1,5 +1,15 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance iteration 12 — 2026-09-08
+
+Flatten ordinary STEP text with bulk copies and skip comments with memmem.
+Remove per-byte comment state and doubled-quote handling; literal-state parity
+preserves escaped quotes. Extend lexical coverage to bare slashes and legacy
+bytes inside/outside literals adjacent to comments. All 10 STEP tests pass.
+The 32-board replay preserves counts, diagnostics and validation; API medians
+sum to 1.783889 seconds. This is still short of the 30% goal against the
+adjacent 2.350502-second baseline. Evidence: `local/board-comparison/runs`.
+
 ## Board performance iteration 11 — 2026-09-08
 
 Instantiate the same basis recurrences with compile-time degree/order for
