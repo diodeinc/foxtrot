@@ -1,5 +1,27 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance iteration 13 — 2026-09-08
+
+Box generated entity records with more than eight attributes. This schema-wide
+rule affects nine variants and keeps ordinary points, directions, placements
+and edges inline. Rust layout output reports Entity shrinking from 272 to 128
+bytes. No new dependency or custom memory-management code is needed. All 154
+release library tests and wasm32 checking pass; all 42 oriented STL triangle
+multisets match the preceding geometry capture. Largest scene-process RSS is
+143.9 MiB versus about 154.5 before boxing. API medians sum to 1.777728 seconds.
+Evidence: `local/board-comparison/boxed{,-geometry,-controls}` and
+`boxed-geometry-check.json`.
+
+The pre-boxing ABBA checkpoint (six samples/revision/board) gives 2.243432
+seconds baseline and 1.862440 current: 17% less elapsed time, not the requested
+30%. Treat individual iteration captures as exploratory due to host timing
+drift. Evidence: `checkpoint-{baseline,head}-{a,b}`. Revert the smaller basis
+result buffer, exact boundary-trial deduplication, dispatch inlining and
+per-solve whole-control-net translation: none establishes enough benefit to
+justify retaining it. Reports now display and compare Foxtrot direct API time;
+40 Python checks pass (seven optional skips), including opposite-direction
+scene/API timing coverage.
+
 ## Board performance iteration 12 — 2026-09-08
 
 Flatten ordinary STEP text with bulk copies and skip comments with memmem.

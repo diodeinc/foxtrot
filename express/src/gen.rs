@@ -97,12 +97,21 @@ impl <'a> TypeMap<'a> {
 }
 
 impl<'a> Type<'a> {
+    fn boxed_entity(&self) -> bool {
+        // Large schema records must not inflate every slot in the entity table.
+        // Keep the common point, placement and topology records inline.
+        matches!(self, Type::Entity { attrs, .. } if attrs.len() > 8)
+    }
+
     fn write_enum_variant<W>(&self, name: &str, buf: &mut W) -> std::fmt::Result
         where W: std::fmt::Write
     {
         match self {
-            Type::Entity{..} => writeln!(buf, "    {0}({0}_<'a>),",
-                                         to_camel(name)),
+            Type::Entity{..} => {
+                let payload = format!("{}_<'a>", to_camel(name));
+                writeln!(buf, "    {}({}),", to_camel(name),
+                    if self.boxed_entity() { format!("Box<{}>", payload) } else { payload })
+            },
             _ => Ok(()),
         }
     }
@@ -111,8 +120,8 @@ impl<'a> Type<'a> {
     {
         match self {
             Type::Entity{..} => writeln!(buf,
-                r#"            "{0}" => {1}_::parse_chunks(strs).map(|(s, v)| (s, Entity::{1}(v))),"#,
-                capitalize(name), to_camel(name)),
+                r#"            "{0}" => {1}_::parse_chunks(strs).map(|(s, v)| (s, Entity::{1}({2}))),"#,
+                capitalize(name), to_camel(name), if self.boxed_entity() { "Box::new(v)" } else { "v" }),
             _ => Ok(()),
         }
     }
