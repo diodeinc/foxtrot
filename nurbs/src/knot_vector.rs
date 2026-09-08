@@ -85,12 +85,22 @@ impl KnotVector {
 
     // Inner implementation of basis_funs
     pub fn basis_funs_for_span(&self, i: usize, u: f64) -> VecF {
-        let mut N: VecF = smallvec![0.0; self.p + 1];
+        match self.p {
+            1 => self.basis_positions::<1>(i, u),
+            2 => self.basis_positions::<2>(i, u),
+            3 => self.basis_positions::<3>(i, u),
+            _ => self.basis_positions::<0>(i, u),
+        }
+    }
 
-        let mut left: VecF = smallvec![0.0; self.p + 1];
-        let mut right: VecF = smallvec![0.0; self.p + 1];
+    fn basis_positions<const P: usize>(&self, i: usize, u: f64) -> VecF {
+        let p = if P == 0 { self.p } else { P };
+        let mut N: VecF = smallvec![0.0; p + 1];
+
+        let mut left: VecF = smallvec![0.0; p + 1];
+        let mut right: VecF = smallvec![0.0; p + 1];
         N[0] = 1.0;
-        for j in 1..=self.p {
+        for j in 1..=p {
             left[j] = u - self[i + 1 - j];
             right[j] = self[i + j] - u;
             let mut saved = 0.0;
@@ -120,10 +130,23 @@ impl KnotVector {
         if n == 0 {
             return self.basis_funs_for_span(i, u).into_iter().collect();
         }
+        match (self.p, n) {
+            (1, 1) => self.basis_derivatives::<1, 1>(i, u, n),
+            (2, 1) => self.basis_derivatives::<2, 1>(i, u, n),
+            (2, 2) => self.basis_derivatives::<2, 2>(i, u, n),
+            (3, 1) => self.basis_derivatives::<3, 1>(i, u, n),
+            (3, 2) => self.basis_derivatives::<3, 2>(i, u, n),
+            _ => self.basis_derivatives::<0, 0>(i, u, n),
+        }
+    }
+
+    fn basis_derivatives<const P: usize, const N: usize>(&self, i: usize, u: f64, n: usize) -> SmallVec<[f64; 24]> {
+        let p = if P == 0 { self.p } else { P };
+        let n = if N == 0 { n } else { N };
         // Keep common degrees and inverse-projection derivatives inline; higher
         // degrees and derivative orders spill without changing the algorithm.
         // The square basis table is contiguous, including when it spills.
-        let width = self.p + 1;
+        let width = p + 1;
         let mut scratch: SmallVec<[f64; 96]> = smallvec![0.0; width * (width + 4)];
         let (ndu, scratch) = scratch.split_at_mut(width * width);
         let (left, scratch) = scratch.split_at_mut(width);
@@ -136,7 +159,7 @@ impl KnotVector {
         let ders = result.as_mut_slice();
 
         ndu[0] = 1.0;
-        for j in 1..=self.p {
+        for j in 1..=p {
             left[j] = u - knots[i + 1 - j];
             right[j] = knots[i + j] - u;
             let mut saved = 0.0;
@@ -149,10 +172,10 @@ impl KnotVector {
             }
             ndu[j * width + j] = saved;
         }
-        for j in 0..=self.p {
-            ders[j] = ndu[j * width + self.p];
+        for j in 0..=p {
+            ders[j] = ndu[j * width + p];
         }
-        for r in 0..=self.p {
+        for r in 0..=p {
             let mut s1 = 0;
             let mut s2 = 1;
             a[0][0] = 1.0;
@@ -162,7 +185,7 @@ impl KnotVector {
                 };
                 let mut d = 0.0;
                 let rk = (r as i32) - (k as i32);
-                let pk = (self.p as i32) - (k as i32);
+                let pk = (p as i32) - (k as i32);
                 if r >= k {
                     a[s2][0] = a[s1][0] / ndu[aus(pk + 1) * width + rk as usize];
                     d = a[s2][0] * ndu[aus(rk) * width + aus(pk)];
@@ -171,7 +194,7 @@ impl KnotVector {
                 let j2 = aus(if r as i32 - 1 <= pk as i32 {
                     k as i32 - 1
                 } else {
-                    self.p as i32 - r as i32
+                    p as i32 - r as i32
                 });
 
                 for j in j1..=j2 {
@@ -187,12 +210,12 @@ impl KnotVector {
             }
         }
 
-        let mut r = self.p;
+        let mut r = p;
         for k in 1..=n {
-            for j in 0..=self.p {
+            for j in 0..=p {
                 ders[k * width + j] *= r as f64;
             }
-            r *= self.p - k;
+            r *= p - k;
         }
         result
     }
@@ -211,7 +234,8 @@ mod tests {
 
     #[test]
     fn derivatives_reproduce_affine_curves_at_low_and_high_degree() {
-        for (degree, order) in [(3, 0), (3, 2), (9, 0), (9, 4)] {
+        for (degree, order) in [(1, 0), (1, 1), (2, 0), (2, 1), (2, 2),
+            (3, 0), (3, 1), (3, 2), (9, 0), (9, 4)] {
             let knots = KnotVector::from_multiplicities(degree, &[0., 1.], &[degree + 1; 2]);
             for u in [0., 0.125, 0.5, 0.875, 1.] {
                 for (k, basis) in knots.basis_funs_derivs(u, order).chunks_exact(degree + 1).enumerate() {

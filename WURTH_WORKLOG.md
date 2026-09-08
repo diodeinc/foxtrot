@@ -1,5 +1,21 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance iteration 11 — 2026-09-08
+
+Instantiate the same basis recurrences with compile-time degree/order for
+common linear, quadratic and cubic position/first/second derivative queries.
+Retain the general recurrence for all other degrees/orders. This adds bounded
+dispatch rather than separate mathematical implementations. Extend affine
+reproduction coverage to every dispatched combination and spilling degree 9.
+All 57 NURBS tests pass; all 42 oriented STL triangle multisets are unchanged.
+
+Derivative-only specialization captures 2.022206 seconds, adding position
+specialization gives 1.969108, and fixing derivative order gives 1.910456.
+An adjacent frozen-baseline capture gives 2.350502; that is about 19% lower
+elapsed time, still short of 30%. Evidence:
+`local/board-comparison/{degree,degree-all,degree-order,baseline-degree}`,
+`degree-{geometry,controls}` and `degree-geometry-check.json`.
+
 ## Board performance iteration 10 — 2026-09-08
 
 Represent STEP LINE directly rather than constructing a sampled degree-one
