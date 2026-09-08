@@ -34,12 +34,16 @@ impl Mesh {
         let extent = max - min;
         let center = min + extent * 0.5;
         let scale = extent.max();
-        self.triangles.iter().flat_map(|t| t.verts.iter()).flat_map(|&i| {
+        // Triangle count fixes the output size: three vertices, nine floats
+        // each. Avoid geometric Vec growth and copying the expanded mesh.
+        let mut buffer = Vec::with_capacity(self.triangles.len() * 3 * 9);
+        buffer.extend(self.triangles.iter().flat_map(|t| t.verts.iter()).flat_map(|&i| {
             let v = self.verts[i as usize];
             let p = (v.pos - center) / scale * 200.;
             [p.x, p.y, p.z, v.norm.x, v.norm.y, v.norm.z, v.color.x, v.color.y, v.color.z]
                 .map(|x| x as f32)
-        }).collect()
+        }));
+        buffer
     }
 
     /// Append a completed local mesh, retaining its allocations for reuse.
