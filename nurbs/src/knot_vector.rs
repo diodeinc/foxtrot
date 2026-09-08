@@ -108,14 +108,14 @@ impl KnotVector {
     /// basis functions of order `p + 1` at point `u`.
     ///
     /// ALGORITHM A2.3
-    /// if ders = basis_funs_derivs_(), then ders[k][j] is the `kth` derivative
-    /// of the function `N_{i-p+j, p}` at `u`
-    pub fn basis_funs_derivs(&self, u: f64, n: usize) -> SmallVec<[VecF; 3]> {
+    /// Rows are contiguous: ders[k * (p + 1) + j] is the kth derivative
+    /// of the function `N_{i-p+j, p}` at `u`.
+    pub fn basis_funs_derivs(&self, u: f64, n: usize) -> SmallVec<[f64; 24]> {
         let i = self.find_span(u);
         self.basis_funs_derivs_for_span(i, u, n)
     }
 
-    pub fn basis_funs_derivs_for_span(&self, i: usize, u: f64, n: usize) -> SmallVec<[VecF; 3]> {
+    pub fn basis_funs_derivs_for_span(&self, i: usize, u: f64, n: usize) -> SmallVec<[f64; 24]> {
         // Keep common degrees and inverse-projection derivatives inline; higher
         // degrees and derivative orders spill without changing the algorithm.
         // The square basis table is contiguous, including when it spills.
@@ -125,7 +125,7 @@ impl KnotVector {
         let mut left: VecF = smallvec![0.0; self.p + 1];
         let mut right: VecF = smallvec![0.0; self.p + 1];
 
-        let mut ders: SmallVec<[VecF; 3]> = smallvec![smallvec![0.0; self.p + 1]; n + 1];
+        let mut ders: SmallVec<[f64; 24]> = smallvec![0.0; width * (n + 1)];
 
         ndu[0] = 1.0;
         for j in 1..=self.p {
@@ -142,7 +142,7 @@ impl KnotVector {
             ndu[j * width + j] = saved;
         }
         for j in 0..=self.p {
-            ders[0][j] = ndu[j * width + self.p];
+            ders[j] = ndu[j * width + self.p];
         }
         for r in 0..=self.p {
             let mut s1 = 0;
@@ -174,7 +174,7 @@ impl KnotVector {
                     a[s2][k] = -a[s1][k - 1] / ndu[aus(pk + 1) * width + r];
                     d += a[s2][k] * ndu[r * width + aus(pk)];
                 }
-                ders[k][r] = d;
+                ders[k * width + r] = d;
                 swap(&mut s1, &mut s2);
             }
         }
@@ -182,7 +182,7 @@ impl KnotVector {
         let mut r = self.p;
         for k in 1..=n {
             for j in 0..=self.p {
-                ders[k][j] *= r as f64;
+                ders[k * width + j] *= r as f64;
             }
             r *= self.p - k;
         }
@@ -206,7 +206,7 @@ mod tests {
         for (degree, order) in [(3, 2), (9, 4)] {
             let knots = KnotVector::from_multiplicities(degree, &[0., 1.], &[degree + 1; 2]);
             for u in [0., 0.125, 0.5, 0.875, 1.] {
-                for (k, basis) in knots.basis_funs_derivs(u, order).iter().enumerate() {
+                for (k, basis) in knots.basis_funs_derivs(u, order).chunks_exact(degree + 1).enumerate() {
                     let constant: f64 = basis.iter().sum();
                     let affine: f64 = basis.iter().enumerate()
                         .map(|(j, value)| value * j as f64 / degree as f64).sum();

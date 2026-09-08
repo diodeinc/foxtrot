@@ -255,7 +255,7 @@ impl<const D: usize> NDBSplineSurface<D> {
         difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
     ) -> (TVec<f64, D>, TVec<f64, D>) {
         let (origin, jet) = self.tensor_product::<1>([uspan, vspan],
-            std::slice::from_ref(Nu), std::slice::from_ref(Nv), difference);
+            Nu, Nv, difference);
         (origin, jet[0][0])
     }
 
@@ -283,7 +283,7 @@ impl<const D: usize> NDBSplineSurface<D> {
     }
 
     fn tensor_product<const E: usize>(&self, spans: [usize; 2],
-        Nu: &[impl AsRef<[f64]>], Nv: &[impl AsRef<[f64]>],
+        Nu: &[f64], Nv: &[f64],
         difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
     ) -> (TVec<f64, D>, [[TVec<f64, D>; E]; E]) {
         let p = self.u_knots.degree();
@@ -294,12 +294,12 @@ impl<const D: usize> NDBSplineSurface<D> {
 
         let [uspan, vspan] = spans;
         // The largest tensor basis selects a nearby coordinate origin.
-        let uanchor = Nu[0].as_ref().iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
-        let vanchor = Nv[0].as_ref().iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let uanchor = Nu[..=p].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let vanchor = Nv[..=q].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
         let origin = self.control_points[uspan - p + uanchor][vspan - q + vanchor];
         // Transform each control once, sharing it across derivative orders.
         // Each accumulator still visits controls in the original order.
-        let mut temp = vec![TVec::zeros(); (q + 1) * Nu.len()];
+        let mut temp = vec![TVec::zeros(); (q + 1) * (Nu.len() / (p + 1))];
         for s in 0..=q {
             // Apply partition of unity separately on each axis. A
             // coordinate independent of u must not acquire u roundoff,
@@ -307,17 +307,17 @@ impl<const D: usize> NDBSplineSurface<D> {
             let anchor = difference(self.control_points[uspan - p + uanchor][vspan - q + s], origin);
             for r in 0..=p {
                 let delta = difference(self.control_points[uspan - p + r][vspan - q + s], origin) - anchor;
-                for (k, Nu) in Nu.iter().map(AsRef::as_ref).enumerate() {
+                for (k, Nu) in Nu.chunks_exact(p + 1).enumerate() {
                     temp[k * (q + 1) + s] += Nu[r] * delta;
                 }
             }
             temp[s] += anchor;
         }
         for (k, temp) in temp.chunks_exact(q + 1).enumerate() {
-            let dd = min(E - 1 - k, Nv.len() - 1);
+            let dd = min(E - 1 - k, Nv.len() / (q + 1) - 1);
             for l in 0..=dd {
                 for s in 0..=q {
-                    SKL[k][l] += Nv[l].as_ref()[s] * (temp[s] - temp[vanchor]);
+                    SKL[k][l] += Nv[l * (q + 1) + s] * (temp[s] - temp[vanchor]);
                 }
                 if l == 0 { SKL[k][l] += temp[vanchor]; }
             }

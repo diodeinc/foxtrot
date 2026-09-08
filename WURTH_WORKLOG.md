@@ -1,5 +1,18 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance iteration 3 — 2026-09-08
+
+Flatten basis derivatives into one row-major inline/spilling buffer. Remove
+nested SmallVec construction/cloning and per-row storage branches; curve and
+surface contractions consume the same contiguous rows. No helper type or
+new dependency. The arithmetic is unchanged, including higher-degree spill.
+
+153 release library tests and wasm32 check pass; all 42 stress/control oriented
+STL triangle multisets remain identical. Three repeats of 32 boards take
+21.14 seconds; median API sum is 2.424987 seconds, still short of the target.
+Evidence: `local/board-comparison/flat-basis`, `flat-{geometry,controls}` and
+`flat-geometry-check.json`.
+
 ## Board performance iteration 2 — 2026-09-08
 
 Store surface derivative jets in compile-time-sized arrays rather than nested

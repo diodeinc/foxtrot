@@ -185,12 +185,12 @@ impl<const D: usize> NDBSplineCurve<D> {
         // Partition of unity: a constant contributes only to the position,
         // never its derivatives. Evaluate local differences before summation
         // instead of cancelling large translated control coordinates.
-        let anchor = N_derivs[0].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let anchor = N_derivs[..=p].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
         let origin = self.control_points[span - p + anchor];
         let mut CK = vec![TVec::zeros(); E + 1];
         for k in 0..=du {
             for j in 0..=p {
-                CK[k] += N_derivs[k][j] * difference(self.control_points[span - p + j], origin)
+                CK[k] += N_derivs[k * (p + 1) + j] * difference(self.control_points[span - p + j], origin)
             }
         }
         (origin, CK)
