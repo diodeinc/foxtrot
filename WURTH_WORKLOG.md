@@ -1,5 +1,29 @@
 # Würth and KiCad STEP repair worklog
 
+## Performance iteration 3 — 2026-09-08
+
+Reject the nested SmallVec surface-derivative-grid experiment: the capture
+took 33.56 seconds versus iteration 2's 32.60 seconds, including a Coilcraft
+slowdown. Restore those experimental edits; do not commit a storage change
+merely because it removes allocations.
+
+Instead simplify refinement's temporary topology. Return subdivision children
+as an iterator over the existing table, not a heap allocation per triangle.
+Materialize conforming topology only when refinement finishes, rather than
+building and discarding it during every unsuccessful round. Preserve child
+order, tolerance checks, promotion decisions and final connectivity.
+
+Capture: 33.15 seconds, 14/14 samples. This is not a demonstrated wall-time
+improvement over 32.60 seconds; retain it for simpler streaming topology and
+elimination of discarded allocations. Peak RSS remains variable (connector
+133.41 MiB, WPCC 73.10 MiB), so do not claim a process memory reduction.
+Evidence: `local/performance/iteration3-refine`.
+
+Validation: 153 release library tests pass; wasm32 check passes; seven stress
+models and 35 controls complete with identical oriented STL triangle
+multisets against iteration 2. Evidence:
+`local/performance/iteration3-geometry-check.json`.
+
 ## Performance iteration 2 — 2026-09-08
 
 Remove repeated tiny heap allocations in Algorithm A2.3 basis derivatives.

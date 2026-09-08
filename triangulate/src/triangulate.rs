@@ -1079,7 +1079,7 @@ fn advanced_face(
         for (i,(a,b)) in [(a,b),(b,c),(c,a)].iter().copied().enumerate() {
             if let Some(&mid) = splits.get(&edge_key(a,b)) { nodes[3+i] = mid; mask |= 1<<i; }
         }
-        SPLITS[mask].iter().map(|t| t.map(|i| nodes[i])).collect::<Vec<_>>()
+        SPLITS[mask].iter().map(move |t| t.map(|i| nodes[i]))
     };
     // Keep red leaves, not their temporary green completion. Refining a
     // failing green child promotes its owner; repeated green-only splitting
@@ -1087,7 +1087,6 @@ fn advanced_face(
     let mut splits = HashMap::new();
     loop {
         let mut marked = Vec::with_capacity(triangles.len());
-        let mut conforming = Vec::new();
         for &[a,b,c] in &triangles {
             // One hanging midpoint per leaf edge is enough for the completion
             // table. Promote a coarser owner before a second hanging level.
@@ -1095,17 +1094,18 @@ fn advanced_face(
                 splits.get(&edge_key(a,b)).is_some_and(|&mid|
                     splits.contains_key(&edge_key(a,mid)) || splits.contains_key(&edge_key(mid,b)))
             });
-            let completed = children([a,b,c], &splits);
-            let inaccurate = completed.iter().any(|&[a,b,c]| {
+            let inaccurate = children([a,b,c], &splits).any(|[a,b,c]| {
                 let samples = [a,b,c].map(|i| (DVec2::new(pts[i].0,pts[i].1),1./3.));
                 let Some((uv,pos)) = prepared.sample(&samples) else { return false; };
                 let center = (surface_positions[a] + surface_positions[b] + surface_positions[c]) / 3.;
                 prepared.exceeds_tolerance(center, uv, pos, tolerance)
             });
             marked.push(balance || inaccurate);
-            conforming.extend(completed);
         }
-        if !marked.iter().any(|&m| m) { triangles = conforming; break; }
+        if !marked.iter().any(|&m| m) {
+            triangles = triangles.iter().flat_map(|&t| children(t, &splits)).collect();
+            break;
+        }
         let mut pending = Vec::new();
         let mut next = Vec::new();
         for (index, &[a,b,c]) in triangles.iter().enumerate() {
