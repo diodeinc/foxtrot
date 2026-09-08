@@ -475,6 +475,10 @@ where
         // the current projection. Keep each search within its cell: a bound
         // on surface position is not a bound on an unrestrained Newton basin.
         for cell in &self.cells {
+            // With one cell, its nearest seed and every incident model are
+            // identical to the initial solve (including failed solves).
+            // Only this duplicate retry is redundant, not subdivision below.
+            if self.cells.len() == 1 { break; }
             let bounds = cell.bounds;
             let lower_bound: f64 = (0..3).map(|i|
                 (bounds[0][i] - p[i]).max(p[i] - bounds[1][i]).max(0.).powi(2)).sum();
@@ -1034,13 +1038,15 @@ mod tests {
         // Two close parallel strips joined above the target. The nearest
         // grid sample belongs to the left strip, but the target is on the
         // right strip. Newton on the left stops at an off-surface minimum.
-        let controls: Vec<Vec<DVec3>> = [(0., 0.1), (0., 0.8), (0.001, 1.), (0.001, 0.)]
+        // The separation is below the subdivision distance resolution: that
+        // budget must not suppress retries in distinct projection basins.
+        let controls: Vec<Vec<DVec3>> = [(0., 0.1), (0., 0.8), (1e-10, 1.), (1e-10, 0.)]
             .iter()
             .map(|&(x, y)| [0., 1.].iter().map(|&z| DVec3::new(x, y, z)).collect())
             .collect();
         let u = KnotVector::from_multiplicities(1, &[0., 1., 2., 3.], &[2, 1, 1, 2]);
         let v = KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
-        let target = DVec3::new(0.001, 0.5, 0.33);
+        let target = DVec3::new(1e-10, 0.5, 0.33);
         let polynomial = SampledSurface::new(NDBSplineSurface::new(
             true,
             true,
@@ -1049,6 +1055,7 @@ mod tests {
             controls.clone(),
         ));
         let uv = polynomial.uv_from_point(target).unwrap();
+        assert!(uv.x > 2.);
         assert!((polynomial.surf.point(uv) - target).norm() < 1e-12);
         let rational = SampledSurface::new(NDBSplineSurface::new(
             true,
@@ -1066,6 +1073,7 @@ mod tests {
                 .collect(),
         ));
         let uv = rational.uv_from_point(target).unwrap();
+        assert!(uv.x > 2.);
         assert!((rational.surf.point(uv) - target).norm() < 1e-12);
     }
 

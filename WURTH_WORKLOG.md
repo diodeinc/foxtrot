@@ -1,5 +1,25 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance iteration 4 — 2026-09-08
+
+Eliminate the duplicate per-cell Newton retry on single-cell surfaces. Its
+nearest sample, active models and domain are identical to the initial solve,
+including failures. Retain seam-alias attempts and global subdivision: a
+single cell can still contain multiple projection basins.
+
+Reject moving subdivision's distance cutoff ahead of all per-cell retries.
+Oracle analysis identifies distinct sheets separated by 1e-10 whose distances
+fit that budget but whose UVs differ by almost two units. Strengthen the
+existing nearby-sheet test with that separation and explicit branch checks;
+57 NURBS release tests pass. All 42 stress/control oriented STL triangle
+multisets match the preceding iteration.
+
+Board capture takes 20.03 seconds; API median sum falls from 2.424987 to
+2.307041 seconds. Target remains 1.504110. Evidence is under
+`local/board-comparison/dedup{,-geometry,-controls}` and
+`dedup-geometry-check.json`. Remove the superseded array-iteration STL files
+after successful comparison, retaining small reports and current meshes.
+
 ## Board performance iteration 3 — 2026-09-08
 
 Flatten basis derivatives into one row-major inline/spilling buffer. Remove
