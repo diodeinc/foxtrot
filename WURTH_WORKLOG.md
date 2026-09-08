@@ -1,5 +1,54 @@
 # Würth and KiCad STEP repair worklog
 
+## Performance iteration 2 — 2026-09-08
+
+Remove repeated tiny heap allocations in Algorithm A2.3 basis derivatives.
+Use the existing SmallVec dependency for inline work/output buffers and one
+contiguous square basis table. Common degrees through seven and derivative
+orders through two need no heap allocation here; larger inputs spill without
+a separate numerical path. Arithmetic and traversal order remain unchanged.
+An arena is unnecessary for this function-local scratch lifetime. This does
+not remove allocations elsewhere in surface derivative evaluation.
+
+The first nested-inline table improved total time but regressed Coilcraft,
+whose surfaces include degree eleven. Flattening the table removes per-row
+spill allocations and pointer indirection, and resolves that regression.
+Keep this as one allocation-layout change, not separate experimental commits.
+
+Recheck the saved iteration-1 worker serially: 43.76 seconds, 14/14 samples.
+Final capture: 32.60 seconds, 14/14 samples (25.5% less capture time).
+Both runs use the fixed seven-file manifest, two repetitions and one thread.
+
+| Model | Rechecked baseline / final seconds | Peak MiB baseline / final |
+| --- | ---: | ---: |
+| HCFT | 8.397 / 6.026 | 75.75 / 82.71 |
+| WPCC | 3.755 / 3.029 | 69.60 / 64.50 |
+| Coilcraft | 1.688 / 1.560 | 23.22 / 23.23 |
+| Capacitor | 5.204 / 3.257 | 23.65 / 27.43 |
+| Connector | 2.633 / 2.256 | 116.37 / 139.11 |
+| Planar control | 0.0074 / 0.0074 | 23.22 / 23.23 |
+| LED | 0.0163 / 0.0121 | 23.22 / 23.23 |
+
+This is a CPU win, not a peak-RSS win. Connector peak memory increases in
+these captures. Final mesh capacity also varies across runs: HashMap shape
+iteration order changes Vec growth during mesh concatenation, even with one
+thread. That is an observed source of variability, not proof explaining all
+of the RSS increase; memory remains an outstanding optimization target.
+
+Validation: 153 release workspace library tests pass, including affine
+reproduction at degrees three/nine and derivative orders two/four (inline
+and spill paths). wasm32 check passes. All seven stress models plus 35
+controls complete and have identical oriented STL triangle multisets against
+iteration 1, preserving winding and multiplicity. This comparison does not
+assert f64 positions or normals are bit-identical.
+
+Evidence: `local/performance/iteration2-baseline-recheck`,
+`local/performance/iteration2-flat`, and
+`local/performance/iteration2-flat-geometry-check.json`. Export the report,
+raw samples and comparison evidence to `.amp/in/artifacts/performance-iteration2`.
+Remove superseded intermediate replay meshes after successful comparison;
+retain input corpora, baseline meshes, final replay meshes and small reports.
+
 ## Performance iteration 1 — 2026-09-08
 
 Establish a fixed seven-file stress/control sample and a bounded profile

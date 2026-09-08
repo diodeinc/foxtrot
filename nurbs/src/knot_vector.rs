@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use smallvec::smallvec;
+use smallvec::{smallvec, SmallVec};
 use std::mem::swap;
 
 use crate::VecF;
@@ -110,35 +110,39 @@ impl KnotVector {
     /// ALGORITHM A2.3
     /// if ders = basis_funs_derivs_(), then ders[k][j] is the `kth` derivative
     /// of the function `N_{i-p+j, p}` at `u`
-    pub fn basis_funs_derivs(&self, u: f64, n: usize) -> Vec<Vec<f64>> {
+    pub fn basis_funs_derivs(&self, u: f64, n: usize) -> SmallVec<[VecF; 3]> {
         let i = self.find_span(u);
         self.basis_funs_derivs_for_span(i, u, n)
     }
 
-    pub fn basis_funs_derivs_for_span(&self, i: usize, u: f64, n: usize) -> Vec<Vec<f64>> {
-        let mut ndu = vec![vec![0.0; self.p + 1]; self.p + 1];
-        let mut a = vec![vec![0.0; self.p + 1]; 2];
-        let mut left = vec![0.0; self.p + 1];
-        let mut right = vec![0.0; self.p + 1];
+    pub fn basis_funs_derivs_for_span(&self, i: usize, u: f64, n: usize) -> SmallVec<[VecF; 3]> {
+        // Keep common degrees and inverse-projection derivatives inline; higher
+        // degrees and derivative orders spill without changing the algorithm.
+        // The square basis table is contiguous, including when it spills.
+        let width = self.p + 1;
+        let mut ndu: SmallVec<[f64; 64]> = smallvec![0.0; width * width];
+        let mut a: [VecF; 2] = [smallvec![0.0; self.p + 1], smallvec![0.0; self.p + 1]];
+        let mut left: VecF = smallvec![0.0; self.p + 1];
+        let mut right: VecF = smallvec![0.0; self.p + 1];
 
-        let mut ders = vec![vec![0.0; self.p + 1]; n + 1];
+        let mut ders: SmallVec<[VecF; 3]> = smallvec![smallvec![0.0; self.p + 1]; n + 1];
 
-        ndu[0][0] = 1.0;
+        ndu[0] = 1.0;
         for j in 1..=self.p {
             left[j] = u - self[i + 1 - j];
             right[j] = self[i + j] - u;
             let mut saved = 0.0;
             for r in 0..j {
-                ndu[j][r] = right[r + 1] + left[j - r];
-                let temp = ndu[r][j - 1] / ndu[j][r];
+                ndu[j * width + r] = right[r + 1] + left[j - r];
+                let temp = ndu[r * width + j - 1] / ndu[j * width + r];
 
-                ndu[r][j] = saved + right[r + 1] * temp;
+                ndu[r * width + j] = saved + right[r + 1] * temp;
                 saved = left[j - r] * temp;
             }
-            ndu[j][j] = saved;
+            ndu[j * width + j] = saved;
         }
         for j in 0..=self.p {
-            ders[0][j] = ndu[j][self.p];
+            ders[0][j] = ndu[j * width + self.p];
         }
         for r in 0..=self.p {
             let mut s1 = 0;
@@ -152,8 +156,8 @@ impl KnotVector {
                 let rk = (r as i32) - (k as i32);
                 let pk = (self.p as i32) - (k as i32);
                 if r >= k {
-                    a[s2][0] = a[s1][0] / ndu[aus(pk + 1)][rk as usize];
-                    d = a[s2][0] * ndu[aus(rk)][aus(pk)];
+                    a[s2][0] = a[s1][0] / ndu[aus(pk + 1) * width + rk as usize];
+                    d = a[s2][0] * ndu[aus(rk) * width + aus(pk)];
                 }
                 let j1 = aus(if rk >= -1 { 1 } else { -rk });
                 let j2 = aus(if r as i32 - 1 <= pk as i32 {
@@ -163,12 +167,12 @@ impl KnotVector {
                 });
 
                 for j in j1..=j2 {
-                    a[s2][j] = (a[s1][j] - a[s1][j - 1]) / ndu[aus(pk + 1)][aus(rk + j as i32)];
-                    d += a[s2][j] * ndu[aus(rk + j as i32)][aus(pk)];
+                    a[s2][j] = (a[s1][j] - a[s1][j - 1]) / ndu[aus(pk + 1) * width + aus(rk + j as i32)];
+                    d += a[s2][j] * ndu[aus(rk + j as i32) * width + aus(pk)];
                 }
                 if r as i32 <= pk {
-                    a[s2][k] = -a[s1][k - 1] / ndu[aus(pk + 1)][r];
-                    d += a[s2][k] * ndu[r][aus(pk)];
+                    a[s2][k] = -a[s1][k - 1] / ndu[aus(pk + 1) * width + r];
+                    d += a[s2][k] * ndu[r * width + aus(pk)];
                 }
                 ders[k][r] = d;
                 swap(&mut s1, &mut s2);
@@ -196,6 +200,23 @@ impl std::ops::Index<usize> for KnotVector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derivatives_reproduce_affine_curves_at_low_and_high_degree() {
+        for (degree, order) in [(3, 2), (9, 4)] {
+            let knots = KnotVector::from_multiplicities(degree, &[0., 1.], &[degree + 1; 2]);
+            for u in [0., 0.125, 0.5, 0.875, 1.] {
+                for (k, basis) in knots.basis_funs_derivs(u, order).iter().enumerate() {
+                    let constant: f64 = basis.iter().sum();
+                    let affine: f64 = basis.iter().enumerate()
+                        .map(|(j, value)| value * j as f64 / degree as f64).sum();
+                    assert!((constant - if k == 0 { 1. } else { 0. }).abs() < 1e-9);
+                    let expected = match k { 0 => u, 1 => 1., _ => 0. };
+                    assert!((affine - expected).abs() < 1e-9);
+                }
+            }
+        }
+    }
 
     #[test]
     fn incident_spans_skip_repetitions_and_inactive_exterior_intervals() {
