@@ -1,5 +1,27 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance iteration 2 — 2026-09-08
+
+Store surface derivative jets in compile-time-sized arrays rather than nested
+heap vectors. E now denotes the number of orders, including position; all
+surface callers request the same derivatives as before. Arbitrary compile-time
+orders remain supported. Preserve arithmetic order and every tolerance.
+
+153 release library tests and wasm32 check pass. Seven stress models and 35
+controls have identical oriented STL triangle multisets against iteration 4;
+this preserves winding and multiplicity, not a claim about f64/normal bits.
+All 32 boards retain counts, completion, validation and diagnostics.
+
+The Ethernet profiler's tessellation falls from 124.95 to 106.08 ms, but the
+whole-board aggregate does not show a material win: contemporaneous HEAD
+recheck 2.513195 seconds versus arrays 2.497122. Do not count this as reaching
+the 30% target. Keep the simpler allocation-free output representation and
+profile remaining work. A Callgrind capture identifies basis-derivative scratch
+handling, parser copying, allocation and record scans as substantial costs.
+
+Evidence: `local/board-comparison/arrays{,-recheck,-geometry,-controls}` and
+`arrays-geometry-check.json`; capture time 21.3 seconds for three board repeats.
+
 ## Board performance iteration 1 — 2026-09-08
 
 Target at least 30% less direct Foxtrot time than origin/master: at most

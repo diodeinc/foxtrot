@@ -22,11 +22,11 @@ impl AbstractSurface for NURBSSurface {
         self.span_control_bounds(spans, |p| p.xyz() / p.w)
     }
 
-    fn derivs_relative_to<const E: usize>(&self, uv: DVec2, reference: DVec3) -> Vec<Vec<DVec3>> {
+    fn derivs_relative_to<const E: usize>(&self, uv: DVec2, reference: DVec3) -> [[DVec3; E]; E] {
         self.derivs_in_span::<E>(uv, [self.u_knots.find_span(uv.x), self.v_knots.find_span(uv.y)], reference)
     }
 
-    fn derivs_in_span<const E: usize>(&self, uv: DVec2, spans: [usize; 2], reference: DVec3) -> Vec<Vec<DVec3>> {
+    fn derivs_in_span<const E: usize>(&self, uv: DVec2, spans: [usize; 2], reference: DVec3) -> [[DVec3; E]; E] {
         let shift = |p: nalgebra_glm::DVec4| nalgebra_glm::DVec4::new(
             (-reference.x).mul_add(p.w, p.x),
             (-reference.y).mul_add(p.w, p.y),
@@ -35,10 +35,10 @@ impl AbstractSurface for NURBSSurface {
             |p, origin| crate::rational_difference(shift(p), shift(origin)));
         let origin = shift(origin);
         derivs[0][0].w += origin.w;
-        let mut SKL = vec![vec![DVec3::zeros(); E + 1]; E + 1];
+        let mut SKL = [[DVec3::zeros(); E]; E];
         let bin = |a, b| num_integer::binomial(a, b) as f64;
-        for k in 0..=E {
-            for l in 0..=(E - k) {
+        for k in 0..E {
+            for l in 0..E - k {
                 let mut v = derivs[k][l].xyz();
                 for j in 1..=l {
                     v -= bin(l, j) * derivs[0][j].w * SKL[k][l - j];
@@ -73,12 +73,12 @@ mod tests {
             [(0., 0.5), (0.5, 0.), (1., 0.5)].iter().map(|&(x, z)|
                 vec![DVec4::new(x, 0., z, 1.), DVec4::new(x, 1., z, 1.)]).collect());
         let uv = DVec2::new(0.5, 0.3);
-        let left = surface.derivs_in_span::<1>(uv, [1, 1], DVec3::zeros());
-        let right = surface.derivs_in_span::<1>(uv, [2, 1], DVec3::zeros());
+        let left = surface.derivs_in_span::<2>(uv, [1, 1], DVec3::zeros());
+        let right = surface.derivs_in_span::<2>(uv, [2, 1], DVec3::zeros());
         assert_eq!(left[0][0], right[0][0]);
         assert_eq!(left[1][0], DVec3::new(1., 0., -1.));
         assert_eq!(right[1][0], DVec3::new(1., 0., 1.));
-        assert_eq!(surface.derivs::<1>(uv), right);
+        assert_eq!(surface.derivs::<2>(uv), right);
     }
 
     #[test]
@@ -87,7 +87,7 @@ mod tests {
             let uv = DVec2::new(0.25 + 1e-10, 0.3);
             let reference = DVec3::new(1e9 + 0.25, 0.3, 0.);
             assert_eq!(surface.point(uv), reference);
-            let jet = surface.derivs_relative_to::<1>(uv, reference);
+            let jet = surface.derivs_relative_to::<2>(uv, reference);
             assert!((jet[0][0].x - (uv.x - 0.25)).abs() < 1e-16);
             assert_eq!(jet[1][0], DVec3::x());
             assert_eq!(jet[0][1], DVec3::y());
@@ -112,7 +112,7 @@ mod tests {
         for i in 0..=32 {
             let uv = DVec2::new(i as f64 / 32., 0.37);
             assert_eq!(surface.point(uv).z, z);
-            let d = surface.derivs::<3>(uv);
+            let d = surface.derivs::<4>(uv);
             assert_eq!(d[0][0].z, z);
             for k in 0..=3 { for l in 0..=3-k {
                 if k + l > 0 { assert_eq!(d[k][l].z, 0.); }

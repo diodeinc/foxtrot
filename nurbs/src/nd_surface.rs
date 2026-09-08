@@ -254,7 +254,7 @@ impl<const D: usize> NDBSplineSurface<D> {
         uspan: usize, Nu: &VecF, vspan: usize, Nv: &VecF,
         difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
     ) -> (TVec<f64, D>, TVec<f64, D>) {
-        let (origin, jet) = self.tensor_product::<0>([uspan, vspan],
+        let (origin, jet) = self.tensor_product::<1>([uspan, vspan],
             std::slice::from_ref(Nu), std::slice::from_ref(Nv), difference);
         (origin, jet[0][0])
     }
@@ -263,10 +263,10 @@ impl<const D: usize> NDBSplineSurface<D> {
     /// `D[k][l]` is the derivative of the surface `k` times in the `u`
     /// direction and `l` times in the `v` direction.
     ///
-    /// We compute derivatives up to and including the `d`'th order derivatives.
+    /// E includes the position; compute mixed derivatives with k + l < E.
     ///
     /// ALGORITHM A3.6
-    pub fn surface_derivs<const E: usize>(&self, uv: DVec2) -> Vec<Vec<TVec<f64, D>>> {
+    pub fn surface_derivs<const E: usize>(&self, uv: DVec2) -> [[TVec<f64, D>; E]; E] {
         let spans = [self.u_knots.find_span(uv.x), self.v_knots.find_span(uv.y)];
         let (origin, mut derivatives) = self.surface_derivs_relative::<E>(uv, spans, |p, origin| p - origin);
         derivatives[0][0] += origin;
@@ -275,21 +275,22 @@ impl<const D: usize> NDBSplineSurface<D> {
 
     pub(crate) fn surface_derivs_relative<const E: usize>(&self, uv: DVec2, spans: [usize; 2],
         difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
-    ) -> (TVec<f64, D>, Vec<Vec<TVec<f64, D>>>) {
-        let Nu = self.u_knots.basis_funs_derivs_for_span(spans[0], uv.x, min(E, self.u_knots.degree()));
-        let Nv = self.v_knots.basis_funs_derivs_for_span(spans[1], uv.y, min(E, self.v_knots.degree()));
+    ) -> (TVec<f64, D>, [[TVec<f64, D>; E]; E]) {
+        const { assert!(E > 0); }
+        let Nu = self.u_knots.basis_funs_derivs_for_span(spans[0], uv.x, min(E - 1, self.u_knots.degree()));
+        let Nv = self.v_knots.basis_funs_derivs_for_span(spans[1], uv.y, min(E - 1, self.v_knots.degree()));
         self.tensor_product::<E>(spans, &Nu, &Nv, difference)
     }
 
     fn tensor_product<const E: usize>(&self, spans: [usize; 2],
         Nu: &[impl AsRef<[f64]>], Nv: &[impl AsRef<[f64]>],
         difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
-    ) -> (TVec<f64, D>, Vec<Vec<TVec<f64, D>>>) {
+    ) -> (TVec<f64, D>, [[TVec<f64, D>; E]; E]) {
         let p = self.u_knots.degree();
         let q = self.v_knots.degree();
-        // The output matrix goes all the way to order d, even if some of the
+        // The output matrix goes all the way to order E - 1, even if some of the
         // surfaces are lower order (those values will be locked at 0)
-        let mut SKL = vec![vec![TVec::zeros(); E + 1]; E + 1];
+        let mut SKL = [[TVec::zeros(); E]; E];
 
         let [uspan, vspan] = spans;
         // The largest tensor basis selects a nearby coordinate origin.
@@ -313,7 +314,7 @@ impl<const D: usize> NDBSplineSurface<D> {
             temp[s] += anchor;
         }
         for (k, temp) in temp.chunks_exact(q + 1).enumerate() {
-            let dd = min(E - k, Nv.len() - 1);
+            let dd = min(E - 1 - k, Nv.len() - 1);
             for l in 0..=dd {
                 for s in 0..=q {
                     SKL[k][l] += Nv[l].as_ref()[s] * (temp[s] - temp[vanchor]);
@@ -361,7 +362,7 @@ mod tests {
             let a = NDBSplineSurface::new(true, true, u.clone(), v.clone(), points.clone());
             let b = NDBSplineSurface::new(true, true, u, v, points.iter().map(|row|
                 row.iter().map(|p| DVec4::new(p.x, p.y, p.z, 1.)).collect()).collect());
-            let check = |jets: Vec<Vec<DVec3>>, expected_z: f64| {
+            let check = |jets: [[DVec3; 3]; 3], expected_z: f64| {
                 assert_eq!(jets[0][0].z, expected_z);
                 let (profile, height) = if transposed { (jets[0][1], jets[1][0]) }
                     else { (jets[1][0], jets[0][1]) };
@@ -371,10 +372,10 @@ mod tests {
             };
             let uv = |t| if transposed { DVec2::new(1e-12, t) } else { DVec2::new(t, 1e-12) };
             let reference = DVec3::new(0., 0., 0.00988);
-            let expected = a.derivs_relative_to::<2>(uv(0.), reference)[0][0].z;
+            let expected = a.derivs_relative_to::<3>(uv(0.), reference)[0][0].z;
             for i in 0..=64 {
-                check(a.derivs_relative_to::<2>(uv(i as f64 / 64.), reference), expected);
-                check(b.derivs_relative_to::<2>(uv(i as f64 / 64.), reference), expected);
+                check(a.derivs_relative_to::<3>(uv(i as f64 / 64.), reference), expected);
+                check(b.derivs_relative_to::<3>(uv(i as f64 / 64.), reference), expected);
             }
         }
     }
@@ -388,7 +389,7 @@ mod tests {
         let surface = NDBSplineSurface::new(true, true, knots(), knots(), controls);
         let uv = DVec2::repeat(1.);
         assert_eq!(surface.surface_point(uv), end);
-        assert_eq!(surface.surface_derivs::<2>(uv)[0][0], end);
+        assert_eq!(surface.surface_derivs::<3>(uv)[0][0], end);
     }
 
     #[test]
@@ -400,7 +401,7 @@ mod tests {
         for i in 0..=16 {
             let uv = DVec2::new(0.01 * i as f64 / 16., 0.0037);
             assert_eq!(surface.surface_point(uv).x, 8.58999999999999);
-            let derivatives = surface.surface_derivs::<2>(uv);
+            let derivatives = surface.surface_derivs::<3>(uv);
             assert_eq!(derivatives[0][0].x, 8.58999999999999);
             for k in 0..=2 { for l in 0..=2-k {
                 if k + l > 0 { assert_eq!(derivatives[k][l].x, 0.); }

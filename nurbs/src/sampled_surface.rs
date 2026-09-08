@@ -254,7 +254,7 @@ where
     ) -> DistanceModel {
         // Fixed unit-domain coordinates preserve the surface differential's
         // rank and scale continuously, including at collapsed boundaries.
-        let derivs = self.surf.derivs_in_span::<2>(uv, spans, P);
+        let derivs = self.surf.derivs_in_span::<3>(uv, spans, P);
         let r = derivs[0][0];
         let columns = [derivs[1][0] * ranges.x, derivs[0][1] * ranges.y];
         let norms = DVec2::new(columns[0].norm(), columns[1].norm());
@@ -363,7 +363,7 @@ where
                     );
                     let mut candidate = self.stepped_uv(uv_i, ranges, m.spans, step);
                     let mut candidate_r =
-                        self.surf.derivs_in_span::<0>(candidate, m.spans, P)[0][0];
+                        self.surf.derivs_in_span::<1>(candidate, m.spans, P)[0][0];
                     let prediction = |point: DVec2| {
                         let q = (point - uv_i).component_div(&ranges);
                         let h = m.hessian;
@@ -389,7 +389,7 @@ where
                         if prediction(bound) >= 0. {
                             continue;
                         }
-                        let bound_r = self.surf.derivs_in_span::<0>(bound, m.spans, P)[0][0];
+                        let bound_r = self.surf.derivs_in_span::<1>(bound, m.spans, P)[0][0];
                         if crate::squared_norm_difference(bound_r, candidate_r) <= 0. {
                             candidate = bound;
                             candidate_r = bound_r;
@@ -462,7 +462,7 @@ where
                 }
             }
         }
-        let distance = |uv| self.surf.derivs_relative_to::<0>(uv, p)[0][0].norm_squared();
+        let distance = |uv| self.surf.derivs_relative_to::<1>(uv, p)[0][0].norm_squared();
         let domain = [&self.surf.u_knots, &self.surf.v_knots].map(|k| 0..k.len());
         let mut result = seeds
             .iter()
@@ -509,14 +509,14 @@ where
         }
         while let Some((controls, lo, hi, spans)) = queue.pop_front() {
             let mid = (lo + hi) * 0.5;
-            let d = self.surf.derivs_in_span::<1>(mid, spans, p);
+            let d = self.surf.derivs_in_span::<2>(mid, spans, p);
             let normal = d[1][0].cross(&d[0][1]);
             let normal = if normal.norm_squared() > 0. { normal.normalize() } else { DVec3::zeros() };
             let tangent = if d[1][0].norm_squared() > 0. { d[1][0].normalize() } else { DVec3::zeros() };
             let bitangent = normal.cross(&tangent);
             let mut slab = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
             let mut bounds = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
-            let residual = result.map_or(DVec3::zeros(), |uv| self.surf.derivs_relative_to::<0>(uv, p)[0][0]);
+            let residual = result.map_or(DVec3::zeros(), |uv| self.surf.derivs_relative_to::<1>(uv, p)[0][0]);
             let direction = residual.try_normalize(0.).unwrap_or_else(DVec3::zeros);
             let mut support = f64::INFINITY;
             for q in controls.iter().flatten().copied().map(crate::nd_curve::cartesian) {
@@ -749,7 +749,7 @@ mod tests {
             ],
         ));
         let expected = DVec2::new(1e-10, 0.5);
-        let jet = sampled.surf.derivs::<1>(expected);
+        let jet = sampled.surf.derivs::<2>(expected);
         let p = jet[0][0] + jet[1][0].cross(&jet[0][1]).normalize() * 1e-7;
         let uv = sampled
             .uv_from_point_newtons_method(p, DVec2::zeros())
@@ -774,7 +774,7 @@ mod tests {
         let uv = sampled
             .uv_from_point_newtons_method(p, DVec2::new(0., 0.5))
             .unwrap();
-        let d = sampled.surf.derivs::<1>(uv);
+        let d = sampled.surf.derivs::<2>(uv);
         let r = d[0][0] - p;
         assert!(uv.x > 0. && uv.x < 0.001);
         assert!(r.norm() < (sampled.surf.point(DVec2::new(0., 0.5)) - p).norm());

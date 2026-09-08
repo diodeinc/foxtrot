@@ -2624,7 +2624,7 @@ mod tests {
         let uv = glm::DVec2::new(0.4, 0.3);
         let basis = (DVec3::new(2.0, -1.0, 0.5) * 0.6 + DVec3::new(3.0, 1.0, 2.0) * 0.8) / 1.4;
         assert!((surface.surf.point(uv) - (basis + vector * uv.y)).norm() < 1e-12);
-        let d = surface.surf.derivs::<1>(uv);
+        let d = surface.surf.derivs::<2>(uv);
         let expected = d[1][0].cross(&vector).normalize();
         assert!(d[1][0].cross(&d[0][1]).normalize().dot(&expected) > 1.0 - 1e-12);
     }
@@ -2642,7 +2642,7 @@ mod tests {
             + radial * std::f64::consts::FRAC_1_SQRT_2
             + axis.cross(&radial) * std::f64::consts::FRAC_1_SQRT_2;
         assert!((surface.surf.point(uv) - expected).norm() < 1e-12);
-        let d = surface.surf.derivs::<1>(uv);
+        let d = surface.surf.derivs::<2>(uv);
         let normal = d[1][0].cross(&d[0][1]);
         assert!(normal.norm() > 1e-6);
         let tangent = DVec3::new(1.0, 2.0, 1.5);

@@ -843,8 +843,8 @@ impl PreparedSurface<'_> {
             let budget = tolerance+self.uncertainty;
             if path_error(raw) <= budget { continue; }
             if let Some(local) = surf.uv_from_point_newtons_method(p,seed) {
-                let global_gap = surf.surf.derivs_relative_to::<0>(raw,p)[0][0].norm();
-                let local_gap = surf.surf.derivs_relative_to::<0>(local,p)[0][0].norm();
+                let global_gap = surf.surf.derivs_relative_to::<1>(raw,p)[0][0].norm();
+                let local_gap = surf.surf.derivs_relative_to::<1>(local,p)[0][0].norm();
                 if local_gap <= global_gap.max(self.uncertainty)+32.*EPSILON*p.norm() && path_error(local) <= budget {
                     let uv = chart.lower(local);
                     pts[b] = (uv.x,uv.y);
@@ -1571,7 +1571,7 @@ impl PreparedSurface<'_> {
     }
 
     fn surf_normal(uv: DVec2, surf: &SampledSurface<4>) -> DVec3 {
-        let derivs = surf.surf.derivs::<1>(uv);
+        let derivs = surf.surf.derivs::<2>(uv);
         let n = derivs[1][0].cross(&derivs[0][1]);
         if n.norm_squared() > 1e-20 {
             return n.normalize();
@@ -1602,7 +1602,7 @@ impl PreparedSurface<'_> {
                     surf.surf.v_open,
                 ),
             );
-            let derivs = surf.surf.derivs::<1>(candidate);
+            let derivs = surf.surf.derivs::<2>(candidate);
             let n = derivs[1][0].cross(&derivs[0][1]);
             if n.norm_squared() > 1e-20 {
                 return n.normalize();
