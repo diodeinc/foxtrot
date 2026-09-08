@@ -118,6 +118,39 @@ target/release/examples/corpus_worker model.step metrics.json - browser.bin
 normal, color, expanded three vertices per triangle. No STEP reparsing or
 alternate mesh conversion is required on the JavaScript side.
 
+### Performance iteration in under five minutes
+
+Use the fixed seven-model stress/control sample rather than a full corpus
+sweep. It covers winding surfaces, a capacitor, a connector, a planar control
+and a degenerate-torus cap. Inputs are hash-pinned in
+`scripts/performance-sample.json`, relative to `local/` (the Wurth and KiCad
+corpora must already be present).
+
+```sh
+CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo build --release -p triangulate --example profile
+python3 scripts/performance.py local --output local/perf-before
+
+# After changing and rebuilding the profile worker:
+python3 scripts/performance.py local --output local/perf-after \
+  --compare local/perf-before/results.json
+```
+
+The capture runs two fresh processes per model, serially on one Rayon thread.
+Its default global budget is 240 seconds; unfinished samples are explicit
+failures, not omitted passes. Builds are a separate step. `report.md` and
+`results.json` record elapsed/CPU stage timings, inclusive internal phases and
+call counts, peak RSS, geometry/storage counts, raw samples, input/worker
+hashes and before/after time/memory ratios. The initial complete capture took
+136 seconds in the development orb.
+
+This measures read → flatten → parse → tessellate → browser buffer, not STL,
+OCCT or color-grouped export. RSS is cumulative process high-water memory,
+not live allocation size; do not add the stage peaks or nested phase timings.
+No warmup or cache flush is performed. Use the same machine and sample for
+comparisons, and run the correctness harness separately before accepting a
+speedup. The profiler takes its thread-local timing snapshot inside the same
+single-worker pool that performs tessellation.
+
 ### Select, benchmark, compare
 
 ```sh

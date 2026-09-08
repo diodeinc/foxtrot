@@ -1054,6 +1054,7 @@ fn advanced_face(
         }))
     });
     let t = result.map_err(|_| Error::TriangulationPanic)??;
+    crate::timing::time("face:refine_and_normals", || {
     let mut triangles: Vec<_> = t.triangles().map(|(a,b,c)| [a,b,c]).collect();
     let edge_key = |a: usize,b: usize| (a.min(b),a.max(b));
     let mut uses = HashMap::new();
@@ -1167,6 +1168,7 @@ fn advanced_face(
     }
     info!("face {} done", face_id);
     Ok(())
+    })
 }
 
 #[derive(Debug)]

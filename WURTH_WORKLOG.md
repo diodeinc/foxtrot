@@ -1,5 +1,28 @@
 # Würth and KiCad STEP repair worklog
 
+## Performance iteration 1 — 2026-09-08
+
+Establish a fixed seven-file stress/control sample and a bounded profile
+runner. Two serial samples per model complete in 136.3 seconds (14/14),
+within a 240-second global budget. Record wall/CPU phase times, cumulative
+peak RSS, mesh/storage sizes, input and worker hashes, and raw repetitions.
+The report excludes compilation, STL, OCCT and correctness validation.
+Timeouts and exhausted-budget samples remain explicit failures.
+
+Replace the old text/color-grouping profiler with the actual browser-buffer
+pipeline. Run the profile and timing snapshot on the same single Rayon
+worker; the old main-thread snapshot missed worker-local timings. Add a
+scope for spatial refinement and normals, previously absent from the phase
+breakdown. Five harness tests cover deadline skips, invalid metrics, partial
+meshes and compatible cross-build time/memory comparisons.
+
+Baseline evidence: `local/performance/before`. Median total times are HCFT
+26.01 s, WPCC 20.29 s, Coilcraft 7.26 s, capacitor 5.26 s, connector 9.11 s,
+planar control 7 ms and LED 27 ms. Refinement/normals dominate the winding
+models (HCFT 20.79 s, WPCC 20.08 s); inverse lowering dominates the capacitor
+(4.99 s). Worst sample peak is the connector at about 172 MiB. Optimize
+measured repeated work and output allocation rather than weakening geometry.
+
 ## Cleanup checkpoint — 2026-09-08
 
 Remove unused cylinder/torus axis and location fields (already represented

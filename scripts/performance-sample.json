@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "description": "Fixed stress/control sample: swept winding, ring torus, spline winding, capacitor poles, connector, planar control, degenerate-torus cap. Two serial repetitions, 240-second global budget.",
+  "files": [
+    {
+      "path": "wurth/3dmodels/Inductor_THT_Wurth.3dshapes/L_Wurth_WE-HCFT-3533_LeadDiameter2.0mm.step",
+      "bytes": 1209617,
+      "sha256": "fd78a2d0c426231771c82726bc76605154209f11e973755ee4f17ae1a3f136de"
+    },
+    {
+      "path": "wurth/3dmodels/Inductor_THT_Wurth.3dshapes/L_Wurth_WE-WPCC-TX_760308101410.step",
+      "bytes": 829091,
+      "sha256": "086395db471ee8c3e5172fff81dcfcb2f798c583e019d6a259a6d4a9a8cea522"
+    },
+    {
+      "path": "kicad-packages3D/Inductor_SMD.3dshapes/L_Coilcraft_2222SQ-221.step",
+      "bytes": 316303,
+      "sha256": "433d6e566babe1b3539dfb3205615c8c782d3f980bbf3e9022f2bb5d362a6a72"
+    },
+    {
+      "path": "wurth/3dmodels/Capacitor_THT_Wurth.3dshapes/CP_Wurth_WCAP-AT1H-P5D13L50.step",
+      "bytes": 1546616,
+      "sha256": "5af3812b510cde1ecf586106ad99387e6d575fd7a58c47fd34dc04c29bcccbd5"
+    },
+    {
+      "path": "wurth/3dmodels/Connector_THT_Wurth.3dshapes/J_Wurth_WR-MJ_615032137821.step",
+      "bytes": 4532020,
+      "sha256": "eeb507ed6412779586e21f086aa1d6f74e872c582b1dc994564d676fdac02118"
+    },
+    {
+      "path": "kicad-packages3D/Connector_FFC-FPC.3dshapes/TE_84952-4_1x04-1MP_P1.0mm_Horizontal.step",
+      "bytes": 198417,
+      "sha256": "8bdbb0682e9e8a79bac4bda65f0e57b5448a8241243a14172f26d540b530b141"
+    },
+    {
+      "path": "wurth/3dmodels/LED_SMD_Wurth.3dshapes/D_Wurth_WL-SMDC-3535.step",
+      "bytes": 41416,
+      "sha256": "cf1e5ed9537ca7f56f05632ebfbb70bcff405ce8f61d0cef9b2e0382fc2cbb15"
+    }
+  ]
+}
