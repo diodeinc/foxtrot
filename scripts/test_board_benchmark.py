@@ -16,7 +16,7 @@ def metrics():
         total_ms=12,
         stages=[],
         serialized_bytes=100,
-        timings=dict(component_tessellation_secs=0.005, board_geometry_secs=0.002),
+        timings=dict(foxtrot_call_secs=0.004, component_tessellation_secs=0.005, board_geometry_secs=0.002),
         counts=dict(
             unique_models=2,
             placeholder_instances=0,
@@ -111,6 +111,29 @@ class BoardBenchmarkTests(unittest.TestCase):
         changed["build"]["source_sha256"] = "other worker"
         with self.assertRaises(ValueError):
             bench.compatible(report, changed)
+
+    def test_comparison_uses_foxtrot_even_when_whole_scene_moves_oppositely(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            args = self.run_fixture(root, root / "before")
+            build = json.loads(args.build.read_text())
+            build.update(diode="same", source_sha256="same", instrumentation_patch_sha256="same")
+            args.build.write_text(json.dumps(build))
+            m = metrics()
+
+            def execute(command, *unused):
+                Path(command[-1]).write_text(json.dumps(m))
+                return dict(status="ok", returncode=0)
+
+            with patch.object(bench, "execute", side_effect=execute):
+                self.assertEqual(bench.bench(args), 0)
+                args.compare = args.output / "results.json"
+                args.output = root / "after"
+                m["total_ms"] = 10
+                m["timings"]["foxtrot_call_secs"] = 0.008
+                self.assertEqual(bench.bench(args), 0)
+            report = json.loads((args.output / "results.json").read_text())
+            self.assertEqual(report["comparisons"][0]["time_ratio"], 2.0)
 
     def run_fixture(self, root, output):
         board = root / "test.kicad_pcb"

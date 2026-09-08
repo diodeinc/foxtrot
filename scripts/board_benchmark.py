@@ -156,10 +156,11 @@ def render(report):
         "Native execution of the web worker's parse → DNP-inclusive placements → full scene preparation → serialization. "
         "Includes PCB geometry and embedded STEP model tessellation, once per unique model name per board. "
         "No cross-board cache, GPU, browser startup, download or JS/WASM overhead. Validation is outside total_ms. "
+        "Foxtrot measures only tessellate_step_bytes (flatten, parse, mesh, color grouping). "
         "RSS is cumulative process peak, not live memory. Failed/incomplete samples are not discarded.",
         "",
-        "| Board | Status | Total median s | Component s | Board geometry s | RSS MiB | Models | Resolved / placements | Triangles (stored) | Serialized MiB |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Board | Status | Total median s | Foxtrot s | Component s | Board geometry s | RSS MiB | Models | Resolved / placements | Triangles (stored) | Serialized MiB |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for case in report["results"]:
         good = [
@@ -179,6 +180,7 @@ def render(report):
             c = m["counts"]
             lines.append(
                 f"| {case['path']} | {statuses} | {statistics.median(v['total_ms'] for v in good) / 1000:.3f} | "
+                f"{statistics.median(v['timings']['foxtrot_call_secs'] for v in good):.3f} | "
                 f"{statistics.median(v['timings']['component_tessellation_secs'] for v in good):.3f} | "
                 f"{statistics.median(v['timings']['board_geometry_secs'] for v in good):.3f} | "
                 f"{max(rss, default=0) / 2**20:.1f} | {c['unique_models']} | {c['resolved_instances']} / {c['total_instances']} | "
@@ -186,7 +188,7 @@ def render(report):
             )
         else:
             lines.append(
-                f"| {case['path']} | {statuses} | — | — | — | — | — | — | — | — |"
+                f"| {case['path']} | {statuses} | — | — | — | — | — | — | — | — | — |"
             )
     lines += [
         "",
@@ -200,7 +202,7 @@ def render(report):
             "",
             "## Comparison",
             "",
-            "Ratios are current / baseline; smaller is faster.",
+            "Ratios use Foxtrot direct API time only, current / baseline; smaller is faster.",
         ]
         for c in report["comparisons"]:
             lines.append(f"- {c['path']}: {c['time_ratio']:.3f}×")
@@ -316,10 +318,10 @@ def bench(args):
                 and signatures[0][0] in ("ok", "missing_models")
             ):
                 before = statistics.median(
-                    s["metrics"]["total_ms"] for s in old["samples"]
+                    s["metrics"]["timings"]["foxtrot_call_secs"] for s in old["samples"]
                 )
                 after = statistics.median(
-                    s["metrics"]["total_ms"] for s in current["samples"]
+                    s["metrics"]["timings"]["foxtrot_call_secs"] for s in current["samples"]
                 )
                 if before > 0:
                     report["comparisons"].append(
