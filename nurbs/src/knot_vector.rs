@@ -116,6 +116,10 @@ impl KnotVector {
     }
 
     pub fn basis_funs_derivs_for_span(&self, i: usize, u: f64, n: usize) -> SmallVec<[f64; 24]> {
+        // Position-only queries need no derivative triangle or recurrence scratch.
+        if n == 0 {
+            return self.basis_funs_for_span(i, u).into_iter().collect();
+        }
         // Keep common degrees and inverse-projection derivatives inline; higher
         // degrees and derivative orders spill without changing the algorithm.
         // The square basis table is contiguous, including when it spills.
@@ -203,7 +207,7 @@ mod tests {
 
     #[test]
     fn derivatives_reproduce_affine_curves_at_low_and_high_degree() {
-        for (degree, order) in [(3, 2), (9, 4)] {
+        for (degree, order) in [(3, 0), (3, 2), (9, 0), (9, 4)] {
             let knots = KnotVector::from_multiplicities(degree, &[0., 1.], &[degree + 1; 2]);
             for u in [0., 0.125, 0.5, 0.875, 1.] {
                 for (k, basis) in knots.basis_funs_derivs(u, order).chunks_exact(degree + 1).enumerate() {

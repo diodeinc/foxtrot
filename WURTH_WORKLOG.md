@@ -1,5 +1,16 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance iteration 5 — 2026-09-08
+
+Route zero-order basis queries through the existing position evaluator rather
+than constructing the derivative triangle and recurrence scratch. Extend the
+affine-reproduction test to zero-order queries at low and spilling degrees.
+153 release library tests pass; 42 stress/control oriented STL triangle
+multisets remain identical. Three board repeats take 20.44 seconds with
+2.269951 seconds of summed API medians. The 30% target is not yet reached.
+Evidence: `local/board-comparison/position{,-geometry,-controls}` and
+`position-geometry-check.json`.
+
 ## Board performance iteration 4 — 2026-09-08
 
 Eliminate the duplicate per-cell Newton retry on single-cell surfaces. Its
