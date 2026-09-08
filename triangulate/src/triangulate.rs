@@ -1782,26 +1782,7 @@ fn curve(
                     "line vector must be finite and nonzero",
                 ));
             }
-            let d = d / scale;
-            let controls = [edge_curve.edge_start, edge_curve.edge_end]
-                .iter()
-                .map(|&v| {
-                    let p = vertex_point(s, v)?;
-                    let offset = p - origin;
-                    Ok(p - (offset - d * (offset.dot(&d) / d.norm_squared())))
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            // A trimmed LINE is a degree-one spline. Preserve its geometry
-            // through the same sampling and shared-endpoint pipeline as every
-            // other spline, rather than replacing it with its vertex chord.
-            Curve::BSplineCurveWithKnots {
-                curve: SampledCurve::new(nurbs::BSplineCurve::new(
-                    true,
-                    KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
-                    controls,
-                )),
-                dir: edge_curve.same_sense,
-            }
+            Curve::Line { origin, direction: d / scale }
         }
         e => {
             warn!("Could not get edge from {:?}", e);

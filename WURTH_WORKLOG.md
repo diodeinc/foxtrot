@@ -1,5 +1,17 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance iteration 10 — 2026-09-08
+
+Represent STEP LINE directly rather than constructing a sampled degree-one
+spline and numerically inverting its endpoints. Preserve the existing line
+projection and share endpoint attachment/reduction with splines, including
+resolved curve/vertex offsets that preserve sliver faces. All 63 triangulate
+tests pass and all 42 stress/control oriented STL triangle multisets remain
+unchanged. The board sum is 2.096800 seconds: no measurable aggregate gain
+over edge caching, but less construction and solver machinery for LINE.
+Evidence: `local/board-comparison/lines{,-geometry,-controls}` and
+`lines-geometry-check.json`. The 30% target is still not reached.
+
 ## Board performance iteration 9 — 2026-09-08
 
 Cache canonical edge polylines within each shell. Adjacent faces share edge

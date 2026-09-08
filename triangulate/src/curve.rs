@@ -37,6 +37,10 @@ fn simplify_polyline(points: &mut Vec<DVec3>) {
 
 #[derive(Debug)]
 pub enum Curve {
+    Line {
+        origin: DVec3,
+        direction: DVec3,
+    },
     // TODO: move this to a standalone struct?
     Ellipse {
         eplane_from_world: DMat4,
@@ -137,11 +141,15 @@ impl Curve {
         if wraps {
             ranges.retain(|&(a, b)| a != b);
         }
-        let mut c = curve.polyline_with_tolerance(&ranges, tolerance)
+        let c = curve.polyline_with_tolerance(&ranges, tolerance)
             .ok_or(Error::InvalidGeometry("nonpositive rational curve weight"))?;
         if c.is_empty() {
             return Err(Error::InvalidGeometry("curve polyline is empty"));
         }
+        Ok(Self::attach_endpoints(c, u, v))
+    }
+
+    fn attach_endpoints(mut c: Vec<DVec3>, u: DVec3, v: DVec3) -> Vec<DVec3> {
         // Keep resolved curve/vertex offsets: distinct edges can share the
         // same topological endpoints (for example the two sides of a sliver).
         let displaced = |a: DVec3, b: DVec3|
@@ -152,11 +160,18 @@ impl Curve {
         // tolerance. Their replacement introduces bends which must participate
         // in reduction, even when the underlying spline is exactly straight.
         simplify_polyline(&mut c);
-        Ok(c)
+        c
     }
 
     pub fn build(&self, u: DVec3, v: DVec3, is_loop: bool, tolerance: f64) -> Result<Vec<DVec3>, Error> {
         match self {
+            Self::Line { origin, direction } => {
+                let project = |p: DVec3| {
+                    let offset = p - origin;
+                    p - (offset - direction * (offset.dot(direction) / direction.norm_squared()))
+                };
+                Ok(Self::attach_endpoints(vec![project(u), project(v)], u, v))
+            }
             Self::BSplineCurveWithKnots { curve, dir } => Self::curve_points(u, v, curve, is_loop, *dir, tolerance),
             Self::NURBSCurve { curve, dir } => Self::curve_points(u, v, curve, is_loop, *dir, tolerance),
             Self::OpenConic { plane_from_world, world_from_plane, hyperbola } => {
