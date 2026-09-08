@@ -861,10 +861,10 @@ impl PreparedSurface<'_> {
         self.raise(uv).map(|p| (uv,p))
     }
 
-    /// Measure spatial error without treating tangential parameter distortion
-    /// as chord error. A torus reduces to its circular meridian; a spline uses
-    /// the parameter sample as a local projection seed.
-    pub fn deviation(&self, point: DVec3, uv: DVec2, sample: DVec3) -> f64 {
+    /// Test chord error without treating tangential chart distortion as error.
+    /// Only solve a spline projection when the existing surface sample cannot
+    /// already prove that the chord is within tolerance.
+    pub fn exceeds_tolerance(&self, point: DVec3, uv: DVec2, sample: DVec3, tolerance: f64) -> bool {
         if let Surface::Torus { mat_i,major_radius,minor_radius,.. } = self.surface {
             let p = (*mat_i*DVec4::new(point.x,point.y,point.z,1.)).xyz();
             let radius = p.y.hypot(p.z);
@@ -873,17 +873,21 @@ impl PreparedSurface<'_> {
             let limit = (-major_radius/minor_radius).clamp(-1.,1.).acos();
             let angle = p.x.atan2(radius-major_radius).clamp(-limit,limit);
             return (radius-major_radius-minor_radius*angle.cos())
-                .hypot(p.x-minor_radius*angle.sin());
+                .hypot(p.x-minor_radius*angle.sin()) > tolerance;
         }
         if let (Surface::NURBS { surf }, FaceChart::Spline(chart)) = (self.surface, &self.chart) {
+            // The old minimum of projected distance and this upper bound
+            // cannot exceed tolerance when the upper bound already passes.
+            let upper = (sample-point).norm();
+            if upper <= tolerance { return false; }
             if let Some(raw) = Self::spline_raw(surf, chart, uv) {
                 if let Some(closest) = surf.uv_from_point_newtons_method(point, raw) {
-                    return (surf.surf.point(closest) - point).norm().min((sample-point).norm());
+                    return (surf.surf.point(closest) - point).norm().min(upper) > tolerance;
                 }
             }
-            return (sample-point).norm();
+            return upper > tolerance;
         }
-        (sample-point).dot(&self.normal(sample,uv)).abs()
+        (sample-point).dot(&self.normal(sample,uv)).abs() > tolerance
     }
 
     /// Preserve spatial edge chords while resolving their nonlinear chart image.
@@ -2732,7 +2736,8 @@ mod tests {
         let uv = prepared.lower(sample).unwrap();
         let exact_distance = 0.1_f64.hypot(0.05)-0.1;
         assert!(exact_distance > 0.01);
-        assert!((prepared.deviation(point,uv,sample)-exact_distance).abs() < 1e-12);
+        assert!(prepared.exceeds_tolerance(point,uv,sample,exact_distance-1e-12));
+        assert!(!prepared.exceeds_tolerance(point,uv,sample,exact_distance+1e-12));
     }
 
     #[test]

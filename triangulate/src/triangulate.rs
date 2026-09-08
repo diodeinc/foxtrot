@@ -1100,7 +1100,7 @@ fn advanced_face(
                 let samples = [a,b,c].map(|i| (DVec2::new(pts[i].0,pts[i].1),1./3.));
                 let Some((uv,pos)) = prepared.sample(&samples) else { return false; };
                 let center = (surface_positions[a] + surface_positions[b] + surface_positions[c]) / 3.;
-                prepared.deviation(center, uv, pos) > tolerance
+                prepared.exceeds_tolerance(center, uv, pos, tolerance)
             });
             marked.push(balance || inaccurate);
             conforming.extend(completed);
