@@ -10,7 +10,7 @@ use crate::{
 use nurbs::{AbstractSurface, SampledSurface};
 
 #[derive(Debug, Clone)]
-pub enum SplineChart {
+enum SplineChart {
     Cartesian {
         v_scale: f64,
         periods: [Option<f64>;2],
@@ -123,8 +123,6 @@ impl SplineChart {
 #[derive(Debug, Clone)]
 pub enum Surface {
     Cylinder {
-        location: DVec3,
-        axis: DVec3,
         mat: DMat4,
         mat_i: DMat4,
         radius: f64,
@@ -147,8 +145,6 @@ pub enum Surface {
         radius: f64,
     },
     Torus {
-        axis: DVec3,
-        location: DVec3,
         mat: DMat4,
         mat_i: DMat4,
         major_radius: f64,
@@ -157,7 +153,7 @@ pub enum Surface {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum FaceChart {
+enum FaceChart {
     Direct,
     Cylinder {
         z_min: f64,
@@ -284,9 +280,7 @@ impl Surface {
         Ok(Surface::Cylinder {
             mat,
             mat_i,
-            axis,
             radius,
-            location,
         })
     }
 
@@ -322,8 +316,6 @@ impl Surface {
         Ok(Surface::Torus {
             mat,
             mat_i,
-            location,
-            axis,
             major_radius,
             minor_radius,
         })

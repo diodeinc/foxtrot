@@ -1038,10 +1038,6 @@ fn advanced_face(
         n_steiner,
         constraints.len()
     );
-    if std::env::var("DUMP_FACE").ok().as_deref() == Some(&face_id.to_string()) {
-        eprintln!("DUMP_FACE {}: pts={:?}", face_id, pts);
-        eprintln!("DUMP_FACE {}: constraints={:?}", face_id, constraints);
-    }
     let result = crate::timing::time("face:cdt", || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut t = cdt::Triangulation::new_with_constraints(&pts, constraints.iter().copied())?;
@@ -1245,19 +1241,26 @@ fn homogeneous_curve(s: &StepFile, curve: ap214::Curve) -> Result<HomogeneousCur
 }
 
 fn curve_knot_vector(b: &BSplineCurveWithKnots_) -> Result<KnotVector, Error> {
-    let knots: Vec<f64> = b.knots.iter().map(|k| k.0).collect();
-    let multiplicities: Vec<usize> = b
-        .knot_multiplicities
+    step_knot_vector(b.degree, &b.knots, &b.knot_multiplicities)
+}
+
+fn step_knot_vector(
+    degree: i64,
+    knots: &[ParameterValue],
+    multiplicities: &[i64],
+) -> Result<KnotVector, Error> {
+    let knots: Vec<f64> = knots.iter().map(|k| k.0).collect();
+    let multiplicities: Vec<usize> = multiplicities
         .iter()
         .map(|&k| {
             k.try_into()
-                .map_err(|_| Error::NumericConversion("negative curve multiplicity"))
+                .map_err(|_| Error::NumericConversion("negative spline multiplicity"))
         })
         .collect::<Result<_, _>>()?;
     Ok(KnotVector::from_multiplicities(
-        b.degree
+        degree
             .try_into()
-            .map_err(|_| Error::NumericConversion("negative curve degree"))?,
+            .map_err(|_| Error::NumericConversion("negative spline degree"))?,
         &knots,
         &multiplicities,
     ))
@@ -1448,45 +1451,11 @@ fn spline_surface(
     b: &BSplineSurfaceWithKnots_,
     controls: Vec<Vec<DVec4>>,
 ) -> Result<NURBSSurface, Error> {
-    let u_knots: Vec<f64> = b.u_knots.iter().map(|k| k.0).collect();
-    let u_multiplicities: Vec<usize> = b
-        .u_multiplicities
-        .iter()
-        .map(|&k| {
-            k.try_into()
-                .map_err(|_| Error::NumericConversion("negative u multiplicity"))
-        })
-        .collect::<Result<_, _>>()?;
-    let u_knot_vec = KnotVector::from_multiplicities(
-        b.u_degree
-            .try_into()
-            .map_err(|_| Error::NumericConversion("negative u degree"))?,
-        &u_knots,
-        &u_multiplicities,
-    );
-
-    let v_knots: Vec<f64> = b.v_knots.iter().map(|k| k.0).collect();
-    let v_multiplicities: Vec<usize> = b
-        .v_multiplicities
-        .iter()
-        .map(|&k| {
-            k.try_into()
-                .map_err(|_| Error::NumericConversion("negative v multiplicity"))
-        })
-        .collect::<Result<_, _>>()?;
-    let v_knot_vec = KnotVector::from_multiplicities(
-        b.v_degree
-            .try_into()
-            .map_err(|_| Error::NumericConversion("negative v degree"))?,
-        &v_knots,
-        &v_multiplicities,
-    );
-
     Ok(NURBSSurface::new(
         b.u_closed.0 != Some(true),
         b.v_closed.0 != Some(true),
-        u_knot_vec,
-        v_knot_vec,
+        step_knot_vector(b.u_degree, &b.u_knots, &b.u_multiplicities)?,
+        step_knot_vector(b.v_degree, &b.v_knots, &b.v_multiplicities)?,
         controls,
     ))
 }
