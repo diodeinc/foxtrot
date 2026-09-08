@@ -1,5 +1,22 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance iteration 6 — 2026-09-08
+
+Size the entity ID table from record headers and parse directly into it.
+Remove the intermediate full entity array and the optional parallel parser;
+shape tessellation remains parallel-capable. Browser parsing was already
+serial. Preserve sparse/out-of-order IDs, fallback records and reference checks.
+
+All release library tests pass, including a new sparse out-of-order payload
+and reference test (154 total after adding it); wasm32 check passes. All 42
+stress/control oriented STL triangle multisets match the preceding iteration.
+Three board repeats take 20.53 seconds; direct API medians sum to 2.211304
+seconds. The Ethernet phase probe shows parse high-water RSS 18.4 MiB versus
+28.3 at task start (whole-process cumulative RSS, not isolated allocator data).
+The original 30% target remains unmet. Evidence:
+`local/board-comparison/direct{,-geometry,-controls}` and
+`direct-geometry-check.json`.
+
 ## Board performance iteration 5 — 2026-09-08
 
 Route zero-order basis queries through the existing position evaluator rather

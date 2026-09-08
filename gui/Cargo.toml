@@ -8,7 +8,7 @@ edition = "2018"
 bundle-shaders = []
 
 [dependencies]
-step = { path = "../step", features = ["parallel"] }
+step = { path = "../step" }
 triangulate = { path = "../triangulate", features = ["parallel"] }
 
 bytemuck = { version = "1.5.1", features = ["derive"] }

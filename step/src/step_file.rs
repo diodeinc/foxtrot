@@ -1,9 +1,6 @@
 use log::warn;
 use std::fmt;
 
-#[cfg(feature = "rayon")]
-use rayon::prelude::*;
-
 use crate::{
     ap214::Entity,
     id::Id,
@@ -59,19 +56,18 @@ impl<'a> StepFile<'a> {
             return Err(StepParseError::new("missing END-ISO-10303-21 marker"));
         }
 
-        // Parse every block, accumulating a Vec of Results.  We parse in
-        // single-threaded mode in WASM builds, because there's no thread
-        // pool.
-        let block_iter = {
-            let block_slice = &blocks[data_start..data_end];
-            #[cfg(feature = "rayon")]
-            { block_slice.par_iter() }
-            #[cfg(not(feature = "rayon"))]
-            { block_slice.iter() }
-        };
+        let records = &blocks[data_start..data_end];
+        // Size the final ID table from record headers before parsing payloads.
+        // Malformed headers still receive the normal record error below.
+        let max_id = records.iter().filter_map(|b| {
+            let b = b.strip_prefix(b"#")?;
+            let end = b.iter().position(|c| *c == b'=')?;
+            std::str::from_utf8(&b[..end]).ok()?.parse::<usize>().ok()
+        }).max().unwrap_or(0);
+        let mut out: Vec<Entity> = (0..=max_id).map(|_| Entity::_EmptySlot).collect();
 
-        let parsed: Result<Vec<(usize, Entity)>, StepParseError> = block_iter
-            .map(|b| parse_entity_decl(*b)
+        for b in records {
+            let (_, (id, entity)) = parse_entity_decl(*b)
                 .and_then(|(remaining, value)| {
                     // Complex entity parsing consumes the full declaration;
                     // simple entities leave the record terminator.
@@ -95,23 +91,12 @@ impl<'a> StepFile<'a> {
                         }
                     })
                 })
-                .map(|b| b.1)
                 .map_err(|_| StepParseError::new(format!(
                     "invalid DATA record: {}",
-                    String::from_utf8_lossy(b)))))
-            .collect();
-        let parsed = parsed?;
-
-        // Awkward construction because `Entity` is not `Clone`
-        let max_id = parsed.iter().map(|b| b.0).max().unwrap_or(0);
-        let mut out: Vec<Entity> = (0..=max_id)
-            .map(|_| Entity::_EmptySlot)
-            .collect();
-
-        for p in parsed.into_iter() {
-            out[p.0] = p.1;
+                    String::from_utf8_lossy(b))))?;
+            out[id] = entity;
         }
-        validate_references(&blocks[data_start..data_end], &out)?;
+        validate_references(records, &out)?;
 
         Ok(Self(out))
     }
@@ -310,6 +295,19 @@ mod tests {
     fn entity_returns_none_for_missing_id() {
         let file = StepFile(Vec::new());
         assert!(file.entity::<crate::ap214::CartesianPoint_>(Id::new(4)).is_none());
+    }
+
+    #[test]
+    fn sparse_out_of_order_records_keep_their_ids() {
+        let file = StepFile::parse(b"ISO-10303-21;HEADER;ENDSEC;DATA;\
+            #19=CARTESIAN_POINT('',(3.,7.,11.));\
+            #2=VERTEX_POINT('',#19);ENDSEC;END-ISO-10303-21;").unwrap();
+        assert_eq!(file.0.len(), 20);
+        assert!(matches!(file.0[1], Entity::_EmptySlot));
+        let point = file.entity::<crate::ap214::CartesianPoint_>(Id::new(19)).unwrap();
+        assert_eq!(point.coordinates.iter().map(|c| c.0).collect::<Vec<_>>(), [3., 7., 11.]);
+        let vertex = file.entity::<crate::ap214::VertexPoint_>(Id::new(2)).unwrap();
+        assert_eq!(vertex.vertex_geometry.0, 19);
     }
 
     #[test]
