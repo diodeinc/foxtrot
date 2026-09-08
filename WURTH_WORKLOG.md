@@ -1,5 +1,25 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance iteration 7 — 2026-09-08
+
+Consolidate derivative recurrence scratch into one inline/spilling buffer;
+evaluate through disjoint slices instead of repeatedly indexing SmallVecs.
+All 154 release library tests pass. All 42 stress/control oriented STL
+triangle multisets match iteration 6, including winding and multiplicity.
+Evidence: `local/board-comparison/scratch-{geometry,controls}` and
+`scratch-geometry-check.json`.
+
+Timing drift is material: fresh frozen-baseline replay is 2.395293 seconds
+versus the original 2.148728. The immediate iteration-6 replay is 2.410780;
+scratch replay is 2.199943. An earlier scratch capture was 2.403962, so do
+not interpret cross-session timings as precise speedups. The 30% target
+remains unmet. Evidence: `{baseline,direct,scratch}-recheck/results.json`.
+
+Reject and revert all-payload arena storage (2.374722 seconds), SmallBox
+payload storage (2.326885), and previous general cell-retry tracking and
+inlining experiments. No arena or SmallBox dependency remains. Their
+timings do not establish benefits that justify the extra implementation.
+
 ## Board performance iteration 6 — 2026-09-08
 
 Size the entity ID table from record headers and parse directly into it.

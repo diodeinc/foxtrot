@@ -124,17 +124,21 @@ impl KnotVector {
         // degrees and derivative orders spill without changing the algorithm.
         // The square basis table is contiguous, including when it spills.
         let width = self.p + 1;
-        let mut ndu: SmallVec<[f64; 64]> = smallvec![0.0; width * width];
-        let mut a: [VecF; 2] = [smallvec![0.0; self.p + 1], smallvec![0.0; self.p + 1]];
-        let mut left: VecF = smallvec![0.0; self.p + 1];
-        let mut right: VecF = smallvec![0.0; self.p + 1];
+        let mut scratch: SmallVec<[f64; 96]> = smallvec![0.0; width * (width + 4)];
+        let (ndu, scratch) = scratch.split_at_mut(width * width);
+        let (left, scratch) = scratch.split_at_mut(width);
+        let (right, scratch) = scratch.split_at_mut(width);
+        let (a0, a1) = scratch.split_at_mut(width);
+        let a = [a0, a1];
+        let knots = self.U.as_slice();
 
-        let mut ders: SmallVec<[f64; 24]> = smallvec![0.0; width * (n + 1)];
+        let mut result: SmallVec<[f64; 24]> = smallvec![0.0; width * (n + 1)];
+        let ders = result.as_mut_slice();
 
         ndu[0] = 1.0;
         for j in 1..=self.p {
-            left[j] = u - self[i + 1 - j];
-            right[j] = self[i + j] - u;
+            left[j] = u - knots[i + 1 - j];
+            right[j] = knots[i + j] - u;
             let mut saved = 0.0;
             for r in 0..j {
                 ndu[j * width + r] = right[r + 1] + left[j - r];
@@ -190,7 +194,7 @@ impl KnotVector {
             }
             r *= self.p - k;
         }
-        ders
+        result
     }
 }
 
