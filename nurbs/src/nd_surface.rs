@@ -296,19 +296,23 @@ impl<const D: usize> NDBSplineSurface<D> {
         let uanchor = Nu[0].as_ref().iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
         let vanchor = Nv[0].as_ref().iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
         let origin = self.control_points[uspan - p + uanchor][vspan - q + vanchor];
-        let mut temp = vec![TVec::zeros(); q + 1];
-        for (k, Nu) in Nu.iter().map(AsRef::as_ref).enumerate() {
-            for s in 0..=q {
-                // Apply partition of unity separately on each axis. A
-                // coordinate independent of u must not acquire u roundoff,
-                // including in derivatives of a coordinate varying with v.
-                let anchor = difference(self.control_points[uspan - p + uanchor][vspan - q + s], origin);
-                temp[s] = TVec::zeros();
-                for r in 0..=p {
-                    temp[s] += Nu[r] * (difference(self.control_points[uspan - p + r][vspan - q + s], origin) - anchor);
+        // Transform each control once, sharing it across derivative orders.
+        // Each accumulator still visits controls in the original order.
+        let mut temp = vec![TVec::zeros(); (q + 1) * Nu.len()];
+        for s in 0..=q {
+            // Apply partition of unity separately on each axis. A
+            // coordinate independent of u must not acquire u roundoff,
+            // including in derivatives of a coordinate varying with v.
+            let anchor = difference(self.control_points[uspan - p + uanchor][vspan - q + s], origin);
+            for r in 0..=p {
+                let delta = difference(self.control_points[uspan - p + r][vspan - q + s], origin) - anchor;
+                for (k, Nu) in Nu.iter().map(AsRef::as_ref).enumerate() {
+                    temp[k * (q + 1) + s] += Nu[r] * delta;
                 }
-                if k == 0 { temp[s] += anchor; }
             }
+            temp[s] += anchor;
+        }
+        for (k, temp) in temp.chunks_exact(q + 1).enumerate() {
             let dd = min(E - k, Nv.len() - 1);
             for l in 0..=dd {
                 for s in 0..=q {

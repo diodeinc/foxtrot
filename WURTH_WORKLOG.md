@@ -1,5 +1,47 @@
 # Würth and KiCad STEP repair worklog
 
+## Performance iteration 4 — 2026-09-08
+
+Share control-point coordinate differences across surface derivative orders.
+The tensor product previously shifted/dehomogenized the same controls again
+for each u derivative. Interchange the control/derivative loops and accumulate
+all u orders into one contiguous temporary buffer. Each accumulator retains
+the original control order and arithmetic; the v contraction is unchanged.
+Scratch grows from q+1 vectors to (q+1) times the number of u orders, with
+the same single allocation. No extra numerical branch, tolerance or dependency.
+
+Final capture takes 28.66 seconds, 14/14 samples, versus iteration 3's 33.15
+seconds (13.6% less time), and iteration 2's 32.60 seconds (12.1% less).
+
+| Model | Iteration 3 / 4 seconds | Peak MiB iteration 3 / 4 |
+| --- | ---: | ---: |
+| HCFT | 6.144 / 5.565 | 82.48 / 80.25 |
+| WPCC | 3.072 / 2.529 | 73.10 / 73.90 |
+| Coilcraft | 1.638 / 1.179 | 23.30 / 23.25 |
+| Capacitor | 3.276 / 2.984 | 24.65 / 24.58 |
+| Connector | 2.287 / 1.919 | 133.41 / 128.01 |
+| Planar control | 0.0072 / 0.0067 | 23.30 / 23.25 |
+| LED | 0.0135 / 0.0113 | 23.30 / 23.25 |
+
+Reject two mesh-assembly experiments: exact reservation during reduction
+(33.84 seconds, connector 135.24 MiB), and collecting shape meshes then
+concatenating once (34.55 seconds, connector 144.17 MiB). The latter fixes
+final capacity but increases simultaneously retained intermediate storage.
+Neither demonstrates the intended peak-memory win. Restore both rather than
+commit extra allocation machinery. Peak-memory optimization remains open;
+small RSS differences in the accepted change are not a universal memory win.
+
+Validation: 153 release library tests pass; wasm32 check passes; seven stress
+models plus 35 controls complete with identical oriented STL triangle
+multisets against iteration 3. This preserves multiplicity and winding but
+does not establish bit-identical f64 positions or normals.
+
+Evidence: `local/performance/iteration4-tensor`,
+`local/performance/iteration4-geometry-check.json`, exported under
+`.amp/in/artifacts/performance-iteration4`. Retain final and baseline meshes;
+remove superseded iteration-3 meshes after successful comparison (about
+113 MiB). Keep small experiment reports so rejected approaches remain auditable.
+
 ## Performance iteration 3 — 2026-09-08
 
 Reject the nested SmallVec surface-derivative-grid experiment: the capture
