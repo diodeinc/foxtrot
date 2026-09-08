@@ -1,5 +1,15 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance iteration 15 — 2026-09-08
+
+Recognize entity names by the opening attribute delimiter; the generated
+dispatch already checks the complete name. This removes redundant character
+classification without widening accepted names. Regenerate AP214 from the
+schema. All 154 release library tests and wasm32 checking pass. The exploratory
+board capture sums to 1.664736 seconds, effectively tied with the preceding
+1.651743 seconds; do not attribute a measured speedup to this simplification.
+Evidence: `local/board-comparison/name`. The 30% elapsed-time goal remains open.
+
 ## Board performance iteration 14 — 2026-09-08
 
 Make native phase instrumentation opt-in through the profiling feature;

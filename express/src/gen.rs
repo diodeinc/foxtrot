@@ -487,7 +487,7 @@ use crate::{{
 }};
 use nom::{{
     branch::{{alt}},
-    bytes::complete::{{tag, take_while}},
+    bytes::complete::{{tag, take_until}},
     character::complete::char,
     combinator::map,
     multi::{{many0}},
@@ -509,7 +509,7 @@ pub enum Entity<'a> {{")?;
 }}
 impl<'a> ParseFromChunks<'a> for Entity<'a> {{
     fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {{
-        let (_, r) = take_while(|c: char| c.is_ascii_alphanumeric() || c == '_')(strs[0])?;
+        let (_, r) = take_until("(")(strs[0])?;
         match r {{"#)?;
     for k in &keys {
         type_map.0[k].write_enum_match(k, &mut buf)?;
