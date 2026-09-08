@@ -39,6 +39,11 @@ fn profile(input: &str, output: &str) -> Result<(), Box<dyn std::error::Error + 
     let parsed = stage("parse", &mut stages, || step::step_file::StepFile::parse(&flat))
         .map_err(|e| e.to_string())?;
     let (mesh, stats) = stage("tessellate", &mut stages, || triangulate::triangulate::triangulate(&parsed));
+    let (input_bytes, flattened_bytes, entities) = (data.len(), flat.len(), parsed.0.len());
+    // Match the browser entry point's ownership boundary, including drop cost.
+    stage("release_entities", &mut stages, || drop(parsed));
+    drop(flat);
+    drop(data);
     let browser = stage("browser_buffer", &mut stages, || mesh.to_triangle_buffer());
     let total_ms = start.elapsed().as_secs_f64() * 1000.;
     let phases: Vec<_> = triangulate::timing::snapshot().into_iter()
@@ -49,8 +54,8 @@ fn profile(input: &str, output: &str) -> Result<(), Box<dyn std::error::Error + 
         "mesh": {"vertices": mesh.verts.len(), "triangles": mesh.triangles.len(),
             "faces": stats.num_faces, "shells": stats.num_shells,
             "completion": stats.completion(), "failures": stats.failures},
-        "storage": {"input_bytes": data.len(), "flattened_bytes": flat.len(),
-            "entities": parsed.0.len(),
+        "storage": {"input_bytes": input_bytes, "flattened_bytes": flattened_bytes,
+            "entities": entities,
             "mesh_bytes": mesh.verts.len() * std::mem::size_of::<Vertex>()
                 + mesh.triangles.len() * std::mem::size_of::<Triangle>(),
             "mesh_capacity_bytes": mesh.verts.capacity() * std::mem::size_of::<Vertex>()

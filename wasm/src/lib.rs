@@ -25,7 +25,13 @@ pub fn tessellate_step(data: String) -> Result<JsValue, JsValue> {
     let step = StepFile::parse(&flat)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let (mesh, stats) = triangulate(&step);
+    // Tessellation owns its output. Do not retain the STEP entity graph and
+    // source strings while allocating the expanded browser buffer.
+    drop(step);
+    drop(flat);
+    drop(data);
     let buffer = mesh.to_triangle_buffer();
+    drop(mesh);
     let out = serde_wasm_bindgen::to_value(&stats)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     js_sys::Reflect::set(&out, &"schema".into(), &2.into())?;
