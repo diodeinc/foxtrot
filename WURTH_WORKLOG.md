@@ -1,5 +1,20 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance iteration 1 — 2026-09-08
+
+Target at least 30% less direct Foxtrot time than origin/master: at most
+1.504110 seconds for the sum of 32 per-board medians (baseline 2.148728).
+Only seven repositories are accessible; the other 33 still need credentials.
+
+Replace entity-name recognition's discarded `many0` allocation with a borrowed
+character span, in both the EXPRESS generator and generated AP214 parser.
+The accepted character set and empty-name dispatch for complex records stay
+unchanged. No numerical changes. The 25 STEP/EXPRESS release tests pass.
+Three serial repeats of all 32 boards take 20.5 seconds; direct API medians
+sum to 2.406631 seconds versus task-start 2.443379. This small improvement
+does not meet the target. Counts, completion and diagnostics match HEAD.
+Evidence: `local/board-comparison/parser` (build identity and all raw samples).
+
 ## Foxtrot-only remote baseline comparison — 2026-09-08
 
 The remote has no `main`; fetch and compare its default `origin/master`
