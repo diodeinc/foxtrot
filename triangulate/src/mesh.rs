@@ -1,4 +1,5 @@
 use std::convert::TryInto;
+use std::io::{BufWriter, Write};
 use nalgebra_glm::{DVec3, U32Vec3};
 
 #[derive(Copy, Clone, Debug)]
@@ -56,24 +57,22 @@ impl Mesh {
 
     /// Writes the triangulation to a STL, for debugging
     pub fn save_stl(&self, filename: &str) -> std::io::Result<()> {
-        let mut out: Vec<u8> = Vec::new();
-        for _ in 0..80 { // header
-            out.push('x' as u8);
-        }
         let u: u32 = self.triangles.len().try_into()
             .expect("Too many triangles");
-        out.extend(&u.to_le_bytes());
+        let mut out = BufWriter::new(std::fs::File::create(filename)?);
+        out.write_all(&[b'x'; 80])?;
+        out.write_all(&u.to_le_bytes())?;
         for t in self.triangles.iter() {
-            out.extend(std::iter::repeat(0).take(12)); // normal
+            out.write_all(&[0; 12])?; // normal
             for v in t.verts.iter() {
                 let v = self.verts[*v as usize];
-                out.extend(&(v.pos.x as f32).to_le_bytes());
-                out.extend(&(v.pos.y as f32).to_le_bytes());
-                out.extend(&(v.pos.z as f32).to_le_bytes());
+                out.write_all(&(v.pos.x as f32).to_le_bytes())?;
+                out.write_all(&(v.pos.y as f32).to_le_bytes())?;
+                out.write_all(&(v.pos.z as f32).to_le_bytes())?;
             }
-            out.extend(std::iter::repeat(0).take(2)); // attributes
+            out.write_all(&[0; 2])?; // attributes
         }
-        std::fs::write(filename, out)
+        out.flush()
     }
 }
 
