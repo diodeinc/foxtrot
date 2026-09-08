@@ -1,5 +1,36 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance paired checkpoint — 2026-09-08
+
+Retained implementation: e1f2e97. Replay baseline–HEAD–HEAD–baseline, three
+repeats/block, six samples per board/revision. The four captures finish in
+76.3 seconds. Summed per-board API medians are 2.168543 seconds baseline and
+1.636845 seconds HEAD: 24.5% less elapsed time, or 32.5% higher throughput.
+The stricter 30% elapsed-time target is not met: another 0.118864 seconds
+(7.3% of current time) must go. Do not use older, slower baseline captures
+as the denominator. No origin/main exists; baseline is origin/master.
+
+All 178 calls/pass remain included; baseline reports nine face errors and
+HEAD reports zero errors, panics or failed model instances. All 384 scene
+samples pass finite/index validation. Coverage remains seven accessible
+repositories, 32 PCB files, 33 repositories blocked by credentials, and 15
+scenes with missing references. These are not browser timing measurements;
+the opt-in native instrumentation improvement does not apply to WASM.
+The largest complete-scene process RSS is 180.9 versus 147.5 MiB, including
+Diode data, not isolated Foxtrot allocation cost.
+
+Reject and revert streaming surface scratch, byte-pattern entity dispatch,
+position-basis slice access, the five-attribute boxing threshold, and phf
+entity dispatch. Exploratory sums respectively: 1.676903, 1.667315, 1.642622,
+1.677597 and 1.655525 seconds. No benefit justifies retaining these experiments.
+The accepted code passes 154 release library tests and wasm32 checking;
+Python checks report 40 tests with seven optional skips. Preserve the 42-case
+oriented-triangle equivalence evidence from the numerical/storage iterations.
+
+Review report and raw pooled data:
+`.amp/in/artifacts/foxtrot-board-optimization/{report.md,results.json}`.
+Raw captures: `local/board-comparison/final-{baseline,head}-{a,b}`.
+
 ## Board performance iteration 15 — 2026-09-08
 
 Recognize entity names by the opening attribute delimiter; the generated
