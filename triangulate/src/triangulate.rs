@@ -840,6 +840,7 @@ fn shell(
     let v_start = mesh.verts.len();
     let t_start = mesh.triangles.len();
     let mut scratch = Mesh::default();
+    let mut edge_samples = HashMap::new();
     for face in faces {
         scratch.verts.clear();
         scratch.triangles.clear();
@@ -852,6 +853,7 @@ fn shell(
             default_color,
             uncertainty,
             tolerance,
+            &mut edge_samples,
         ) {
             Ok(()) => mesh.append(&mut scratch),
             Err(err) => {
@@ -904,6 +906,7 @@ fn advanced_face(
     default_color: DVec3,
     uncertainty: f64,
     tolerance: f64,
+    edge_samples: &mut HashMap<usize, Vec<DVec3>>,
 ) -> Result<(), Error> {
     // Closed shells may legally reference either ADVANCED_FACE or the more
     // general FACE_SURFACE; OCCT/KiCad translate both through FaceSurface.
@@ -929,7 +932,7 @@ fn advanced_face(
     let mut num_pts = 0;
     for b in bounds {
         let (bound_contours, edge_loop_len) =
-            crate::timing::time("face:face_bound", || face_bound(s, *b, &mut edge_uses, tolerance))?;
+            crate::timing::time("face:face_bound", || face_bound(s, *b, &mut edge_uses, tolerance, edge_samples))?;
         boundary_points.extend_from_slice(&bound_contours);
 
         match bound_contours.len() {
@@ -1601,6 +1604,7 @@ fn face_bound(
     b: FaceBound,
     edge_uses: &mut HashMap<usize, (usize, usize)>,
     tolerance: f64,
+    edge_samples: &mut HashMap<usize, Vec<DVec3>>,
 ) -> Result<(Vec<DVec3>, usize), Error> {
     let (bound, orientation) = match &s[b] {
         Entity::FaceBound(b) => (b.bound, b.orientation),
@@ -1620,7 +1624,7 @@ fn face_bound(
                     uses.1 += 1;
                 }
             }
-            let mut d = edge_loop(s, &e.edge_list, tolerance)?;
+            let mut d = edge_loop(s, &e.edge_list, tolerance, edge_samples)?;
             if !orientation {
                 d.reverse()
             }
@@ -1631,7 +1635,9 @@ fn face_bound(
     }
 }
 
-fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge], tolerance: f64) -> Result<Vec<DVec3>, Error> {
+fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge], tolerance: f64,
+    edge_samples: &mut HashMap<usize, Vec<DVec3>>,
+) -> Result<Vec<DVec3>, Error> {
     let mut out = Vec::new();
     for (i, e) in edge_list.iter().enumerate() {
         // Remove the last item from the list, since it's the beginning
@@ -1642,8 +1648,18 @@ fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge], tolerance: f64) -> Result
         let edge = s
             .entity(*e)
             .ok_or(Error::InvalidStepEntity("OrientedEdge"))?;
-        let o = edge_curve(s, edge.edge_element.cast(), edge.orientation, tolerance)?;
-        out.extend(o.into_iter());
+        // A shell has one STEP file and tolerance. Cache only edge-owned 3D
+        // samples; traversal and surface charts remain face-specific.
+        let points = match edge_samples.entry(edge.edge_element.0) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) =>
+                entry.insert(edge_curve(s, edge.edge_element.cast(), true, tolerance)?),
+        };
+        if edge.orientation {
+            out.extend_from_slice(points);
+        } else {
+            out.extend(points.iter().rev().copied());
+        }
     }
     Ok(out)
 }
@@ -2021,7 +2037,7 @@ mod tests {
         let step = StepFile::parse(&flat).unwrap();
         let mut mesh = Mesh::default();
         let color = DVec3::new(0.2, 0.4, 0.6);
-        advanced_face(&step, Id::new(72), &mut mesh, &HashMap::new(), color, 0., 0.01).unwrap();
+        advanced_face(&step, Id::new(72), &mut mesh, &HashMap::new(), color, 0., 0.01, &mut HashMap::new()).unwrap();
         assert!(mesh.verts.iter().any(|v| v.pos == DVec3::new(1., 1., 0.)));
         assert!(mesh
             .verts
@@ -2150,6 +2166,7 @@ mod tests {
                 DVec3::zeros(),
                 0.,
                 0.01,
+                &mut HashMap::new(),
             )
             .unwrap();
             assert_eq!(mesh.verts.len(), 1024);
@@ -2350,7 +2367,7 @@ mod tests {
         let mut previous = 0;
         for tolerance in [0.04,0.01] {
             let mut mesh = Mesh::default();
-            advanced_face(&step, Id::new(13), &mut mesh, &HashMap::new(), DVec3::zeros(), 0., tolerance).unwrap();
+            advanced_face(&step, Id::new(13), &mut mesh, &HashMap::new(), DVec3::zeros(), 0., tolerance, &mut HashMap::new()).unwrap();
             assert!(mesh.triangles.len() > previous);
             previous = mesh.triangles.len();
             for t in &mesh.triangles {
@@ -2402,11 +2419,15 @@ mod tests {
             #9=CIRCLE('',#8,0.87);
             #10=EDGE_CURVE('',#3,#4,#9,.T.);
             #11=EDGE_CURVE('',#3,#3,#9,.T.);
+            #12=ORIENTED_EDGE('',*,*,#10,.T.);
+            #13=ORIENTED_EDGE('',*,*,#10,.F.);
+            #14=ORIENTED_EDGE('',*,*,#11,.T.);
+            #15=ORIENTED_EDGE('',*,*,#11,.F.);
             ENDSEC;END-ISO-10303-21;";
         let flat = StepFile::strip_flatten(text).unwrap();
         let mut step = StepFile::parse(&flat).unwrap();
         for sense in [true, false] {
-            for id in [10, 11] {
+            for (id, forward_id, backward_id) in [(10, 12, 13), (11, 14, 15)] {
                 let Entity::EdgeCurve(edge) = &mut step.0[id] else {
                     panic!()
                 };
@@ -2415,6 +2436,12 @@ mod tests {
                 let mut backward = edge_curve(&step, Id::new(id), false, 0.01).unwrap();
                 backward.reverse();
                 assert_eq!(forward, backward);
+                let mut samples = HashMap::new();
+                let mut cached_backward = edge_loop(&step, &[Id::new(backward_id)], 0.01, &mut samples).unwrap();
+                cached_backward.reverse();
+                assert_eq!(forward, cached_backward);
+                assert_eq!(forward, edge_loop(&step, &[Id::new(forward_id)], 0.01, &mut samples).unwrap());
+                assert_eq!(samples.len(), 1);
             }
         }
     }

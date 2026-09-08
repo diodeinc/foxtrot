@@ -1,5 +1,22 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance iteration 9 — 2026-09-08
+
+Cache canonical edge polylines within each shell. Adjacent faces share edge
+discretization but retain independent traversal, charts and refinement. The
+cache cannot cross file/tolerance boundaries and is freed after each shell.
+Extend the reversed-edge regression to exercise reverse-first cache population
+and forward reuse on open and closed edges, for both edge senses. All 63
+triangulate tests pass; all 42 stress/control oriented STL triangle multisets
+match iteration 7 (also validating the intervening delimiter change).
+
+Board API medians sum to 2.096836 seconds versus 2.120134 in the preceding
+capture. Maximum scene-process RSS remains about 154.5 MiB (not Foxtrot-only
+allocator measurement). Target remains unmet. Evidence:
+`local/board-comparison/edges{,-geometry,-controls}` and
+`edges-geometry-check.json`. Reject the separate anchor-transform API
+experiment: its 2.195749-second capture does not justify its added interface.
+
 ## Board performance iteration 8 — 2026-09-08
 
 Use the existing memchr dependency to scan only record/reference delimiters
