@@ -1,5 +1,17 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance iteration 8 — 2026-09-08
+
+Use the existing memchr dependency to scan only record/reference delimiters
+and quotes. Doubled quotes toggle literal state twice; remove their special
+branches from both scanners. All 10 STEP tests pass, including quoted
+semicolons, escaped quotes, missing references and fallback entity records.
+All 32 board scenes retain their previous counts, diagnostics and validation.
+Three repeats take about 21 seconds; API medians sum to 2.120134 seconds.
+Evidence: `local/board-comparison/delimiters`. The 30% target remains unmet.
+Reject inline surface contraction temporary storage: its 2.162488-second
+capture is effectively tied with the adjacent 2.167300 scratch-worker replay.
+
 ## Board performance iteration 7 — 2026-09-08
 
 Consolidate derivative recurrence scratch into one inline/spilling buffer;

@@ -159,19 +159,15 @@ impl<'a> StepFile<'a> {
         let mut blocks = Vec::new();
         let mut start = 0;
         let mut in_string = false;
-        let mut i = 0;
-        while i < data.len() {
+        // Doubled quotes toggle twice, preserving literal state without
+        // treating delimiters inside strings as record boundaries.
+        for i in memchr::memchr2_iter(b'\'', b';', data) {
             if data[i] == b'\'' {
-                if in_string && data.get(i + 1) == Some(&b'\'') {
-                    i += 2;
-                    continue;
-                }
                 in_string = !in_string;
-            } else if data[i] == b';' && !in_string {
+            } else if !in_string {
                 blocks.push(&data[start..=i]);
                 start = i + 1;
             }
-            i += 1;
         }
         if in_string {
             return Err(StepParseError::new("unterminated string literal"));
@@ -196,19 +192,12 @@ fn validate_references(
 ) -> Result<(), StepParseError> {
     for block in blocks {
         let equals = block.iter().position(|c| *c == b'=').expect("parsed DATA declaration");
-        let mut i = equals + 1;
         let mut in_string = false;
-        while i < block.len() {
+        for offset in memchr::memchr2_iter(b'\'', b'#', &block[equals + 1..]) {
+            let i = equals + 1 + offset;
             if block[i] == b'\'' {
-                if in_string && block.get(i + 1) == Some(&b'\'') {
-                    i += 2;
-                    continue;
-                }
                 in_string = !in_string;
-                i += 1;
-                continue;
-            }
-            if !in_string && block[i] == b'#' {
+            } else if !in_string {
                 let start = i + 1;
                 let mut end = start;
                 while block.get(end).map_or(false, u8::is_ascii_digit) {
@@ -225,11 +214,8 @@ fn validate_references(
                             String::from_utf8_lossy(&block[..equals]), target_text
                         )));
                     }
-                    i = end;
-                    continue;
                 }
             }
-            i += 1;
         }
     }
     Ok(())
