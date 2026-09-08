@@ -1,5 +1,49 @@
 # Würth and KiCad STEP repair worklog
 
+## Cleanup checkpoint — 2026-09-08
+
+Remove unused cylinder/torus axis and location fields (already represented
+by their transforms), keep chart implementation types private, consolidate
+STEP curve/u/v knot decoding, and remove the temporary DUMP_FACE hook.
+Retain failure SVG diagnostics, the reusable Bezier projection cache and
+non-ring torus support: those are not dead code. Stream STL records through
+BufWriter rather than allocating another entire mesh-sized byte buffer;
+preserve the file format and propagate the final flush error.
+
+Verification: 152 release workspace library tests pass, and all triangulate
+examples build. Fetch origin/master and freeze that revision as the baseline,
+not the older local master. Hash-select 16 inputs per corpus, bounded to 2 MB,
+plus CAIR-1340, LED-SMDC-3535 and Coilcraft-2222SQ-221: 35 inputs total.
+Run each with one worker/thread and a 45-second timeout. Baseline is
+origin/master `deb743b1aa8b2a8c63e0b370a5f7467d70168387`; pre-cleanup is
+`76f7c294084ce73f3b21f30795da41b8435109fe`. Worker/input hashes and raw
+reports are in `local/cleanup-check`.
+
+Master: 27 processing completions, eight tessellation failures (the old
+harness additionally classifies one completed mesh as invalid_mesh).
+Pre-cleanup and cleaned HEAD: 35/35 complete. All 35 cleanup comparisons
+have identical non-timing worker metrics and exactly the same oriented
+triangle multiset; 29 STLs are byte-identical, six differ only in triangle
+order/cyclic vertex order. All 35 also pass a 2,000-sample geometry comparison.
+Thus no cleanup regression is observed in this sample; this is not a full
+corpus correctness guarantee or a performance benchmark.
+
+Spot-check master-to-HEAD geometry differences using OCCT: the KiCad axial
+capacitor and TE-84952-4 FPC connector fail on master and pass on HEAD.
+Inspect both three-pane browser renders: HEAD agrees visually with OCCT,
+with readable complete-mesh status and distances. The Coilcraft source is
+rejected by OCCT's validity check in this run and is not used as an oracle.
+Report/screenshots: `.amp/in/artifacts/cleanup-review` and
+`cleanup-{capacitor,connector}.png`. Preserve the previous cohort report.
+
+Disk cleanup removes 180 superseded worker binaries and 13,947 obsolete
+mesh exports while retaining reports, hashes, RCA text, the latest sweep
+records and current cohort3 evidence. Measured free-space gain is
+17,877,635,072 bytes; both input counts remain unchanged (7,328 Wurth and
+7,251 KiCad). Full deletion inventory: `local/disk-cleanup-inventory.json`.
+Remove the temporary master worktree after comparison; retain its worker
+and results for reproduction. No comparison workers remain running.
+
 ## Oracle cohort 3 — 2026-09-07
 
 ### Final review and resource bookkeeping
