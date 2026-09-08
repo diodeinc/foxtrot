@@ -23,6 +23,52 @@ models (HCFT 20.79 s, WPCC 20.08 s); inverse lowering dominates the capacitor
 (4.99 s). Worst sample peak is the connector at about 172 MiB. Optimize
 measured repeated work and output allocation rather than weakening geometry.
 
+### First measured optimizations
+
+Turn refinement's distance query into the predicate it actually needs. For
+splines, distance to the already-evaluated surface sample is an upper bound
+on the previous minimum of sample/projection distances. If it already meets
+the existing tolerance, skip the closest-point solve. Otherwise retain the
+same projection and minimum. No new tolerance, mesh-density setting or
+geometry shortcut is introduced.
+
+Allocate the browser buffer for exactly 27 floats per triangle instead of
+growing an iterator-collected vector. Release parsed STEP entities and source
+strings before expansion in the browser entry point, then release the native
+mesh before the JS typed-array copy. The native profiler mirrors the input
+release boundary and includes its destructor cost in total time.
+
+Final capture completes 14/14 samples in 45.5 seconds versus 136.3 seconds.
+Sum of per-model median times falls from 67.97 to 22.61 seconds (3.0x faster).
+Worst observed native RSS falls from 171.7 to 124.6 MiB (27.4% lower).
+
+| Model | Before / after seconds | Before / after peak MiB |
+| --- | ---: | ---: |
+| HCFT winding | 26.010 / 8.447 | 95.3 / 82.2 |
+| WPCC winding | 20.293 / 4.026 | 72.9 / 69.6 |
+| Coilcraft winding | 7.257 / 1.722 | 24.4 / 23.3 |
+| Capacitor | 5.258 / 5.551 | 35.1 / 23.9 |
+| Modular connector | 9.114 / 2.844 | 171.7 / 124.6 |
+| Planar control | 0.007 / 0.007 | 23.2 / 23.3 |
+| LED cap | 0.027 / 0.016 | 23.2 / 23.3 |
+
+Do not claim every model improves: the capacitor is 5.6% slower in this
+short capture; unchanged inverse-lowering code remains its dominant cost.
+No statistical significance is inferred from two repetitions. Inverse
+projection now dominates HCFT as well and is the next substantial target.
+Reported RSS is native process high-water, not an end-to-end browser/WASM
+measurement; the JS typed-array copy lies outside the native capture.
+
+Verification: 152 release workspace library tests pass; wasm32 compilation
+passes. The standard-Python harness run passes 33 tests with seven optional
+OCCT/dependency tests skipped. All seven performance files and the separate
+35-file control replay complete and preserve the exact oriented triangle
+multiset in exported STL (including duplicate triangles), not just sampled
+distances. This comparison does not assert bitwise f64 or normal equivalence.
+The three code optimizations have separate commits. Detailed before/final
+reports and checks are exported to `.amp/in/artifacts/performance-iteration1`;
+raw captures remain under `local/performance`.
+
 ## Cleanup checkpoint — 2026-09-08
 
 Remove unused cylinder/torus axis and location fields (already represented
