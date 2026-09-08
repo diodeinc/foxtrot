@@ -126,6 +126,10 @@ and a degenerate-torus cap. Inputs are hash-pinned in
 `scripts/performance-sample.json`, relative to `local/` (the Wurth and KiCad
 corpora must already be present).
 
+Native phase instrumentation is opt-in through the `profiling` feature.
+Repository examples enable it automatically; normal library consumers do not
+pay for phase clocks or accumulation. Browser builds always omit it.
+
 ```sh
 CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo build --release -p triangulate --example profile
 python3 scripts/performance.py local --output local/perf-before

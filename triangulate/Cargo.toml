@@ -18,13 +18,15 @@ serde = { version = "1", features = ["derive"] }
 
 [features]
 parallel = ["rayon"]
+profiling = []
 
 [dev-dependencies]
 serde_json = "1"
 # Self dev-dependency so examples build with `parallel`, matching how the
 # regression baseline was recorded (it used to come from gui's feature
-# selection). Library consumers are unaffected -- `parallel` is still opt-in.
-triangulate = { path = ".", features = ["parallel"] }
+# selection). Profiling examples also collect phase timings. Both features
+# remain opt-in for library consumers.
+triangulate = { path = ".", features = ["parallel", "profiling"] }
 clap = "2.33"
 env_logger = "0.8"
 

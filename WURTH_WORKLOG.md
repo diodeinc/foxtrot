@@ -1,5 +1,15 @@
 # Würth and KiCad STEP repair worklog
 
+## Board performance iteration 14 — 2026-09-08
+
+Make native phase instrumentation opt-in through the profiling feature;
+repository examples enable it through their existing self dev-dependency.
+Normal library users no longer pay for per-face clocks and hash-map updates.
+Browser builds already omitted timing, so this particular improvement is
+native-only. A rebuilt profile example still reports 14 Ethernet phases.
+The normal board worker completes all 96 scene samples and captures 1.651743
+seconds of summed API medians. Evidence: `local/board-comparison/opt-profile`.
+
 ## Board performance iteration 13 — 2026-09-08
 
 Box generated entity records with more than eight attributes. This schema-wide

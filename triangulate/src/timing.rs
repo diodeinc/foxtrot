@@ -13,15 +13,15 @@ thread_local! {
 
 /// Time a closure and accumulate under `name`.
 ///
-/// On `wasm32-unknown-unknown` (browser builds) `std::time::Instant::now()`
-/// panics, so timing is compiled out and the closure runs directly.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+/// Instrumentation requires the opt-in `profiling` feature. It is always
+/// omitted on browser builds, where `std::time::Instant::now()` panics.
+#[cfg(any(not(feature = "profiling"), all(target_arch = "wasm32", target_os = "unknown")))]
 #[inline(always)]
 pub fn time<R>(_name: &'static str, f: impl FnOnce() -> R) -> R {
     f()
 }
 
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[cfg(all(feature = "profiling", not(all(target_arch = "wasm32", target_os = "unknown"))))]
 pub fn time<R>(name: &'static str, f: impl FnOnce() -> R) -> R {
     let start = std::time::Instant::now();
     let out = f();
