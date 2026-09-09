@@ -11,6 +11,135 @@ pub struct NDBSplineSurface<const D: usize> {
     control_points: Vec<Vec<TVec<f64, D>>>,
 }
 
+/// Reusable slab of equal-sized, row-major Bezier control nets.
+/// Recycle rejected patches; storage follows the live frontier, not the total
+/// number of subdivisions. A split reuses its parent's slot for the left half.
+#[derive(Default)]
+pub(crate) struct BezierPatches<const D: usize> {
+    controls: Vec<TVec<f64, D>>,
+    free: Vec<usize>,
+    shape: [usize; 2],
+    scratch: Vec<TVec<f64, D>>,
+}
+
+impl<const D: usize> BezierPatches<D> {
+    pub fn reset(&mut self, shape: [usize; 2]) {
+        self.controls.clear();
+        self.free.clear();
+        self.scratch.clear();
+        self.shape = shape;
+    }
+
+    fn allocate(&mut self) -> usize {
+        self.free.pop().unwrap_or_else(|| {
+            let start = self.controls.len();
+            self.controls.resize(start + self.shape[0] * self.shape[1], TVec::zeros());
+            start
+        })
+    }
+
+    pub fn insert(&mut self, controls: &[TVec<f64, D>]) -> usize {
+        let slot = self.allocate();
+        self.controls[slot..slot + self.shape[0] * self.shape[1]].copy_from_slice(controls);
+        slot
+    }
+
+    pub fn release(&mut self, slot: usize) {
+        self.free.push(slot);
+    }
+
+    pub fn split(&mut self, left: usize, axis: usize) -> usize {
+        let right = self.allocate();
+        let count = self.shape[axis];
+        let stride = if axis == 0 { self.shape[1] } else { 1 };
+        for lane in 0..self.shape[1 - axis] {
+            let start = if axis == 0 { lane } else { lane * self.shape[1] };
+            self.scratch.clear();
+            for i in 0..count {
+                self.scratch.push(self.controls[left + start + i * stride]);
+            }
+            self.controls[right + start + (count - 1) * stride] = self.scratch[count - 1];
+            for n in (1..count).rev() {
+                for i in 0..n {
+                    self.scratch[i] = (self.scratch[i] + self.scratch[i + 1]) * 0.5;
+                }
+                self.controls[left + start + (count - n) * stride] = self.scratch[0];
+                self.controls[right + start + (n - 1) * stride] = self.scratch[n - 1];
+            }
+        }
+        right
+    }
+}
+
+impl<const D: usize> std::ops::Index<usize> for BezierPatches<D> {
+    type Output = [TVec<f64, D>];
+
+    fn index(&self, slot: usize) -> &Self::Output {
+        &self.controls[slot..slot + self.shape[0] * self.shape[1]]
+    }
+}
+
+impl NDBSplineSurface<4> {
+    /// Relative Cartesian travel per parameter unit, estimated from control
+    /// polygons. Knot units and homogeneous weights are not spatial lengths.
+    pub fn v_parameter_scale(&self) -> f64 {
+        let mut u_length = 0.;
+        let mut v_length = 0.;
+        let point = |p: &TVec<f64,4>| p.xyz()/p.w;
+        for rows in self.control_points.windows(2) {
+            for (a,b) in rows[1].iter().zip(&rows[0]) {
+                u_length += (point(a)-point(b)).norm();
+            }
+        }
+        for row in &self.control_points {
+            for pair in row.windows(2) {
+                v_length += (point(&pair[1])-point(&pair[0])).norm();
+            }
+        }
+        let u_speed = u_length / self.control_points[0].len() as f64 / (self.max_u()-self.min_u());
+        let v_speed = v_length / self.control_points.len() as f64 / (self.max_v()-self.min_v());
+        v_speed/u_speed
+    }
+
+    /// A convex, constant-weight bilinear patch is a regular plane exactly
+    /// when its four controls are coplanar. No geometric tolerance is used.
+    pub fn bilinear_plane_normal(&self) -> Option<DVec3> {
+        if self.u_knots.degree() != 1 || self.v_knots.degree() != 1
+            || self.control_points.len() != 2
+            || self.control_points.iter().any(|row| row.len() != 2) {
+            return None;
+        }
+        let controls = [&self.control_points[0][0], &self.control_points[1][0],
+            &self.control_points[1][1], &self.control_points[0][1]];
+        let weight = controls[0].w;
+        if weight == 0.0 || !weight.is_finite() || controls.iter().any(|p| p.w != weight) {
+            return None;
+        }
+        // Equal weights allow predicates on the homogeneous numerators,
+        // avoiding division roundoff. Respect exact-predicate exponent bounds.
+        let points = controls.map(|p| DVec3::new(p.x, p.y, p.z));
+        if points.iter().flat_map(|p| p.iter()).any(|&v|
+            !v.is_finite() || (v != 0.0 && (v.abs() < 2.0_f64.powi(-142) || v.abs() > 2.0_f64.powi(201)))) {
+            return None;
+        }
+        let xyz = points.map(|p| robust::Coord3D { x: p.x, y: p.y, z: p.z });
+        if robust::orient3d(xyz[0], xyz[1], xyz[2], xyz[3]) != 0.0 {
+            return None;
+        }
+        let normal = (points[1] - points[0]).cross(&(points[3] - points[0]));
+        let dropped = normal.iamax();
+        if normal[dropped] == 0.0 { return None; }
+        let coordinates = [(dropped + 1) % 3, (dropped + 2) % 3];
+        let xy = points.map(|p| robust::Coord { x: p[coordinates[0]], y: p[coordinates[1]] });
+        // Strict convexity excludes collapsed or folded parameterizations.
+        if (0..4).any(|i| robust::orient2d(xy[i], xy[(i + 1) % 4], xy[(i + 2) % 4])
+            * normal[dropped].signum() <= 0.0) {
+            return None;
+        }
+        Some(normal)
+    }
+}
+
 /// Non-rational b-spline surface with 3D control points
 impl<const D: usize> NDBSplineSurface<D> {
     pub fn new(
@@ -42,6 +171,132 @@ impl<const D: usize> NDBSplineSurface<D> {
         self.v_knots.max_t()
     }
 
+    pub(crate) fn bezier_cell(&self, spans: [usize; 2]) -> Vec<TVec<f64, D>> {
+        let [u, v] = spans;
+        let rows: Vec<_> = self.control_points.iter().map(|row|
+            crate::nd_curve::bezier_controls(&self.v_knots, row, v, self.v_knots[v], self.v_knots[v+1])
+        ).collect();
+        let width = self.v_knots.degree() + 1;
+        let mut result = vec![TVec::zeros(); (self.u_knots.degree() + 1) * width];
+        for j in 0..=self.v_knots.degree() {
+            let column: Vec<_> = rows.iter().map(|row| row[j]).collect();
+            for (i, p) in crate::nd_curve::bezier_controls(&self.u_knots, &column, u,
+                self.u_knots[u], self.u_knots[u+1]).into_iter().enumerate() {
+                result[i * width + j] = p;
+            }
+        }
+        result
+    }
+
+    pub(crate) fn span_control_bounds(&self, spans: [usize; 2],
+        cartesian: impl Fn(TVec<f64, D>) -> DVec3,
+    ) -> [DVec3; 2] {
+        let mut bounds = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
+        for row in &self.control_points[spans[0] - self.u_knots.degree()..=spans[0]] {
+            for &point in &row[spans[1] - self.v_knots.degree()..=spans[1]] {
+                let point = cartesian(point);
+                for i in 0..3 {
+                    bounds[0][i] = bounds[0][i].min(point[i]);
+                    bounds[1][i] = bounds[1][i].max(point[i]);
+                }
+            }
+        }
+        bounds
+    }
+
+    /// Tests whether a rational boundary lies within `uncertainty` of its
+    /// first Cartesian control. Positive weights give a convex-hull bound
+    /// on the entire iso-curve. Zero uncertainty requires exact coincidence.
+    ///
+    /// `parameter` is 0 for a fixed u and 1 for a fixed v.  Evaluating the
+    /// fixed direction's basis (rather than selecting an end control row)
+    /// also handles non-clamped knot vectors.
+    pub fn rational_boundary_is_point(&self, parameter: usize, value: f64, uncertainty: f64) -> bool {
+        let controls = self.boundary_controls(parameter, value);
+        let Some(reference) = controls.first() else { return false; };
+        if D < 2 || reference[D - 1] <= 0.0 { return false; }
+        controls.iter().all(|point| {
+            point[D - 1] > 0.0 && (0..D - 1).fold(0.0_f64, |distance, i| {
+                // Use the evaluator's homogeneous translation before division:
+                // multiplying a shared Cartesian point by different weights
+                // need not produce equal rounded Cartesian quotients.
+                distance.hypot((point[i] - (reference[i] / reference[D - 1]) * point[D - 1]) / point[D - 1])
+            }) <= uncertainty
+        })
+    }
+
+    /// Sufficient control-hull test for matching endpoint iso-curves. Equal
+    /// normalized positive weights give both curves the same rational basis,
+    /// so control distances bound their pointwise separation everywhere.
+    pub fn rational_boundaries_coincide(&self, parameter: usize, uncertainty: f64) -> bool {
+        let (min, max) = match parameter {
+            0 => (self.min_u(), self.max_u()),
+            1 => (self.min_v(), self.max_v()),
+            _ => return false,
+        };
+        if D < 2 { return false; }
+        let a = self.boundary_controls(parameter, min);
+        let b = self.boundary_controls(parameter, max);
+        let (Some(first_a), Some(first_b)) = (a.first(), b.first()) else { return false; };
+        let w = D - 1;
+        if first_a[w] <= 0.0 || first_b[w] <= 0.0 { return false; }
+        a.iter().zip(&b).all(|(a, b)| {
+            a[w] > 0.0 && b[w] > 0.0 && a[w] / first_a[w] == b[w] / first_b[w]
+                && (0..w).fold(0.0_f64, |distance, i|
+                    distance.hypot(a[i] / a[w] - b[i] / b[w])) <= uncertainty
+        })
+    }
+
+    /// Matching ends only suggest closure when the sweep has resolved extent.
+    /// Measure actual surface displacement: rational weight variation alone
+    /// does not distinguish a loop from a small curved fillet.
+    pub fn rational_direction_is_closed(&self, parameter: usize, uncertainty: f64) -> bool {
+        if !self.rational_boundaries_coincide(parameter, uncertainty) { return false; }
+        let w = D-1;
+        let sites = |knots: &KnotVector| {
+            let count = knots.degree()+1;
+            (knots.degree()..knots.len()-count).filter(|&i| knots[i] < knots[i+1])
+                .flat_map(|i| (0..count).map(move |j| knots[i]+(knots[i+1]-knots[i])*(j as f64+0.5)/count as f64))
+                .collect::<Vec<_>>()
+        };
+        let us = sites(&self.u_knots);
+        let vs = sites(&self.v_knots);
+        us.iter().any(|&u| vs.iter().any(|&v| {
+            let uv = DVec2::new(u,v);
+            let mut start = uv;
+            start[parameter] = if parameter == 0 { self.min_u() } else { self.min_v() };
+            let p = self.surface_point(uv);
+            let q = self.surface_point(start);
+            (0..w).fold(0.0_f64, |distance,i| distance.hypot(p[i]/p[w]-q[i]/q[w])) > uncertainty
+        }))
+    }
+
+    fn boundary_controls(&self, parameter: usize, value: f64) -> Vec<TVec<f64, D>> {
+        match parameter {
+            0 => {
+                let span = self.u_knots.find_span(value);
+                let basis = self.u_knots.basis_funs_for_span(span, value);
+                let first = span - self.u_knots.degree();
+                (0..self.control_points[0].len()).map(|v| {
+                    basis.iter().enumerate().fold(TVec::zeros(), |sum, (i, b)| {
+                        sum + *b * self.control_points[first + i][v]
+                    })
+                }).collect()
+            },
+            1 => {
+                let span = self.v_knots.find_span(value);
+                let basis = self.v_knots.basis_funs_for_span(span, value);
+                let first = span - self.v_knots.degree();
+                self.control_points.iter().map(|row| {
+                    basis.iter().enumerate().fold(TVec::zeros(), |sum, (i, b)| {
+                        sum + *b * row[first + i]
+                    })
+                }).collect()
+            },
+            _ => Vec::new(),
+        }
+    }
+
     /// Converts a point at position uv onto the 3D mesh, using basis functions
     /// of order `p + 1` and `q + 1` respectively.
     ///
@@ -60,90 +315,315 @@ impl<const D: usize> NDBSplineSurface<D> {
         uspan: usize, Nu: &VecF,
         vspan: usize, Nv: &VecF) -> TVec<f64, D>
     {
-        let p = self.u_knots.degree();
-        let q = self.v_knots.degree();
+        let (origin, point) = self.surface_point_relative(uspan, Nu, vspan, Nv, |p, origin| p - origin);
+        point + origin
+    }
 
-        let uind = uspan - p;
-        let mut S = TVec::zeros();
-        for l in 0..=q {
-            let mut temp = TVec::zeros();
-            let vind = vspan - q + l;
-            for k in 0..=p {
-                temp += Nu[k] * self.control_points[uind + k][vind];
-            }
-            S += Nv[l] * temp;
-        }
-        S
+    pub(crate) fn surface_point_relative(&self,
+        uspan: usize, Nu: &VecF, vspan: usize, Nv: &VecF,
+        difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
+    ) -> (TVec<f64, D>, TVec<f64, D>) {
+        let (origin, jet) = self.tensor_product::<1>([uspan, vspan],
+            Nu, Nv, difference);
+        (origin, jet[0][0])
     }
 
     /// Returns all derivatives of the surface.  If `D = surface_derivs()`,
     /// `D[k][l]` is the derivative of the surface `k` times in the `u`
     /// direction and `l` times in the `v` direction.
     ///
-    /// We compute derivatives up to and including the `d`'th order derivatives.
+    /// E includes the position; compute mixed derivatives with k + l < E.
     ///
     /// ALGORITHM A3.6
-    pub fn surface_derivs<const E: usize>(&self, uv: DVec2) -> Vec<Vec<TVec<f64, D>>> {
-        let p = self.u_knots.degree();
-        let q = self.v_knots.degree();
-
-        // Simple initialization of du
-        let du = min(E, p);
-        let dv = min(E, q);
-
-        // The output matrix goes all the way to order d, even if some of the
-        // surfaces are lower order (those values will be locked at 0)
-        let mut SKL = vec![vec![TVec::zeros(); E + 1]; E + 1];
-
-        let uspan = self.u_knots.find_span(uv.x);
-        let Nu_deriv = self.u_knots.basis_funs_derivs_for_span(uspan, uv.x, du);
-
-        let vspan = self.v_knots.find_span(uv.y);
-        let Nv_deriv = self.v_knots.basis_funs_derivs_for_span(vspan, uv.y, dv);
-
-        let mut temp = vec![TVec::zeros(); q + 1];
-        for k in 0..=du {
-            for s in 0..=q {
-                temp[s] = TVec::zeros();
-                for r in 0..=p {
-                    temp[s] += Nu_deriv[k][r] * self.control_points[uspan - p + r][vspan - q + s];
-                }
-            }
-            let dd = min(E - k, dv);
-            for l in 0..=dd {
-                for s in 0..=q {
-                    SKL[k][l] += Nv_deriv[l][s] * temp[s];
-                }
-            }
-        }
-        SKL
+    pub fn surface_derivs<const E: usize>(&self, uv: DVec2) -> [[TVec<f64, D>; E]; E] {
+        let spans = [self.u_knots.find_span(uv.x), self.v_knots.find_span(uv.y)];
+        let (origin, mut derivatives) = self.surface_derivs_relative::<E>(uv, spans, |p, origin| p - origin);
+        derivatives[0][0] += origin;
+        derivatives
     }
 
-    // Computes the relative scale of U and V, based on average distance between
-    // control points in 3D space
-    pub fn aspect_ratio(&self) -> f64 {
-        let mut u_sum = 0.0;
-        let mut v_sum = 0.0;
-        // Helper function to find 3-distance even if this is 4D
-        let distance = |a, b| {
-            let delta: TVec<f64, D> = a - b;
-            DVec3::new(delta[0], delta[1], delta[2]).norm()
-        };
-        for i in 0..self.control_points.len() {
-            for j in 0..self.control_points[i].len() {
-                if i > 0 {
-                    v_sum += distance(self.control_points[i - 1][j],
-                                      self.control_points[i][j]);
-                }
-                if j > 0 {
-                    u_sum += distance(self.control_points[i][j - 1],
-                                      self.control_points[i][j]);
+    pub(crate) fn surface_derivs_relative<const E: usize>(&self, uv: DVec2, spans: [usize; 2],
+        difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
+    ) -> (TVec<f64, D>, [[TVec<f64, D>; E]; E]) {
+        const { assert!(E > 0); }
+        let Nu = self.u_knots.basis_funs_derivs_for_span(spans[0], uv.x, min(E - 1, self.u_knots.degree()));
+        let Nv = self.v_knots.basis_funs_derivs_for_span(spans[1], uv.y, min(E - 1, self.v_knots.degree()));
+        self.tensor_product::<E>(spans, &Nu, &Nv, difference)
+    }
+
+    fn tensor_product<const E: usize>(&self, spans: [usize; 2],
+        Nu: &[f64], Nv: &[f64],
+        difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
+    ) -> (TVec<f64, D>, [[TVec<f64, D>; E]; E]) {
+        let p = self.u_knots.degree();
+        let q = self.v_knots.degree();
+        // The output matrix goes all the way to order E - 1, even if some of the
+        // surfaces are lower order (those values will be locked at 0)
+        let mut SKL = [[TVec::zeros(); E]; E];
+
+        let [uspan, vspan] = spans;
+        // The largest tensor basis selects a nearby coordinate origin.
+        let uanchor = Nu[..=p].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let vanchor = Nv[..=q].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let origin = self.control_points[uspan - p + uanchor][vspan - q + vanchor];
+        // Transform each control once, sharing it across derivative orders.
+        // Each accumulator still visits controls in the original order.
+        let mut temp = vec![TVec::zeros(); (q + 1) * (Nu.len() / (p + 1))];
+        for s in 0..=q {
+            // Apply partition of unity separately on each axis. A
+            // coordinate independent of u must not acquire u roundoff,
+            // including in derivatives of a coordinate varying with v.
+            let anchor = difference(self.control_points[uspan - p + uanchor][vspan - q + s], origin);
+            for r in 0..=p {
+                let delta = difference(self.control_points[uspan - p + r][vspan - q + s], origin) - anchor;
+                for (k, Nu) in Nu.chunks_exact(p + 1).enumerate() {
+                    temp[k * (q + 1) + s] += Nu[r] * delta;
                 }
             }
+            temp[s] += anchor;
         }
-        let u_mean = u_sum / self.control_points.len() as f64;
-        let v_mean = v_sum / self.control_points[0].len() as f64;
+        for (k, temp) in temp.chunks_exact(q + 1).enumerate() {
+            let dd = min(E - 1 - k, Nv.len() / (q + 1) - 1);
+            for l in 0..=dd {
+                for s in 0..=q {
+                    SKL[k][l] += Nv[l * (q + 1) + s] * (temp[s] - temp[vanchor]);
+                }
+                if l == 0 { SKL[k][l] += temp[vanchor]; }
+            }
+        }
+        (origin, SKL)
+    }
 
-        u_mean / v_mean
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra_glm::DVec4;
+
+    #[test]
+    fn patch_slab_splits_rectangular_homogeneous_nets_and_recycles_slots() {
+        // Unequal degrees expose transposed strides. Varying homogeneous
+        // weights also catches accidental Cartesian rather than affine splits.
+        let point = |x| DVec4::new(x, x + 10., -2. * x, x + 1.);
+        let source = [0., 8., 4., 16., 12., 32.].map(point);
+        let mut patches = BezierPatches::default();
+        patches.reset([3, 2]);
+        let a = patches.insert(&source);
+        let b = patches.split(a, 0);
+        assert_eq!(patches[a], [0., 8., 2., 12., 5., 18.].map(point));
+        assert_eq!(patches[b], [5., 18., 8., 24., 12., 32.].map(point));
+
+        patches.release(a);
+        let c = patches.split(b, 1);
+        assert_eq!(c, a); // Right child can occupy a slot before its parent.
+        assert_eq!(patches[b], [5., 11.5, 8., 16., 12., 22.].map(point));
+        assert_eq!(patches[c], [11.5, 18., 16., 24., 22., 32.].map(point));
+        let capacities = (patches.controls.capacity(), patches.scratch.capacity(), patches.free.capacity());
+        for axis in (0..128).map(|i| i % 2) {
+            patches.release(c);
+            assert_eq!(patches.split(b, axis), c);
+            assert_eq!(patches.controls.len(), 12);
+            assert_eq!((patches.controls.capacity(), patches.scratch.capacity(), patches.free.capacity()), capacities);
+        }
+        patches.release(c);
+        patches.reset([2, 3]);
+        let a = patches.insert(&source);
+        let b = patches.split(a, 0);
+        assert_eq!(a, 0);
+        assert_eq!(patches[a], [0., 8., 4., 8., 10., 18.].map(point));
+        assert_eq!(patches[b], [8., 10., 18., 16., 12., 32.].map(point));
+        assert_eq!((patches.controls.capacity(), patches.scratch.capacity(), patches.free.capacity()), capacities);
+    }
+
+    #[test]
+    fn chart_scale_uses_cartesian_lengths_and_parameter_units() {
+        for translation in [DVec3::zeros(), DVec3::new(1024.,-512.,2048.)] {
+            let controls = [0.,2.].iter().enumerate().map(|(i,&x)| {
+                [0.,3.].iter().enumerate().map(|(j,&y)| {
+                    let p = DVec3::new(x,y,0.)+translation;
+                    DVec4::new(p.x,p.y,p.z,1.)*2f64.powi((2*i+j) as i32)
+                }).collect()
+            }).collect();
+            let surface = NDBSplineSurface::new(true,true,
+                KnotVector::from_multiplicities(1,&[10.,12.],&[2,2]),
+                KnotVector::from_multiplicities(1,&[-3.,-2.5],&[2,2]),controls);
+            assert_eq!(surface.v_parameter_scale(),6.);
+        }
+    }
+
+    #[test]
+    fn extrusion_coordinates_and_derivatives_are_independent_of_the_other_axis() {
+        use crate::AbstractSurface;
+        let profile = || KnotVector::from_multiplicities(3, &[0., 0.41, 1.], &[4, 1, 4]);
+        let height = || KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
+        let controls: Vec<Vec<_>> = (0..5).map(|i| [0.00988, 0.00989].iter().map(|&z|
+            DVec3::new(i as f64, (i * i) as f64, z)).collect()).collect();
+        for transposed in [false, true] {
+            let (u, v, points) = if transposed {
+                (height(), profile(), (0..2).map(|j| controls.iter().map(|row| row[j]).collect()).collect())
+            } else { (profile(), height(), controls.clone()) };
+            let a = NDBSplineSurface::new(true, true, u.clone(), v.clone(), points.clone());
+            let b = NDBSplineSurface::new(true, true, u, v, points.iter().map(|row|
+                row.iter().map(|p| DVec4::new(p.x, p.y, p.z, 1.)).collect()).collect());
+            let check = |jets: [[DVec3; 3]; 3], expected_z: f64| {
+                assert_eq!(jets[0][0].z, expected_z);
+                let (profile, height) = if transposed { (jets[0][1], jets[1][0]) }
+                    else { (jets[1][0], jets[0][1]) };
+                assert_eq!(profile.z, 0.);
+                assert_eq!((height.x, height.y), (0., 0.));
+                assert_eq!(jets[1][1], DVec3::zeros());
+            };
+            let uv = |t| if transposed { DVec2::new(1e-12, t) } else { DVec2::new(t, 1e-12) };
+            let reference = DVec3::new(0., 0., 0.00988);
+            let expected = a.derivs_relative_to::<3>(uv(0.), reference)[0][0].z;
+            for i in 0..=64 {
+                check(a.derivs_relative_to::<3>(uv(i as f64 / 64.), reference), expected);
+                check(b.derivs_relative_to::<3>(uv(i as f64 / 64.), reference), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn clamped_corner_preserves_small_coordinates() {
+        let knots = || KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]);
+        let end = DVec4::new(1e-30, 2e-30, 3e-30, 1.);
+        let mut controls = vec![vec![DVec4::repeat(1.); 3]; 3];
+        controls[2][2] = end;
+        let surface = NDBSplineSurface::new(true, true, knots(), knots(), controls);
+        let uv = DVec2::repeat(1.);
+        assert_eq!(surface.surface_point(uv), end);
+        assert_eq!(surface.surface_derivs::<3>(uv)[0][0], end);
+    }
+
+    #[test]
+    fn constant_coordinates_have_exactly_zero_derivatives() {
+        let knots = || KnotVector::from_multiplicities(2, &[0., 0.01], &[3, 3]);
+        let surface = NDBSplineSurface::new(true, true, knots(), knots(),
+            (0..3).map(|i| (0..3).map(|j|
+                DVec4::new(8.58999999999999, i as f64, (j * j) as f64, 1.)).collect()).collect());
+        for i in 0..=16 {
+            let uv = DVec2::new(0.01 * i as f64 / 16., 0.0037);
+            assert_eq!(surface.surface_point(uv).x, 8.58999999999999);
+            let derivatives = surface.surface_derivs::<3>(uv);
+            assert_eq!(derivatives[0][0].x, 8.58999999999999);
+            for k in 0..=2 { for l in 0..=2-k {
+                if k + l > 0 { assert_eq!(derivatives[k][l].x, 0.); }
+            } }
+        }
+    }
+
+    #[test]
+    fn bilinear_plane_recognition_is_exact_and_rejects_folds() {
+        let knots = || KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
+        let controls = vec![
+            vec![DVec4::new(1., 2., 3., 1.), DVec4::new(2., 2., 6., 1.)],
+            vec![DVec4::new(3., 3., 3., 1.), DVec4::new(4., 3., 6., 1.)],
+        ];
+        let mut surface = NDBSplineSurface::new(true, true, knots(), knots(), controls);
+        let normal = DVec3::new(2., 1., 0.).cross(&DVec3::new(1., 0., 3.));
+        assert_eq!(surface.bilinear_plane_normal(), Some(normal));
+        for row in &mut surface.control_points { for point in row { *point *= 8.; } }
+        assert_eq!(surface.bilinear_plane_normal(), Some(normal * 64.));
+        let saved = surface.control_points[1][1];
+        surface.control_points[1][1].z = f64::from_bits(saved.z.to_bits() + 1);
+        assert!(surface.bilinear_plane_normal().is_none(), "one-ulp warp is not a plane");
+        surface.control_points[1][1] = surface.control_points[0][0];
+        assert!(surface.bilinear_plane_normal().is_none(), "folded patch is not a regular plane");
+        surface.control_points[1][1] = saved;
+        surface.control_points[1][1].w *= 2.;
+        assert!(surface.bilinear_plane_normal().is_none(), "variable weights need the rational chart");
+    }
+
+    #[test]
+    fn collapsed_boundary_uses_actual_nonclamped_endpoint_basis() {
+        let controls = vec![
+            vec![DVec4::new(3., 3., 4., 1.), DVec4::new(1., 3., 4., 1.), DVec4::new(5., 5., 4., 1.)],
+            vec![DVec4::new(4., 3., 4., 1.), DVec4::new(0., 3., 4., 1.), DVec4::new(8., 5., 4., 1.)],
+        ];
+        let clamped = || KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
+        let nonclamped = || KnotVector::from_multiplicities(2, &[-1., 0., 1., 2., 3., 4.], &[1; 6]);
+        let surface = NDBSplineSurface::new(true, true, clamped(), nonclamped(), controls.clone());
+        assert!(surface.rational_boundary_is_point(1, surface.min_v(), 0.));
+        assert!(!surface.rational_boundary_is_point(1, surface.max_v(), 0.));
+        let transposed = (0..3).map(|v| controls.iter().map(|row| row[v]).collect()).collect();
+        let surface = NDBSplineSurface::new(true, true, nonclamped(), clamped(), transposed);
+        assert!(surface.rational_boundary_is_point(0, surface.min_u(), 0.));
+        assert!(!surface.rational_boundary_is_point(0, surface.max_u(), 0.));
+    }
+
+    #[test]
+    fn collapsed_boundary_preserves_weighted_cartesian_constants() {
+        let knots = || KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
+        let pole = DVec4::new(-13.91, 4.325, -15.57, 1.);
+        let weighted = pole * 0.707106781187;
+        assert_ne!(weighted.z / weighted.w, pole.z);
+        let mut surface = NDBSplineSurface::new(true, true, knots(), knots(), vec![
+            vec![pole, pole + DVec4::new(1., 0., 0., 0.)],
+            vec![weighted, weighted + DVec4::new(0., 1., 0., 0.)],
+        ]);
+        assert!(surface.rational_boundary_is_point(1, 0., 0.));
+        surface.control_points[1][0].z = f64::from_bits(weighted.z.to_bits() + 1);
+        assert!(!surface.rational_boundary_is_point(1, 0., 0.), "a resolved weighted displacement is not a pole");
+    }
+
+    #[test]
+    fn collapsed_boundary_respects_declared_uncertainty_at_every_scale() {
+        for scale in [1e-200, 1e-7, 1., 1e200] {
+            let knots = || KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
+            let surface = NDBSplineSurface::new(true, true, knots(), knots(), vec![
+                vec![DVec4::new(0., 0., 0., 1.), DVec4::new(0., 0., scale, 1.)],
+                vec![DVec4::new(2. * scale, 0., 0., 2.), DVec4::new(2. * scale, 0., 2. * scale, 2.)],
+            ]);
+            assert!(!surface.rational_boundary_is_point(1, 0., 0.));
+            assert!(!surface.rational_boundary_is_point(1, 0., scale * 0.5));
+            assert!(surface.rational_boundary_is_point(1, 0., scale));
+        }
+    }
+
+    #[test]
+    fn coincident_extrusion_ends_do_not_imply_a_period() {
+        let knots = || KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]);
+        let row = vec![DVec4::new(0.,0.,0.,1.), DVec4::new(0.,1.,0.,1.), DVec4::new(0.,0.,1.,1.)];
+        let mut surface = NDBSplineSurface::new(true,true,knots(),knots(),vec![row.clone(),row.clone(),row]);
+        for p in &mut surface.control_points[2] { p.x = 1e-12; }
+        assert!(surface.rational_boundaries_coincide(0,1e-8));
+        assert!(!surface.rational_direction_is_closed(0,1e-8));
+        surface.control_points[1][1].x = 1.;
+        assert!(surface.rational_direction_is_closed(0,1e-8));
+        surface.control_points[1][1].x = 0.;
+        surface.control_points[1][1] *= 2.;
+        assert!(surface.rational_direction_is_closed(0,1e-8));
+    }
+
+    #[test]
+    fn a_small_rational_fillet_does_not_imply_a_period() {
+        let weights = [1.,0.5_f64.sqrt(),1.];
+        let controls = [0.,1.].iter().map(|&x| {
+            [(0.,0.05),(0.,0.),(0.05,0.)].iter().zip(weights).map(|(&(y,z),w)|
+                DVec4::new(x*w,y*w,z*w,w)).collect()
+        }).collect();
+        let surface = NDBSplineSurface::new(true,true,
+            KnotVector::from_multiplicities(1,&[0.,1.],&[2,2]),
+            KnotVector::from_multiplicities(2,&[0.,1.],&[3,3]),controls);
+        assert!(surface.rational_boundaries_coincide(1,0.2));
+        assert!(!surface.rational_direction_is_closed(1,0.2));
+    }
+
+    #[test]
+    fn coincident_boundaries_require_matching_rational_basis_and_resolved_gap() {
+        let knots = || KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]);
+        let row = vec![DVec4::new(0., 0., 0., 1.), DVec4::new(0., 0.5, 0., 0.5), DVec4::new(0., 2., 0., 1.)];
+        let mut controls = vec![row.clone(), row.clone(), row.clone()];
+        for p in &mut controls[1] { p.x = p.w; }
+        for p in &mut controls[2] { p.x = 1e-8 * p.w; }
+        let mut surface = NDBSplineSurface::new(true, true, knots(), knots(), controls);
+        assert!(!surface.rational_boundaries_coincide(0, 0.));
+        assert!(!surface.rational_boundaries_coincide(0, 0.5e-8));
+        assert!(surface.rational_boundaries_coincide(0, 1e-8));
+        for p in &mut surface.control_points[2] { *p *= 2.; }
+        assert!(surface.rational_boundaries_coincide(0, 1e-8));
+        surface.control_points[2][1] *= 2.;
+        assert!(!surface.rational_boundaries_coincide(0, 1e-8));
     }
 }

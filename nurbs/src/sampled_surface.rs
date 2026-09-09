@@ -1,6 +1,8 @@
-use nalgebra_glm::{dot, length, length2, DMat2x2, DVec2, DVec3};
-use crate::{abstract_surface::AbstractSurface, nd_surface::NDBSplineSurface};
+use crate::{abstract_surface::AbstractSurface, nd_surface::{BezierPatches, NDBSplineSurface}};
 use log::error;
+use nalgebra_glm::{dot, DVec2, DVec3};
+use std::collections::VecDeque;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
 pub struct SampledSurface<const N: usize> {
@@ -9,6 +11,39 @@ pub struct SampledSurface<const N: usize> {
     /// Sample indices arranged as an implicit kd-tree over the 3D sample
     /// positions (median at the middle of each range, axis = depth % 3).
     kd: Vec<u32>,
+    /// Control-hull bounds and the contiguous sample range of each knot cell.
+    cells: Vec<SurfaceCell<N>>,
+}
+
+/// Caller-owned storage for a batch of independent surface projections.
+/// Each query resets logical contents while retaining allocated capacity;
+/// no seed or geometric result carries over to the next point or surface.
+#[derive(Default)]
+pub struct ProjectionScratch<const N: usize> {
+    patches: BezierPatches<N>,
+    queue: VecDeque<(usize, DVec2, DVec2, [usize; 2])>,
+}
+
+const PROJECTION_TOL: f64 = 64. * f64::EPSILON;
+
+#[derive(Debug, Clone)]
+struct SurfaceCell<const N: usize> {
+    spans: [usize; 2],
+    bounds: [DVec3; 2],
+    samples: std::ops::Range<usize>,
+    controls: OnceLock<Vec<nalgebra_glm::TVec<f64, N>>>,
+}
+
+struct DistanceModel {
+    spans: [usize; 2],
+    residual: DVec3,
+    position_scale: DVec3,
+    gradient: DVec2,
+    hessian: [f64; 3],
+    lo: DVec2,
+    hi: DVec2,
+    stationary: [bool; 2],
+    converged: bool,
 }
 
 /// Squared distance matching `(a - b).norm_squared()` term order, so kd-tree
@@ -69,12 +104,68 @@ fn kd_nearest(
     }
 }
 
+/// Compare the rectangle's stationary candidates after mapping each step to
+/// representable parameters. Axis candidates keep a resolvable direction free
+/// when rounding prevents the other component of a coupled step from moving.
+fn quadratic_step(
+    g: DVec2,
+    h: [f64; 3],
+    lo: DVec2,
+    hi: DVec2,
+    represent: impl Fn(DVec2) -> DVec2,
+) -> DVec2 {
+    let [a, b, d] = h;
+    let mut best = DVec2::zeros();
+    let mut consider = |q: DVec2| {
+        let q = represent(q);
+        // Compare in factored form so a resolved thin direction is not
+        // erased by the common contribution of a much larger direction.
+        let sum = q + best;
+        let change = dot(
+            &(q - best),
+            &(g + 0.5 * DVec2::new(a * sum.x + b * sum.y, b * sum.x + d * sum.y)),
+        );
+        if change < 0. {
+            best = q;
+        }
+    };
+    for x in [lo.x, hi.x] {
+        for y in [lo.y, hi.y] {
+            consider(DVec2::new(x, y));
+        }
+        if d > 0. {
+            consider(DVec2::new(x, (-(g.y + b * x) / d).clamp(lo.y, hi.y)));
+        }
+    }
+    for y in [lo.y, hi.y] {
+        if a > 0. {
+            consider(DVec2::new((-(g.x + b * y) / a).clamp(lo.x, hi.x), y));
+        }
+    }
+    if a > 0. {
+        consider(DVec2::new((-g.x / a).clamp(lo.x, hi.x), 0.));
+    }
+    if d > 0. {
+        consider(DVec2::new(0., (-g.y / d).clamp(lo.y, hi.y)));
+    }
+    let det = a.mul_add(d, -b * b);
+    if a > 0. && det > 0. {
+        let q = DVec2::new(b.mul_add(g.y, -d * g.x), b.mul_add(g.x, -a * g.y)) / det;
+        if (0..2).all(|i| q[i] >= lo[i] && q[i] <= hi[i]) {
+            consider(q);
+        }
+    }
+    best
+}
+
 impl<const N: usize> SampledSurface<N>
-    where NDBSplineSurface<N>: AbstractSurface
+where
+    NDBSplineSurface<N>: AbstractSurface,
 {
     pub fn new(surf: NDBSplineSurface<N>) -> Self {
         const N: usize = 8;
         let mut samples = Vec::new();
+        let mut cells = Vec::new();
         for i in surf.u_knots.degree()..surf.u_knots.len() - 1 - surf.u_knots.degree() {
             // Skip multiple knots
             if surf.u_knots[i] == surf.u_knots[i + 1] {
@@ -85,6 +176,7 @@ impl<const N: usize> SampledSurface<N>
                     continue;
                 }
                 // Iterate over a grid within this region
+                let start = samples.len();
                 for u in 0..N {
                     let frac = (u as f64) / (N as f64 - 1.0);
                     let u = surf.u_knots[i] * (1.0 - frac) + surf.u_knots[i + 1] * frac;
@@ -99,153 +191,431 @@ impl<const N: usize> SampledSurface<N>
 
                         let v_span = surf.v_knots.find_span(v);
                         let v_basis = surf.v_knots.basis_funs_for_span(v_span, v);
-                        let q = surf.point_from_basis(
-                            u_span, &u_basis, v_span, &v_basis);
+                        let q = surf.point_from_basis(u_span, &u_basis, v_span, &v_basis);
                         samples.push((uv, q));
                     }
                 }
+                let mut bounds = surf.control_bounds([i, j]);
+                for axis in 0..3 {
+                    let roundoff =
+                        PROJECTION_TOL * bounds[0][axis].abs().max(bounds[1][axis].abs());
+                    bounds[0][axis] -= roundoff;
+                    bounds[1][axis] += roundoff;
+                }
+                cells.push(SurfaceCell {
+                    spans: [i, j],
+                    bounds,
+                    samples: start..samples.len(),
+                    controls: OnceLock::new(),
+                });
             }
         }
         let mut kd: Vec<u32> = (0..samples.len() as u32).collect();
         build_kd(&samples, &mut kd, 0);
-        Self { surf, samples, kd }
+        Self {
+            surf,
+            samples,
+            kd,
+            cells,
+        }
     }
 
     // Section 6.1 (start middle page 232)
     pub fn uv_from_point_newtons_method(&self, P: DVec3, uv_0: DVec2) -> Option<DVec2> {
-        let out = self.newtons_method_inner(P, uv_0, 256);
+        let domain = [&self.surf.u_knots, &self.surf.v_knots].map(|k| 0..k.len());
+        let out = self.newtons_method_inner(P, uv_0, 256, domain);
         if out.is_none() {
             error!("Could not find UV coordinates");
         }
         out
     }
 
-    fn newtons_method_inner(&self, P: DVec3, uv_0: DVec2, max_iter: usize) -> Option<DVec2> {
-        let eps1 = 0.01; // a Euclidean distance error bound
-        let eps2 = 0.01; // a cosine error bound
+    fn constrain_uv(&self, uv: DVec2) -> DVec2 {
+        // Closure describes geometry, not the domain of the projection solve.
+        // Both knot endpoints are eligible constrained minima, also at seams.
+        DVec2::new(
+            uv.x.clamp(self.surf.min_u(), self.surf.max_u()),
+            uv.y.clamp(self.surf.min_v(), self.surf.max_v()),
+        )
+    }
 
-        let mut uv_i = uv_0;
+    fn stepped_uv(&self, uv: DVec2, ranges: DVec2, spans: [usize; 2], step: DVec2) -> DVec2 {
+        let mut candidate = uv + step.component_mul(&ranges);
+        for (i, knots) in [&self.surf.u_knots, &self.surf.v_knots].iter().enumerate() {
+            let (min, max) = (knots[spans[i]], knots[spans[i] + 1]);
+            candidate[i] = if step[i] == (min - uv[i]) / ranges[i] {
+                min
+            } else if step[i] == (max - uv[i]) / ranges[i] {
+                max
+            } else {
+                candidate[i].clamp(min, max)
+            };
+        }
+        candidate
+    }
+
+    fn distance_model(
+        &self,
+        P: DVec3,
+        uv: DVec2,
+        ranges: DVec2,
+        spans: [usize; 2],
+    ) -> DistanceModel {
+        // Fixed unit-domain coordinates preserve the surface differential's
+        // rank and scale continuously, including at collapsed boundaries.
+        let derivs = self.surf.derivs_in_span::<3>(uv, spans, P);
+        let r = derivs[0][0];
+        let columns = [derivs[1][0] * ranges.x, derivs[0][1] * ranges.y];
+        let norms = DVec2::new(columns[0].norm(), columns[1].norm());
+        let unit = [0, 1].map(|i| {
+            if norms[i] > 0. {
+                columns[i] / norms[i]
+            } else {
+                DVec3::zeros()
+            }
+        });
+        let gradient = DVec2::new(dot(&r, &unit[0]), dot(&r, &unit[1]));
+        let mut projected = gradient;
+        let domains = [
+            (self.surf.u_knots[spans[0]], self.surf.u_knots[spans[0] + 1]),
+            (self.surf.v_knots[spans[1]], self.surf.v_knots[spans[1] + 1]),
+        ];
+        for i in 0..2 {
+            let (min, max) = domains[i];
+            if (uv[i] == min && gradient[i] >= 0.) || (uv[i] == max && gradient[i] <= 0.) {
+                projected[i] = 0.;
+            }
+        }
+        // Test each parameter direction at its own scale. A large normal
+        // offset or a long u direction must not erase a resolvable thin v
+        // direction. Position roundoff is likewise componentwise.
+        let position_scale = (P + r).abs() + P.abs();
+        let stationary = [0, 1].map(|i| {
+            projected[i].abs() <= PROJECTION_TOL * (norms[i] + dot(&unit[i].abs(), &position_scale))
+        });
+        let g = DVec2::new(dot(&r, &columns[0]), dot(&r, &columns[1]));
+        let h = [
+            columns[0].norm_squared() + dot(&r, &derivs[2][0]) * ranges.x * ranges.x,
+            dot(&columns[0], &columns[1]) + dot(&r, &derivs[1][1]) * ranges.x * ranges.y,
+            columns[1].norm_squared() + dot(&r, &derivs[0][2]) * ranges.y * ranges.y,
+        ];
+        let lo = DVec2::new(domains[0].0 - uv.x, domains[1].0 - uv.y).component_div(&ranges);
+        let hi = DVec2::new(domains[0].1 - uv.x, domains[1].1 - uv.y).component_div(&ranges);
+        let step = quadratic_step(g, h, lo, hi, |q| {
+            (self.stepped_uv(uv, ranges, spans, q) - uv).component_div(&ranges)
+        });
+        let candidate = self.stepped_uv(uv, ranges, spans, step);
+        // Only the full-cell model step may establish representability
+        // convergence, never a step shortened by the trust region.
+        let converged = (0..2).all(|i| stationary[i] || candidate[i] == uv[i]);
+        DistanceModel {
+            spans,
+            residual: r,
+            position_scale,
+            gradient: g,
+            hessian: h,
+            lo,
+            hi,
+            stationary,
+            converged,
+        }
+    }
+
+    fn newtons_method_inner(
+        &self,
+        P: DVec3,
+        uv_0: DVec2,
+        max_iter: usize,
+        domain: [std::ops::Range<usize>; 2],
+    ) -> Option<DVec2> {
+        let ranges = DVec2::new(
+            self.surf.max_u() - self.surf.min_u(),
+            self.surf.max_v() - self.surf.min_v(),
+        );
+        let mut uv_i = self.constrain_uv(uv_0);
+        let mut radius: f64 = 1.;
         for _ in 0..max_iter {
-            // The surface and its derivatives at uv_i
-            let derivs = self.surf.derivs::<2>(uv_i);
-            let S = derivs[0][0];
-            let S_u = derivs[1][0];
-            let S_v = derivs[0][1];
-            let S_uu = derivs[2][0];
-            let S_uv = derivs[1][1]; // S_vu is the same
-            let S_vv = derivs[0][2];
-            let r = S - P;
-
-            // If |S(uv_i) - P| < \epsilon_1  and
-            //    |S_u(uv_i) dot (S(uv_i) - P)| / |S_u(uv_i)| / |S(uv_i) - P| < \epsilon_2  and
-            //    |S_v(uv_i) dot (S(uv_i) - P)| / |S_v(uv_i)| / |S(uv_i) - P| < \epsilon_2
-            // then we are done
-            let r_len = length(&r);
-            if r_len < eps1 {
-                let su_len = length(&S_u);
-                let sv_len = length(&S_v);
-                // Skip cosine check when the derivative or residual is
-                // degenerate (near-zero) to avoid 0/0 = NaN failures.
-                // Use a tight threshold so we only bypass for truly
-                // degenerate surfaces (collapsed control point rows).
-                let cos_u_ok = su_len < 1e-10 || r_len < 1e-10
-                    || dot(&r, &S_u).abs() / su_len / r_len < eps2;
-                let cos_v_ok = sv_len < 1e-10 || r_len < 1e-10
-                    || dot(&r, &S_v).abs() / sv_len / r_len < eps2;
-                if cos_u_ok && cos_v_ok {
-                    return Some(uv_i);
+            // Smooth interiors and knot junctions use the same bounded model.
+            // At a junction, every incident cell must satisfy its one-sided
+            // conditions before the point is a constrained minimum.
+            let mut models = smallvec::SmallVec::<[DistanceModel; 4]>::new();
+            for u in self
+                .surf
+                .u_knots
+                .spans_at(uv_i.x)
+                .filter(|u| domain[0].contains(u))
+            {
+                for v in self
+                    .surf
+                    .v_knots
+                    .spans_at(uv_i.y)
+                    .filter(|v| domain[1].contains(v))
+                {
+                    models.push(self.distance_model(P, uv_i, ranges, [u, v]));
                 }
             }
-
-            // Otherwise, compute uv_{i+1} by computing:
-            // let r(u, v) = S(u, v) - P
-            // let f(u, v) = r(u, v) dot S_u(u, v)
-            // let g(u, v) = r(u, v) dot S_v(u, v)
-            // let K_i = -(f(uv_{i}), g(uv_{i}))
-            // let J_i = [[df/du, df/dv], [dg/du, dg/dv]]
-            //           = [[|S_u|^2 + r dot S_uu, S_u dot S_v + r dot S_uv],
-            //              [S_u dot S_v + r dot S_vu, |S_v|^2 + r dot S_vv]]
-            // let delta_i = (J_i)^{-1} * K_i
-            // let uv_{i+1} = delta_i + uv_i
-            let f = dot(&r, &S_u);
-            let g = dot(&r, &S_v);
-            let K_i = -DVec2::new(f, g);
-            let J_i = symmetric2x2(
-                length2(&S_u) + dot(&r, &S_uu),
-                dot(&S_u, &S_v) + dot(&r, &S_uv),
-                length2(&S_v) + dot(&r, &S_vv),
-            );
-            let delta_i = match J_i.try_inverse() {
-                None => {
-                    // Singular Jacobian (e.g. degenerate surface edge where
-                    // a whole row of control points collapses to one point).
-                    // If we're already reasonably close, accept the result.
-                    if r_len < eps1 * 10.0 {
-                        return Some(uv_i);
+            if models.iter().all(|m| m.converged) {
+                return Some(uv_i);
+            }
+            let mut accepted: Option<(DVec2, DVec3, f64)> = None;
+            for _ in 0..40 {
+                for m in models.iter().filter(|m| !m.converged) {
+                    let step = quadratic_step(
+                        m.gradient,
+                        m.hessian,
+                        m.lo.sup(&DVec2::repeat(-radius)),
+                        m.hi.inf(&DVec2::repeat(radius)),
+                        |q| {
+                            (self.stepped_uv(uv_i, ranges, m.spans, q) - uv_i)
+                                .component_div(&ranges)
+                        },
+                    );
+                    let mut candidate = self.stepped_uv(uv_i, ranges, m.spans, step);
+                    let mut candidate_r =
+                        self.surf.derivs_in_span::<1>(candidate, m.spans, P)[0][0];
+                    let prediction = |point: DVec2| {
+                        let q = (point - uv_i).component_div(&ranges);
+                        let h = m.hessian;
+                        dot(
+                            &q,
+                            &(m.gradient
+                                + 0.5
+                                    * DVec2::new(h[0] * q.x + h[1] * q.y, h[1] * q.x + h[2] * q.y)),
+                        )
+                    };
+                    // A coupled step may displace an already stationary
+                    // active bound through quotient roundoff. Retain that
+                    // bound unless leaving it improves actual distance; do
+                    // not reset unconverged or interior coordinates to knots.
+                    for i in 0..2 {
+                        if !m.stationary[i] || (m.lo[i] != 0. && m.hi[i] != 0.) {
+                            continue;
+                        }
+                        let mut bound = candidate;
+                        bound[i] = uv_i[i];
+                        // Keep the original descent trial when a knot variant
+                        // has no predicted gain; it cannot prove convergence.
+                        if prediction(bound) >= 0. {
+                            continue;
+                        }
+                        let bound_r = self.surf.derivs_in_span::<1>(bound, m.spans, P)[0][0];
+                        if crate::squared_norm_difference(bound_r, candidate_r) <= 0. {
+                            candidate = bound;
+                            candidate_r = bound_r;
+                        }
                     }
-                    return None;
-                },
-                Some(m) => m * K_i,
-            };
-            let mut uv_ip1 = uv_i + delta_i;
-
-            // clamp uv_{i+p} by doing:
-            // if u_{i+1} < min_u: u_{i+1} = min_u if u_open else max_u - (min_u - u_{i+1})
-            // if u_{i+1} > max_u: u_{i+1} = max_u if u_open else min_u + (u_{i+1} - max_u)
-            // if v_{i+1} < min_v: v_{i+1} = min_v if v_open else max_v - (min_v - v_{i+1})
-            // if v_{i+1} > max_v: v_{i+1} = max_v if v_open else min_v + (v_{i+1} - max_v)
-
-            if uv_ip1.x < self.surf.min_u() {
-                uv_ip1.x = if self.surf.u_open {
-                    self.surf.min_u()
-                } else {
-                    self.surf.max_u() - (self.surf.min_u() - uv_ip1.x)
-                };
+                    let predicted = prediction(candidate);
+                    // Compare residual distances in factored form to retain
+                    // small improvements near a nonzero normal offset.
+                    let change = 0.5 * crate::squared_norm_difference(candidate_r, m.residual);
+                    let roundoff = PROJECTION_TOL
+                        * dot(&(candidate_r.abs() + m.residual.abs()), &m.position_scale);
+                    if predicted < 0.
+                        && change <= 0.1 * predicted + roundoff
+                        && accepted.as_ref().map_or(true, |(_, best, _)| {
+                            crate::squared_norm_difference(candidate_r, *best) < 0.
+                        })
+                    {
+                        // Roundoff may permit a step without a resolved gain.
+                        // Such acceptance is not evidence that the quadratic
+                        // fits: reduce its radius when it overpredicts descent.
+                        let scale = if change > 0.25 * predicted {
+                            0.25
+                        } else if change <= 0.75 * predicted {
+                            2.
+                        } else {
+                            1.
+                        };
+                        accepted = Some((candidate, candidate_r, scale));
+                    }
+                }
+                if let Some((_, _, scale)) = accepted {
+                    radius = (scale * radius).min(1.);
+                    break;
+                }
+                radius *= 0.25;
             }
-            if uv_ip1.x > self.surf.max_u() {
-                uv_ip1.x = if self.surf.u_open {
-                    self.surf.max_u()
-                } else {
-                    self.surf.min_u() + (uv_ip1.x - self.surf.max_u())
-                };
-            }
-
-            if uv_ip1.y < self.surf.min_v() {
-                uv_ip1.y = if self.surf.v_open {
-                    self.surf.min_v()
-                } else {
-                    self.surf.max_v() - (self.surf.min_v() - uv_ip1.y)
-                };
-            }
-            if uv_ip1.y > self.surf.max_v() {
-                uv_ip1.y = if self.surf.v_open {
-                    self.surf.max_v()
-                } else {
-                    self.surf.min_v() + (uv_ip1.y - self.surf.max_v())
-                };
-            }
-
-            // If the values didn't change much, we can stop iterating
-            // if |(u_{i+1} - u_i) * S_u(u_i, v_i) + (v_{i+1} - v_i) * S_v(u_i, v_i) | < \epsilon_1
-
-            let delta_i = uv_ip1 - uv_i;
-            if length(&(delta_i.x * S_u + delta_i.y * S_v)) < eps1 {
-                return Some(uv_ip1);
-            }
-
-            // otherwise, iterate again
-            uv_i = uv_ip1;
+            uv_i = accepted?.0;
         }
         None
     }
 
     pub fn uv_from_point(&self, p: DVec3) -> Option<DVec2> {
+        self.uv_from_point_with_scratch(p, &mut ProjectionScratch::default())
+    }
+
+    pub fn uv_from_point_with_scratch(&self, p: DVec3, scratch: &mut ProjectionScratch<N>) -> Option<DVec2> {
+        let ProjectionScratch { patches, queue } = scratch;
+        patches.reset([self.surf.u_knots.degree() + 1, self.surf.v_knots.degree() + 1]);
+        queue.clear();
         assert!(!self.samples.is_empty());
         let mut best = (f64::INFINITY, u32::MAX);
         kd_nearest(&self.samples, &self.kd, 0, p, &mut best);
-        let best_idx = if best.1 == u32::MAX { 0 } else { best.1 as usize };
+        let best_idx = if best.1 == u32::MAX {
+            0
+        } else {
+            best.1 as usize
+        };
         let best_uv = self.samples[best_idx].0;
-        self.uv_from_point_newtons_method(p, best_uv)
+        // A closed boundary has two parameter representatives. The nearest
+        // geometric sample cannot distinguish them, so solve each bounded
+        // representative rather than wrapping iterates across the cut.
+        // Two seam choices per parameter give at most four seeds.
+        let mut seeds: smallvec::SmallVec<[DVec2; 4]> = smallvec::smallvec![best_uv];
+        for (i, (min, max, open)) in [
+            (self.surf.min_u(), self.surf.max_u(), self.surf.u_open),
+            (self.surf.min_v(), self.surf.max_v(), self.surf.v_open),
+        ]
+        .iter()
+        .copied()
+        .enumerate()
+        {
+            if !open && (best_uv[i] == min || best_uv[i] == max) {
+                let other = if best_uv[i] == min { max } else { min };
+                for j in 0..seeds.len() {
+                    let mut alias = seeds[j];
+                    alias[i] = other;
+                    seeds.push(alias);
+                }
+            }
+        }
+        let distance = |uv| self.surf.derivs_relative_to::<1>(uv, p)[0][0].norm_squared();
+        let domain = [&self.surf.u_knots, &self.surf.v_knots].map(|k| 0..k.len());
+        let mut result = seeds
+            .iter()
+            .copied()
+            .filter_map(|seed| self.newtons_method_inner(p, seed, 256, domain.clone()))
+            .min_by_key(|&uv| ordered_float::OrderedFloat(distance(uv)));
+        let mut error = result.map_or(f64::INFINITY, distance);
+        // A nearby sample need not lie in the basin of the nearby surface
+        // sheet. Consider every knot cell whose control hull could improve
+        // the current projection. Keep each search within its cell: a bound
+        // on surface position is not a bound on an unrestrained Newton basin.
+        for cell in &self.cells {
+            // With one cell, its nearest seed and every incident model are
+            // identical to the initial solve (including failed solves).
+            // Only this duplicate retry is redundant, not subdivision below.
+            if self.cells.len() == 1 { break; }
+            let bounds = cell.bounds;
+            let lower_bound: f64 = (0..3).map(|i|
+                (bounds[0][i] - p[i]).max(p[i] - bounds[1][i]).max(0.).powi(2)).sum();
+            if lower_bound >= error { continue; }
+            let seed = self.samples[cell.samples.clone()].iter()
+                .min_by_key(|(_, q)| ordered_float::OrderedFloat(dist2(*q, p))).unwrap().0;
+            let domain = cell.spans.map(|span| span..span + 1);
+            if let Some(uv) = self.newtons_method_inner(p, seed, 256, domain) {
+                let candidate_error = distance(uv);
+                if candidate_error < error {
+                    result = Some(uv);
+                    error = candidate_error;
+                }
+            }
+        }
+        // A local stationary point is only an upper bound. Refine the actual
+        // homogeneous control hull until no remaining patch can improve the
+        // distance at the geometric resolution of f64 input coordinates.
+        // Keep uncertainty componentwise: a wide coordinate must not erase
+        // a resolvable separation in a thin coordinate. Retain the original
+        // control scale through subdivision, including cancellation against p.
+        let scale = self.cells.iter().fold(DVec3::zeros(), |scale, c|
+            scale.sup(&c.bounds[0].abs()).sup(&c.bounds[1].abs()));
+        let roundoff = PROJECTION_TOL * (p.abs() + scale);
+        let threshold = |result: Option<DVec2>| result.map_or(f64::INFINITY, |uv|
+            (self.surf.derivs_relative_to::<1>(uv, p)[0][0].abs() - roundoff)
+                .sup(&DVec3::zeros()).norm());
+        if threshold(result) > 0. {
+            for cell in &self.cells {
+                let lower = ((cell.bounds[0]-p).sup(&(p-cell.bounds[1])) - roundoff)
+                    .sup(&DVec3::zeros()).norm();
+                if lower >= error.sqrt() { continue; }
+                let controls = cell.controls.get_or_init(|| self.surf.bezier_cell(cell.spans));
+                queue.push_back((patches.insert(controls),
+                    DVec2::new(self.surf.u_knots[cell.spans[0]], self.surf.v_knots[cell.spans[1]]),
+                    DVec2::new(self.surf.u_knots[cell.spans[0]+1], self.surf.v_knots[cell.spans[1]+1]),
+                    cell.spans));
+            }
+        }
+        while let Some((patch, lo, hi, spans)) = queue.pop_front() {
+            let mid = (lo + hi) * 0.5;
+            let d = self.surf.derivs_in_span::<2>(mid, spans, p);
+            let normal = d[1][0].cross(&d[0][1]);
+            let normal = if normal.norm_squared() > 0. { normal.normalize() } else { DVec3::zeros() };
+            let tangent = if d[1][0].norm_squared() > 0. { d[1][0].normalize() } else { DVec3::zeros() };
+            let bitangent = normal.cross(&tangent);
+            let mut slab = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
+            let mut bounds = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
+            let residual = result.map_or(DVec3::zeros(), |uv| self.surf.derivs_relative_to::<1>(uv, p)[0][0]);
+            let direction = residual.try_normalize(0.).unwrap_or_else(DVec3::zeros);
+            let mut support = f64::INFINITY;
+            for q in patches[patch].iter().copied().map(crate::nd_curve::cartesian) {
+                bounds[0] = bounds[0].inf(&q); bounds[1] = bounds[1].sup(&q);
+                let offset = DVec3::new((q-p).dot(&normal), (q-p).dot(&tangent), (q-p).dot(&bitangent));
+                slab[0] = slab[0].inf(&offset); slab[1] = slab[1].sup(&offset);
+                support = support.min((q-p).dot(&direction));
+            }
+            // Any supporting plane bounds the hull. The incumbent residual
+            // preserves correlation along oblique extrusion axes that boxes
+            // lose, especially at constrained endpoint minima.
+            // An orthonormal control box also bounds distance beyond a finite
+            // patch edge; the normal slab alone only bounds its infinite plane.
+            let slab_roundoff = DVec3::new(normal.abs().dot(&roundoff),
+                tangent.abs().dot(&roundoff), bitangent.abs().dot(&roundoff));
+            // Stop when distance comparisons overlap at input resolution,
+            // not when an optimistic bound beats an optimistic incumbent.
+            // Fixed arithmetic uncertainty cannot shrink with subdivision.
+            // This is a numerical tie, not certified exact domination.
+            let box_gap = (bounds[0]-p).sup(&(p-bounds[1]));
+            let slab_gap = slab[0].sup(&(-slab[1]));
+            let support_roundoff = direction.abs().dot(&roundoff);
+            let bound = |sign: f64| (box_gap + sign * roundoff).sup(&DVec3::zeros()).norm()
+                .max((slab_gap + sign * slab_roundoff).sup(&DVec3::zeros()).norm())
+                .max(support + sign * support_roundoff);
+            // Definitely farther patches need no candidate evaluations.
+            if result.is_some() && bound(-1.) >= (residual.abs() + roundoff).norm() {
+                patches.release(patch);
+                continue;
+            }
+            let bound_ceiling = bound(1.);
+            for seed in [lo, hi, DVec2::new(lo.x, hi.y), DVec2::new(hi.x, lo.y), mid] {
+                // Every evaluated point is a feasible upper bound. Accelerate
+                // improvements with Newton, rather than repeatedly solving the
+                // same knot cell from seeds already worse than the incumbent.
+                let seed_error = distance(seed);
+                if seed_error >= error { continue; }
+                error = seed_error;
+                result = Some(seed);
+                if let Some(uv) = self.newtons_method_inner(p, seed, 256, spans.map(|s| s..s+1)) {
+                    let d = distance(uv);
+                    if d < error { error = d; result = Some(uv); }
+                }
+            }
+            if error == 0. { break; }
+            // Subdivision cannot resolve geometry inside the original input
+            // uncertainty. Evaluate this patch's candidates above, then stop
+            // rather than subdividing a rounded control hull indefinitely.
+            if bound_ceiling >= threshold(result)
+                || (0..3).all(|i| bounds[1][i] - bounds[0][i] <= roundoff[i]) {
+                patches.release(patch);
+                continue;
+            }
+            // Both parameter widths must shrink. Curvature is not a measure
+            // of distance-bound uncertainty and can indefinitely starve an axis.
+            let axis = usize::from((hi.y-lo.y)/(self.surf.v_knots[spans[1]+1]-self.surf.v_knots[spans[1]])
+                > (hi.x-lo.x)/(self.surf.u_knots[spans[0]+1]-self.surf.u_knots[spans[0]]));
+            if mid[axis] == lo[axis] || mid[axis] == hi[axis] {
+                patches.release(patch);
+                continue;
+            }
+            let right = patches.split(patch, axis);
+            let mut left_hi = hi; left_hi[axis] = mid[axis];
+            let mut right_lo = lo; right_lo[axis] = mid[axis];
+            queue.push_back((patch, lo, left_hi, spans));
+            queue.push_back((right, right_lo, hi, spans));
+        }
+        if result.is_none() {
+            error!("Could not find UV coordinates");
+        }
+        result
     }
 
     // NOTE: do not add warm-start ("hint") seeding from an adjacent contour
@@ -256,19 +626,532 @@ impl<const N: usize> SampledSurface<N>
     // nearest sample so results stay well-defined on such surfaces.
 }
 
-/// Builds the symmetric matrix [[a, b], [b, d]]
-fn symmetric2x2(a: f64, b: f64, d: f64) -> DMat2x2 {
-    // In column major order; because it's symmetric, it doesn't matter
-    let mut mat = DMat2x2::identity();
-    mat.set_column(0, &DVec2::new(a, b));
-    mat.set_column(1, &DVec2::new(b, d));
-    mat
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::KnotVector;
+
+    fn plane(
+        u_domain: [f64; 2],
+        v_domain: [f64; 2],
+        origin: DVec3,
+        u_edge: DVec3,
+        v_edge: DVec3,
+    ) -> SampledSurface<3> {
+        SampledSurface::new(NDBSplineSurface::new(
+            true,
+            true,
+            KnotVector::from_multiplicities(1, &u_domain, &[2, 2]),
+            KnotVector::from_multiplicities(1, &v_domain, &[2, 2]),
+            vec![
+                vec![origin, origin + v_edge],
+                vec![origin + u_edge, origin + u_edge + v_edge],
+            ],
+        ))
+    }
+
+    fn close(a: f64, b: f64, tolerance: f64) {
+        assert!((a - b).abs() <= tolerance, "{} != {}", a, b);
+    }
+
+    #[test]
+    fn inverse_bounds_resolve_endpoint_minima_on_oblique_extrusions() {
+        let sampled = SampledSurface::new(NDBSplineSurface::new(true, true,
+            KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [(0.,0.), (0.5,0.5), (1.,2.)].iter().map(|&(x,z)|
+                vec![DVec3::new(x,0.,z), DVec3::new(x+1.,1.,z)]).collect()));
+        // S(u,v)=(u+v,v,u+u²); the minimum is on u=0, not
+        // stationary in that direction. Its residual is not surface-normal.
+        let target = DVec3::new(0.4,0.6,0.);
+        let uv = sampled.uv_from_point(target).unwrap();
+        close(uv.x, 0., 1e-10);
+        close(uv.y, 0.5, 1e-10);
+        close((sampled.surf.point(uv)-target).norm_squared(), 0.02, 1e-12);
+    }
+
+    #[test]
+    fn single_cell_projection_resolves_close_branches_in_parameter_space() {
+        let surf = NDBSplineSurface::new(true, true,
+            KnotVector::from_multiplicities(3, &[0., 1.], &[4, 4]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [-1., 3., -3., 1.].iter().enumerate().map(|(i, &y)|
+                [0., 1.].iter().map(|&z| DVec3::new(i as f64 * 1e-10 / 3., y, z)).collect()).collect());
+        let sampled = SampledSurface::new(surf);
+        for u in [0.47, 0.5, 0.53] {
+            // Independent power-basis form of the cubic, including targets
+            // not at a subdivision midpoint or one of the initial samples.
+            let y = -1. + u * (12. + u * (-30. + 20. * u));
+            let uv = sampled.uv_from_point(DVec3::new(u * 1e-10, y, 0.37)).unwrap();
+            close(uv.x, u, 1e-8);
+            close(uv.y, 0.37, 1e-10);
+        }
+    }
+
+    #[test]
+    fn inverse_search_resolves_multiple_sheets_within_one_polynomial_cell() {
+        let surf = NDBSplineSurface::new(true, true,
+            KnotVector::from_multiplicities(3, &[0., 1.], &[4, 4]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [-1., 3., -3., 1.].iter().enumerate().map(|(i,&y)|
+                [0.,1.].iter().map(|&z| DVec3::new(i as f64 * 0.001 / 3., y, z)).collect()).collect());
+        let sampled = SampledSurface::new(surf);
+        let mut scratch = ProjectionScratch::default();
+        for i in 1..40 {
+            let target = sampled.surf.point(DVec2::new(i as f64 / 40., 0.37));
+            let uv = sampled.uv_from_point_with_scratch(target, &mut scratch).unwrap();
+            assert!((sampled.surf.point(uv)-target).norm() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn projection_tests_both_sides_of_interior_knots() {
+        let sampled = SampledSurface::new(NDBSplineSurface::new(
+            true,
+            true,
+            KnotVector::from_multiplicities(1, &[0., 0.5, 1.], &[2, 1, 2]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [(0., 0.5), (0.5, 0.), (1., 0.5)]
+                .iter()
+                .map(|&(x, z)| vec![DVec3::new(x, 0., z), DVec3::new(x, 1., z)])
+                .collect(),
+        ));
+        for (p, expected) in [
+            (DVec3::new(0.5, 0.37, -0.1), DVec2::new(0.5, 0.37)),
+            (DVec3::new(0.7, 0.37, 0.2), DVec2::new(0.7, 0.37)),
+        ] {
+            for start in [0.25, 0.5, 0.75] {
+                let uv = sampled
+                    .uv_from_point_newtons_method(p, DVec2::new(start, 0.5))
+                    .unwrap();
+                close(uv.x, expected.x, 1e-12);
+                close(uv.y, expected.y, 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_quadratic_preserves_thin_directions_and_handles_indefinite_curvature() {
+        let lo = DVec2::repeat(-1.);
+        let hi = DVec2::repeat(1.);
+        let q = quadratic_step(DVec2::new(-0.3, -0.7e-32), [1., 0., 1e-32], lo, hi, |q| q);
+        close(q.x, 0.3, 1e-15);
+        close(q.y, 0.7, 1e-15);
+        let q = quadratic_step(DVec2::new(-0.1, 0.), [1., 2., 1.], lo, hi, |q| q);
+        assert_eq!(q, DVec2::new(1., -1.));
+    }
+
+    #[test]
+    fn rounded_coupled_steps_keep_the_representable_direction_free() {
+        let origin = DVec2::new(0.5, 1.);
+        let g = DVec2::new(1e-44, -1e-17);
+        let h = [1e-42, -1e-26, 1.];
+        let lo = DVec2::new(-0.5, -0.5);
+        let hi = DVec2::new(0.5, 1.);
+        let represent = |q: DVec2| (origin + q) - origin;
+        let continuous = represent(quadratic_step(g, h, lo, hi, |q| q));
+        assert!(continuous.x > 0. && continuous.y == 0.);
+        let discrete = quadratic_step(g, h, lo, hi, represent);
+        assert!(discrete.x < 0. && discrete.y == 0.);
+        assert!(g.x * discrete.x + 0.5 * h[0] * discrete.x * discrete.x < 0.);
+    }
+
+    #[test]
+    fn rational_extrusion_boundary_remains_a_straight_parameter_line() {
+        let points = [
+            (-1.767765, 3.557235, 1.),
+            (1.789502361076, 3.557235, 0.83152615303),
+            (3.151478602946, 0.2710256648, 1.),
+        ];
+        let sampled = SampledSurface::new(NDBSplineSurface::new(
+            true,
+            true,
+            KnotVector::from_multiplicities(2, &[0., 1.17789368835], &[3, 3]),
+            KnotVector::from_multiplicities(1, &[7.012443731511, 7.2], &[2, 2]),
+            points
+                .iter()
+                .map(|&(x, y, w)| {
+                    [15.487556268489, 15.3]
+                        .iter()
+                        .map(|&z| nalgebra_glm::DVec4::new(x, y, z, 1.) * w)
+                        .collect()
+                })
+                .collect(),
+        ));
+        for z in [15.487538034315, 15.46, 15.39, 15.3] {
+            let uv = sampled
+                .uv_from_point(DVec3::new(-1.767765, 3.557235, z))
+                .unwrap();
+            assert_eq!(uv.x, 0.);
+            close(sampled.surf.point(uv).z, z, 4. * f64::EPSILON * z);
+        }
+    }
+
+    #[test]
+    fn projection_near_a_pole_preserves_the_vanishing_tangent() {
+        // S(u,v) = (u, u*v, 0.001*u*v*(1-v)). At u=0 the v
+        // tangent vanishes, but an interior normal projection still exists.
+        let sampled = SampledSurface::new(NDBSplineSurface::new(
+            true,
+            true,
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
+            vec![
+                vec![DVec3::zeros(); 3],
+                vec![
+                    DVec3::new(1., 0., 0.),
+                    DVec3::new(1., 0.5, 0.0005),
+                    DVec3::new(1., 1., 0.),
+                ],
+            ],
+        ));
+        let expected = DVec2::new(1e-10, 0.5);
+        let jet = sampled.surf.derivs::<2>(expected);
+        let p = jet[0][0] + jet[1][0].cross(&jet[0][1]).normalize() * 1e-7;
+        let uv = sampled
+            .uv_from_point_newtons_method(p, DVec2::zeros())
+            .unwrap();
+        close(uv.x, expected.x, 1e-14);
+        close(uv.y, expected.y, 1e-5);
+    }
+
+    #[test]
+    fn negative_curvature_projection_bounds_the_trial_step_to_the_domain() {
+        let sampled = SampledSurface::new(NDBSplineSurface::new(
+            true,
+            true,
+            KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [(0., 0.), (0.5, 0.), (1., 10000.)]
+                .iter()
+                .map(|&(x, y)| vec![DVec3::new(x, y, 0.), DVec3::new(x, y, 1.)])
+                .collect(),
+        ));
+        let p = DVec3::new(0.001, 0.0001, 0.5);
+        let uv = sampled
+            .uv_from_point_newtons_method(p, DVec2::new(0., 0.5))
+            .unwrap();
+        let d = sampled.surf.derivs::<2>(uv);
+        let r = d[0][0] - p;
+        assert!(uv.x > 0. && uv.x < 0.001);
+        assert!(r.norm() < (sampled.surf.point(DVec2::new(0., 0.5)) - p).norm());
+        assert!(r.dot(&d[1][0]).abs() / d[1][0].norm() < 1e-12);
+    }
+
+    #[test]
+    fn projection_stops_at_the_nearest_representable_parameter() {
+        let sampled = plane(
+            [-41.36699254603, -41.31699254603],
+            [0., 1.],
+            DVec3::new(0.5, 5.89, 0.05000000000001),
+            DVec3::new(0., 0., 3.552713678801e-15 - 0.05000000000001),
+            DVec3::new(1., 0., 0.),
+        );
+        let p = DVec3::new(0.75, 5.89, 0.05);
+        let uv = sampled.uv_from_point(p).unwrap();
+        assert!(uv.x > sampled.surf.min_u());
+        let error = (sampled.surf.point(uv) - p).norm_squared();
+        for bits in [uv.x.to_bits() - 1, uv.x.to_bits() + 1] {
+            let neighbor = DVec2::new(f64::from_bits(bits), uv.y);
+            assert!(error <= (sampled.surf.point(neighbor) - p).norm_squared());
+        }
+    }
+
+    #[test]
+    fn projection_resolves_thin_directions_despite_large_normal_offset() {
+        let sampled = plane(
+            [0.0, 1.0],
+            [0.0, 1.0],
+            DVec3::zeros(),
+            DVec3::new(1.0, 0.0, 0.0),
+            DVec3::new(0.0, 1e-16, 0.0),
+        );
+        let uv = sampled
+            .uv_from_point(DVec3::new(0.35, 0.73e-16, 2.0))
+            .unwrap();
+        close(uv.x, 0.35, 1e-12);
+        close(uv.y, 0.73, 1e-12);
+    }
+
+    #[test]
+    fn trust_radius_shrinks_when_roundoff_accepts_a_poor_model() {
+        // A 120-degree circular arc extruded in z. At either arc endpoint,
+        // the quadratic predicts descent to the equally distant other end.
+        // The large constrained z offset masks that poor fit in acceptance,
+        // but must not prevent the trust radius from shrinking.
+        let y = 0.75_f64.sqrt();
+        let surface = NDBSplineSurface::new(
+            true,
+            true,
+            KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [(0.5, -y, 1.), (2., 0., 0.5), (0.5, y, 1.)]
+                .iter()
+                .map(|&(x, y, w)| {
+                    [1., 2.]
+                        .iter()
+                        .map(|&z| nalgebra_glm::DVec4::new(x * 1e-16, y * 1e-16, z, 1.) * w)
+                        .collect()
+                })
+                .collect(),
+        );
+        let sampled = SampledSurface::new(surface);
+        for u in [0., 1.] {
+            let uv = sampled
+                .uv_from_point_newtons_method(DVec3::new(2e-16, 0., 3.), DVec2::new(u, 1.))
+                .unwrap();
+            close(uv.x, 0.5, 1e-12);
+            assert_eq!(uv.y, 1.);
+        }
+    }
+
+    #[test]
+    fn curved_patch_normal_projection_is_stationary() {
+        let sampled = SampledSurface::new(NDBSplineSurface::new(
+            true,
+            true,
+            KnotVector::from_multiplicities(2, &[0.0, 1.0], &[3, 3]),
+            KnotVector::from_multiplicities(1, &[0.0, 1.0], &[2, 2]),
+            [(0.0, 0.0), (0.5, 0.0), (1.0, 1.0)]
+                .iter()
+                .map(|&(x, z)| vec![DVec3::new(x, 0.0, z), DVec3::new(x, 1.0, z)])
+                .collect(),
+        ));
+        let expected = DVec2::new(0.37, 0.73);
+        let p = sampled.surf.point(expected);
+        let normal = DVec3::new(-2.0 * expected.x, 0.0, 1.0).normalize();
+        for offset in [0.0, -0.05, 0.05] {
+            let uv = sampled.uv_from_point(p + normal * offset).unwrap();
+            close(uv.x, expected.x, 1e-10);
+            close(uv.y, expected.y, 1e-10);
+        }
+    }
+
+    #[test]
+    fn near_curvature_center_projection_uses_distance_hessian() {
+        let sampled = SampledSurface::new(NDBSplineSurface::new(
+            true,
+            true,
+            KnotVector::from_multiplicities(2, &[-1., 1.], &[3, 3]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [(-1., 1.), (0., -1.), (1., 1.)]
+                .iter()
+                .map(|&(x, z)| vec![DVec3::new(x, 0., z), DVec3::new(x, 1., z)])
+                .collect(),
+        ));
+        let uv = sampled
+            .uv_from_point_newtons_method(DVec3::new(0., 0.37, 0.49999), DVec2::new(0.1, 0.4))
+            .unwrap();
+        close(uv.x, 0., 1e-8);
+        close(uv.y, 0.37, 1e-12);
+    }
+
+    #[test]
+    fn closed_surface_projection_retains_a_seam_endpoint_minimum() {
+        let sampled = SampledSurface::new(NDBSplineSurface::new(
+            false,
+            true,
+            KnotVector::from_multiplicities(1, &[0., 1., 2., 3., 4.], &[2, 1, 1, 1, 2]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [(0., 0.), (1., 0.), (1., 1.), (0., 1.), (0., 1e-12)]
+                .iter()
+                .map(|&(x, y)| vec![DVec3::new(x, y, 0.), DVec3::new(x, y, 1.)])
+                .collect(),
+        ));
+        // Geometric closure (with rounded endpoint data) is not an instruction
+        // to wrap a local bounded minimization across the two knot endpoints.
+        let uv = sampled.uv_from_point(DVec3::new(-1e-12, 0., 0.37)).unwrap();
+        assert_eq!(uv.x, 0.);
+        close(uv.y, 0.37, 1e-12);
+    }
+
+    #[test]
+    fn closed_surface_projection_samples_both_sides_of_the_seam() {
+        let w = 0.5_f64.sqrt();
+        let circle = [
+            (1., 0., 1.),
+            (1., 1., w),
+            (0., 1., 1.),
+            (-1., 1., w),
+            (-1., 0., 1.),
+            (-1., -1., w),
+            (0., -1., 1.),
+            (1., -1., w),
+            (1., 0., 1.),
+        ];
+        let sampled = SampledSurface::new(NDBSplineSurface::new(
+            false,
+            true,
+            KnotVector::from_multiplicities(2, &[0., 1., 2., 3., 4.], &[3, 2, 2, 2, 3]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            circle
+                .iter()
+                .map(|&(x, y, w)| {
+                    [0., 1.]
+                        .iter()
+                        .map(|z| nalgebra_glm::DVec4::new(x * w, y * w, z * w, w))
+                        .collect()
+                })
+                .collect(),
+        ));
+        let expected = DVec2::new(0.01, 0.6);
+        let uv = sampled.uv_from_point(sampled.surf.point(expected)).unwrap();
+        close(uv.x, expected.x, 1e-10);
+        close(uv.y, expected.y, 1e-10);
+        let expected = DVec2::new(3.99, 0.4);
+        let uv = sampled.uv_from_point(sampled.surf.point(expected)).unwrap();
+        close(uv.x, expected.x, 1e-10);
+        close(uv.y, expected.y, 1e-10);
+    }
+
+    #[test]
+    fn inverse_projection_round_trip_and_normal_offset() {
+        let sampled = plane(
+            [0.0, 1.0],
+            [0.0, 1.0],
+            DVec3::new(2.0, -3.0, 4.0),
+            DVec3::new(3.0, 0.0, 0.0),
+            DVec3::new(0.0, 5.0, 0.0),
+        );
+        let expected = DVec2::new(0.371, 0.826);
+        let point = sampled.surf.point(expected);
+        let round_trip = sampled.uv_from_point(point).unwrap();
+        let normal_projection = sampled
+            .uv_from_point(point + DVec3::new(0.0, 0.0, 37.0))
+            .unwrap();
+        close(round_trip.x, expected.x, 1e-10);
+        close(round_trip.y, expected.y, 1e-10);
+        close(normal_projection.x, expected.x, 1e-10);
+        close(normal_projection.y, expected.y, 1e-10);
+    }
+
+    #[test]
+    fn inverse_projection_obeys_active_boundaries() {
+        let sampled = plane(
+            [-2.0, 4.0],
+            [10.0, 20.0],
+            DVec3::zeros(),
+            DVec3::new(6.0, 0.0, 0.0),
+            DVec3::new(0.0, 10.0, 0.0),
+        );
+        let uv = sampled.uv_from_point(DVec3::new(-7.0, 4.0, 3.0)).unwrap();
+        close(uv.x, -2.0, 0.0);
+        close(uv.y, 14.0, 1e-10);
+    }
+
+    #[test]
+    fn inverse_projection_is_invariant_to_domain_and_length_scale() {
+        for scale in [1e-9, 1e9] {
+            let sampled = plane(
+                [1e6, 1e6 + 1e-5],
+                [-3e-7, 8e-7],
+                DVec3::zeros(),
+                DVec3::new(scale, 0.0, 0.0),
+                DVec3::new(0.0, 2.0 * scale, 0.0),
+            );
+            let expected = DVec2::new(1e6 + 0.63e-5, -3e-7 + 0.24 * 1.1e-6);
+            let uv = sampled.uv_from_point(sampled.surf.point(expected)).unwrap();
+            close(uv.x, expected.x, 2e-10);
+            close(uv.y, expected.y, 2e-16);
+        }
+    }
+
+    #[test]
+    fn inverse_projection_resolves_thin_patch_direction() {
+        let sampled = plane(
+            [0.0, 1.0],
+            [0.0, 1.0],
+            DVec3::zeros(),
+            DVec3::new(1.0, 0.0, 0.0),
+            DVec3::new(0.0, 1e-12, 0.0),
+        );
+        let uv = sampled
+            .uv_from_point(DVec3::new(0.35, 0.73e-12, 2e-12))
+            .unwrap();
+        close(uv.x, 0.35, 1e-10);
+        close(uv.y, 0.73, 1e-10);
+    }
+
+    #[test]
+    fn inverse_projection_handles_a_singular_derivative_direction() {
+        let sampled = plane(
+            [0.0, 1.0],
+            [0.0, 1.0],
+            DVec3::zeros(),
+            DVec3::new(4.0, 0.0, 0.0),
+            DVec3::zeros(),
+        );
+        let uv = sampled.uv_from_point(DVec3::new(1.24, 2.0, 0.0)).unwrap();
+        close(uv.x, 0.31, 1e-10);
+        assert!((0.0..=1.0).contains(&uv.y));
+    }
+
+    #[test]
+    fn inverse_projection_finds_the_nearby_sheet_not_the_nearby_sample() {
+        // Two close parallel strips joined above the target. The nearest
+        // grid sample belongs to the left strip, but the target is on the
+        // right strip. Newton on the left stops at an off-surface minimum.
+        // The separation is below the subdivision distance resolution: that
+        // budget must not suppress retries in distinct projection basins.
+        let controls: Vec<Vec<DVec3>> = [(0., 0.1), (0., 0.8), (1e-10, 1.), (1e-10, 0.)]
+            .iter()
+            .map(|&(x, y)| [0., 1.].iter().map(|&z| DVec3::new(x, y, z)).collect())
+            .collect();
+        let u = KnotVector::from_multiplicities(1, &[0., 1., 2., 3.], &[2, 1, 1, 2]);
+        let v = KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]);
+        let target = DVec3::new(1e-10, 0.5, 0.33);
+        let polynomial = SampledSurface::new(NDBSplineSurface::new(
+            true,
+            true,
+            u.clone(),
+            v.clone(),
+            controls.clone(),
+        ));
+        let uv = polynomial.uv_from_point(target).unwrap();
+        assert!(uv.x > 2.);
+        assert!((polynomial.surf.point(uv) - target).norm() < 1e-12);
+        let rational = SampledSurface::new(NDBSplineSurface::new(
+            true,
+            true,
+            u,
+            v,
+            controls
+                .iter()
+                .zip([0.25, 0.5, 2., 1.].iter())
+                .map(|(row, &w)| {
+                    row.iter()
+                        .map(|p| nalgebra_glm::DVec4::new(p.x * w, p.y * w, p.z * w, w))
+                        .collect()
+                })
+                .collect(),
+        ));
+        let uv = rational.uv_from_point(target).unwrap();
+        assert!(uv.x > 2.);
+        assert!((rational.surf.point(uv) - target).norm() < 1e-12);
+    }
+
+    #[test]
+    fn projection_domain_is_bounded_even_for_closed_surfaces() {
+        let sampled = SampledSurface::new(NDBSplineSurface::new(
+            false,
+            true,
+            KnotVector::from_multiplicities(1, &[2.0, 5.0], &[2, 2]),
+            KnotVector::from_multiplicities(1, &[-7.0, -3.0], &[2, 2]),
+            vec![vec![DVec3::zeros(); 2]; 2],
+        ));
+        for parameter in [-100.0_f64, -2.0, 0.0, 2.0, 3.0, 100.0] {
+            assert_eq!(
+                sampled.constrain_uv(DVec2::new(parameter, -100.0)),
+                DVec2::new(parameter.clamp(2.0, 5.0), -7.0),
+            );
+        }
+        for endpoint in [2.0, 5.0] {
+            assert_eq!(
+                sampled.constrain_uv(DVec2::new(endpoint, 100.0)),
+                DVec2::new(endpoint, -3.0),
+            );
+        }
+    }
 
     #[test]
     fn samples_only_the_valid_knot_domain() {

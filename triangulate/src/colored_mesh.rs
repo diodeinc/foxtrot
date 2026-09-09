@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 use std::convert::TryFrom;
-
 use crate::mesh::Mesh;
 use crate::stats::Stats;
 use crate::triangulate::triangulate;
@@ -73,26 +72,6 @@ impl ColoredSubmesh {
     }
 }
 
-/// Lightweight statistics from tessellation.
-#[derive(Debug, Clone)]
-pub struct TessellationDiagnostics {
-    pub num_shells: usize,
-    pub num_faces: usize,
-    pub num_errors: usize,
-    pub num_panics: usize,
-}
-
-impl From<&Stats> for TessellationDiagnostics {
-    fn from(s: &Stats) -> Self {
-        Self {
-            num_shells: s.num_shells,
-            num_faces: s.num_faces,
-            num_errors: s.num_errors,
-            num_panics: s.num_panics,
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -103,13 +82,14 @@ impl From<&Stats> for TessellationDiagnostics {
 /// colour-bucketed geometry without pulling in the `step` crate directly.
 pub fn tessellate_step_bytes(
     step_bytes: &[u8],
-) -> Result<(TessellatedMesh, TessellationDiagnostics), String> {
-    let flattened = step::step_file::StepFile::strip_flatten(step_bytes);
-    let step = step::step_file::StepFile::parse(&flattened);
+) -> Result<(TessellatedMesh, Stats), String> {
+    let flattened = step::step_file::StepFile::strip_flatten(step_bytes)
+        .map_err(|e| e.to_string())?;
+    let step = step::step_file::StepFile::parse(&flattened)
+        .map_err(|e| e.to_string())?;
     let (mesh, stats) = triangulate(&step);
-    let diag = TessellationDiagnostics::from(&stats);
     let tess = group_mesh_by_color(&mesh)?;
-    Ok((tess, diag))
+    Ok((tess, stats))
 }
 
 /// Group an already-triangulated `Mesh` into per-colour sub-meshes.

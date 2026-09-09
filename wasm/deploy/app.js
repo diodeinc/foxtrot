@@ -4,7 +4,7 @@ import * as SCENE from './scene.js';
 
 const worker = new Worker("worker.js");
 const setStatus = function(s) {
-    document.getElementById("status").innerHTML = s;
+    document.getElementById("status").textContent = s;
     loadTimeShowing = false;
 };
 let startTime, loadTimeShowing = false;
@@ -15,15 +15,25 @@ SCENE.addCameraCallback(function () {
 });
 
 worker.onmessage = function(e) {
+    const outcome = e.data;
+    if (outcome.completion === "failed") {
+        setStatus("Could not process STEP: " + outcome.failures[0].message);
+        fileSelector.disabled = false;
+        exampleSelector.disabled = false;
+        return;
+    }
     setStatus("Building scene...");
-    SCENE.loadMesh(e.data);
+    SCENE.loadMesh(outcome.triangles);
     fileSelector.disabled = false;
     exampleSelector.disabled = false;
     const d = new Date();
     const now = d.getTime();
     const dt_sec = (now - startTime) / 1000.0;
-    setStatus("Loaded in " + dt_sec.toPrecision(3) + " sec");
-    loadTimeShowing = true;
+    const suffix = outcome.completion === "partial"
+        ? " (partial: " + outcome.failures.length + " failed entities)" : "";
+    setStatus("Loaded in " + dt_sec.toPrecision(3) + " sec" + suffix);
+    // Camera movement may clear the timing, never a partial-model warning.
+    loadTimeShowing = outcome.completion === "complete";
     if (targetAxis) {
         if (targetAxis == "X") {
             SCENE.axisX();

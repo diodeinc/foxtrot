@@ -35,6 +35,12 @@ python3 -m http.server --directory deploy # or the simple server of your choice
 Then, open the local server's URL (typically `127.0.0.1:8000`)
 and select a sample file from the list.
 
+The deploy directory links to the generated `pkg/wasm.js` and
+`pkg/wasm_bg.wasm`; rebuild them after Rust changes. The worker transfers a
+`Float32Array` plus completion and source-identified failure records, rather
+than treating a partial mesh as a successful conversion. Partial-load warnings
+remain visible when the camera moves.
+
 ## Subsystems
 - `cdt`: Constrained Delaunay triangulation (standalone)
 - `express`: Parser for EXPRESS schemas files and a matching code generation
@@ -81,8 +87,143 @@ The new harness requires Python 3.10+ and uses only the standard library unless
 you enable OCCT. It recursively discovers `.step`/`.stp` files, regardless of
 extension case. Each model runs in a separate process with a hard timeout;
 on POSIX the harness kills the worker process group and reaps the worker.
-Partial tessellation, panics, crashes, empty/nonfinite/degenerate meshes, and
-oracle failures produce a nonzero exit code, not a misleading success.
+Partial tessellation, panics, crashes, nonfinite browser attributes, empty or
+entirely collapsed browser meshes, and oracle failures produce a nonzero exit.
+The worker evaluates the same centered f32 position/normal/color buffer as
+Three.js, produced from f64 geometry by `Mesh::to_triangle_buffer`.
+
+Isolated collapsed triangles, zero normals, and f64 degenerates remain explicit
+`quality_diagnostics`, not automatic whole-model failures. `ok` means processing
+and browser-buffer checks passed, **not** that visual quality is established.
+Review flagged models at useful viewing scales for holes, silhouette errors,
+and shading defects. No triangles are deleted or vertices merged to pass checks.
+STL remains a world-coordinate diagnostic for coarse measurements and optional
+OCCT comparison; its f32 precision does not gate browser output. Reports identify
+their classification basis. Worker protocol schema 2 is required; old aggregate
+counter and STL-fallback workers are intentionally unsupported.
+
+For fast browser-only iteration, use `--meshes none`: the worker computes the
+same browser diagnostics but skips STL serialization, disk writes and Python
+geometry validation. Use `--meshes all` on a focused selection when you need
+world-coordinate geometry or `--occt`. Reports list failures and quality-review
+cases before unflagged successes. `review-manifest.json` selects failures and
+quality-flagged models with their source hashes; replay it with `--manifest`
+to investigate only that set, without another full scan.
+
+To capture the exact browser buffer for a Three.js reproduction:
+```sh
+target/release/examples/corpus_worker model.step metrics.json - browser.bin
+```
+`browser.bin` contains little-endian f32 values with stride nine: position,
+normal, color, expanded three vertices per triangle. No STEP reparsing or
+alternate mesh conversion is required on the JavaScript side.
+
+### Performance iteration in under five minutes
+
+Use the fixed seven-model stress/control sample rather than a full corpus
+sweep. It covers winding surfaces, a capacitor, a connector, a planar control
+and a degenerate-torus cap. Inputs are hash-pinned in
+`scripts/performance-sample.json`, relative to `local/` (the Wurth and KiCad
+corpora must already be present).
+
+Native phase instrumentation is opt-in through the `profiling` feature.
+Repository examples enable it automatically; normal library consumers do not
+pay for phase clocks or accumulation. Browser builds always omit it.
+
+```sh
+CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo build --release -p triangulate --example profile
+python3 scripts/performance.py local --output local/perf-before
+
+# After changing and rebuilding the profile worker:
+python3 scripts/performance.py local --output local/perf-after \
+  --compare local/perf-before/results.json
+```
+
+The capture runs two fresh processes per model, serially on one Rayon thread.
+Its default global budget is 240 seconds; unfinished samples are explicit
+failures, not omitted passes. Builds are a separate step. `report.md` and
+`results.json` record elapsed/CPU stage timings, inclusive internal phases and
+call counts, peak RSS, geometry/storage counts, raw samples, input/worker
+hashes and before/after time/memory ratios. The initial complete capture took
+136 seconds in the development orb.
+
+This measures read → flatten → parse → tessellate → browser buffer, not STL,
+OCCT or color-grouped export. RSS is cumulative process high-water memory,
+not live allocation size; do not add the stage peaks or nested phase timings.
+No warmup or cache flush is performed. Use the same machine and sample for
+comparisons, and run the correctness harness separately before accepting a
+speedup. The profiler takes its thread-local timing snapshot inside the same
+single-worker pool that performs tessellation.
+
+### Real Diode board-to-scene benchmark
+
+`scripts/board-corpus.json` lists 40 Diode board repositories. The acquisition
+command shallow-clones them and inventories **every** `.kicad_pcb`, including
+reference and vendored module layouts. Existing checkouts are not updated.
+Unavailable repositories and LFS pointers remain explicit coverage gaps.
+Configure Git credentials outside the transcript for private repositories.
+
+```sh
+python3 scripts/board_benchmark.py fetch
+gh repo clone diodeinc/diode local/diode-benchmark -- --depth 1
+python3 scripts/build_board_worker.py --diode local/diode-benchmark
+python3 scripts/board_benchmark.py run --output local/board-bench/before
+
+# After changing Foxtrot, rebuild the worker, then compare identical boards:
+python3 scripts/build_board_worker.py --diode local/diode-benchmark
+python3 scripts/board_benchmark.py run --output local/board-bench/after \
+  --compare local/board-bench/before/results.json
+```
+
+Use a dedicated Diode checkout. The builder inserts asserted, recorded
+diagnostic logging and a timer around its Foxtrot API call, because the
+production adapter otherwise discards partial-tessellation diagnostics.
+`timings.foxtrot_call_secs` excludes Diode model decoding, placement, board
+geometry and scene serialization. This does not change scene
+generation or error handling. Unknown source drift is rejected. `build.json`
+records revisions, diff/source/worker hashes, compiler and resolved dependency
+identities; the generated Cargo lockfile is retained in the build directory.
+Cargo metadata verifies Diode uses **this checkout's** Foxtrot, not its pinned
+upstream dependency. Initial integration uses Diode revision
+`0bc053a26e30019465eccb14c9210dd06eb2c87f`.
+
+To measure another Foxtrot revision, pass `--foxtrot /path/to/worktree` to the
+builder. Older revisions returning diagnostic fields rather than methods
+also need `--diagnostics fields`. Keep separate copies of each executable,
+build metadata and lockfile before rebuilding. Cross-version comparisons must
+check the recorded Diode revision and uninstrumented source hash; the logging
+adapter differs only to read the two diagnostic APIs. Report changed face
+coverage and component triangle counts alongside API time, rather than calling
+different meshes equivalent work. Whole-scene RSS is not Foxtrot-only memory.
+
+The worker calls the actual web pipeline: `parse_kicad_pcb`,
+`placements_with_dnp(..., true)`, full `prepare_scene`, then `serialize_scene`.
+It includes board geometry, color-grouped world-space component meshes,
+instancing, viewer metadata and serialization. It does not use the normalized
+Foxtrot demo buffer or the metadata-omitting `prepare_scene_headless` shortcut.
+Only embedded STEP models are resolved, matching Diode; external library paths
+are not silently replaced or fetched. Each unique embedded name is tessellated
+once per board, with no cross-board mesh cache.
+
+The suite runs fresh processes serially, twice per board, with a 240-second
+capture budget and 120-second per-board timeout. Increase `--budget` for a
+larger full sweep; exhausted samples are listed, never omitted. Native wall,
+CPU and peak RSS measurements exclude builds, network access, GPU rendering
+and browser/WASM startup. Validation runs after the timed scene serialization.
+The first accessible subset (32 boards in seven repositories) takes about
+14 seconds for 64 samples. This is not a browser latency measurement.
+
+JSON retains stage times, model/placement/mesh counts, output sizes, diagnostics
+and per-sample logs. `missing_models` includes footprints without models or
+with unresolved/unsupported sources; it is distinct from `partial` Foxtrot
+processing. Exit 1 indicates incomplete corpus/model coverage or a processing
+failure, even when all accessible boards generate scenes. Comparisons require
+matching inputs and instrumentation, and omit timing ratios when processing
+coverage or mesh counts change. No mesh blobs are retained by default.
+
+```sh
+python3 -m unittest discover -s scripts -p 'test_board_benchmark.py'
+```
 
 ### Select, benchmark, compare
 
@@ -114,24 +255,26 @@ The manifest records relative paths, sizes, and SHA-256 hashes, so duplicate
 basenames cannot collide and replay rejects changed inputs. A fixed seed repeats
 selection for an unchanged corpus; use the manifest to freeze it as the library
 grows. Comparisons require the same selected paths and contents, report changed
-face/triangle counts and increased error/warning counts, and reject incompatible
+face/triangle counts and increased tessellation failures, and reject incompatible
 benchmark settings when timing is gated. Counts changing is a review signal,
 not necessarily a bug. Any current functional failure still fails the run even
-if it existed in the baseline. Old `regression_test` commands remain available,
-but their basename-keyed JSON is not compatible: record a fresh baseline.
+if it existed in the baseline. The old thread-based `regression_test` executable
+is removed; use this process-isolated harness and record a fresh baseline instead
+of importing its basename-keyed JSON.
 
 ### Debug and close the loop
 
 Each new output directory contains:
 
-- `report.md`: failures first, then slow models, with links to diagnostics.
+- `report.md`: failures and quality-review cases first, with links to diagnostics.
 - `results.json`: machine-readable report and baseline, including geometry metrics.
 - `manifest.json`: exact replayable selection, with input hashes.
+- `review-manifest.json`: replayable failures and quality-review cases.
 - `progress.jsonl`: flushed completed results; per-case results also survive interruption.
 - `cases/<path-hash>/`: per-invocation logs/backtraces, worker metrics, a reproduction
-  command in `result.json`, and binary STL meshes. Failed meshes are retained by
-  default; `--meshes all` or `--compare` retains successful meshes too, so baseline
-  changes remain inspectable. Inputs are not copied.
+  command in `result.json`, and any requested binary STL meshes. Failed meshes are
+  retained by default; `--meshes none` writes no STL, while `--meshes all` or
+  `--compare` retains successful meshes too. Inputs are not copied.
 
 ```sh
 # Recheck just failures, with verbose Rust diagnostics and saved meshes.
@@ -155,28 +298,88 @@ concurrency or use OS/container limits for untrusted or very large inputs.
 
 ```sh
 python3 -m venv local/occt-env
-local/occt-env/bin/pip install cadquery-ocp
+local/occt-env/bin/pip install cadquery-ocp libigl
 local/occt-env/bin/python scripts/corpus.py examples --occt \
   --meshes all --output local/oracle
 ```
 
-OCCT independently reads STEP and emits a millimeter-scale STL with 0.1 mm
-linear and 0.1 rad angular deflection. The harness compares bounds and surface
-area, not triangle counts: tessellators need not produce identical triangles.
+OCCT independently reads STEP and emits a millimeter-scale STL with 0.01 mm
+linear and 0.1 rad angular deflection. The transferred shape must pass OCCT's
+`BRepCheck_Analyzer` before meshing. Every transferred face must have triangles;
+a partial reference is retained for diagnosis but rejected for comparison.
+Models OCCT rejects or cannot completely tessellate are outside the repair
+corpus: retain their diagnostics and omit them from the active replay manifest,
+rather than counting them as Foxtrot passes. A timeout or tool-installation error
+alone is not an established model rejection. OCCT validity describes its
+transferred shape, not a proof of original STEP conformance.
+In addition to bounds and area, the harness compares **bidirectional sampled
+point-to-triangle distances** using libigl's native AABB hierarchy. Mesh transport
+is memory-mapped and only one target hierarchy exists at a time. libigl is an
+optional offline-tool dependency, not linked into the Rust or browser code.
+Use `--jobs 1` for large models: OCCT reference generation can itself be expensive.
+OCCT meshing runs serially within each job; it does not create another parallel
+meshing pool. Reuse retained reference meshes with `compare_meshes` when iterating
+on native geometry, rather than regenerating unchanged references for each trial.
+Foxtrot → OCCT detects extra/displaced surfaces; OCCT → Foxtrot
+detects missing surfaces. There is no alignment, rescaling, mesh repair or vertex
+correspondence: different triangulations can represent the same surface.
+
+Each direction uses 10,000 seeded, area-weighted samples plus up to 10,000 face
+centroids to probe smaller faces. `--surface-samples` controls that budget.
+`--surface-tolerance` defaults to **0.1 mm**; the worst sampled distance in both
+directions must be within it. Choose tolerances appropriate to the part's smallest
+important features; this default is not an accuracy guarantee. `oracle.json`
+records p50/p95/p99, RMS, the worst sampled distance and its coordinates, and the
+area-sampled fraction outside tolerance. Percentiles/fractions use only the
+area-weighted samples; the maximum also includes the face probes.
+
 Defaults are 5% relative tolerance and 0.01 mm absolute bounds tolerance;
 adjust `--relative-tolerance` and `--absolute-tolerance` for your models.
 Bounds allow absolute tolerance + relative tolerance × reference diagonal;
 area allows absolute tolerance squared + relative tolerance × reference area.
 Signed volume is diagnostic only because STEP can contain open shells or
-inconsistent winding. **This is a coarse oracle, not proof of mesh equivalence:**
-matching bounds/area can miss local defects, holes, and topology errors.
-Both meshes and detailed deltas are kept on a mismatch. Missing OCCT or failed
-conversion is an explicit failure, never a silently skipped check.
+inconsistent winding. Zero-area STL facets are counted but excluded from the
+distance query; they do not block comparison of the remaining surface. Neither
+exported mesh is modified. Empty/nonfinite/zero-area meshes are not comparable.
+
+**Agreement is evidence, not proof:** sampling can miss tiny holes; it does not
+certify Hausdorff distance, topology, watertightness, winding or shading. OCCT can
+also be wrong. Both STL transports have world-coordinate f32 rounding, so extreme
+coordinate offsets or very tight tolerances need a higher-precision follow-up.
+Both meshes and detailed deltas are kept on a mismatch. Conversion and distance
+queries run together in the timeout-isolated oracle subprocess. Missing optional
+dependencies or failed conversion is an explicit failure, never a skipped check.
+Reports record comparison settings and dependency versions. Re-record old OCCT
+baselines: aggregate-only acceptance is not equivalent to surface agreement.
+
+### Visual oracle review
+
+Generate a three-pane browser report for every `oracle_mismatch` in a retained
+corpus run. The panes share camera, scale and lighting; rotation, zoom and
+wireframe controls support inspection beyond the initial view.
+
+```sh
+python3 scripts/oracle_report.py local/before --after local/after \
+  --output local/visual-report
+python3 -m http.server 8090 --directory local/visual-report
+```
+
+Both corpus runs must retain meshes and oracle measurements for the same input
+hashes. `--after` is required: every comparison shows genuine baseline, current
+Foxtrot, and OCCT meshes rather than substituting the baseline for a missing
+output. The generator downloads pinned Three.js 0.180.0 modules and its license once into the output;
+viewing needs no external assets. Geometry uses neutral flat shading, not STEP
+colors or the application's vertex-normal pipeline. Serve only the generated
+directory, not the repository or corpus roots. In an orb, use a supervised
+service with a portal to share the report.
 
 Harness tests (no Rust build or corpus download required):
 ```sh
 python3 -m unittest discover -s scripts -p 'test_corpus*.py'
 ```
+Run the same command with `local/occt-env/bin/python` to include the optional
+surface-distance tests (different triangulations, displaced/missing faces and
+zero-area facets).
 
 To extract STEP models embedded in a KiCad board or footprint for local
 testing, use `scripts/extract_steps.py` (requires `pip install zstandard`).

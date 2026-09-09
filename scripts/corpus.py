@@ -22,7 +22,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from threading import Event
 
-from corpus_geometry import compare_meshes, mesh_metrics
+from corpus_geometry import mesh_metrics
 
 REPO = Path(__file__).resolve().parents[1]
 SCHEMA = 1
@@ -117,10 +117,13 @@ def load_report(path):
         seen.add(result["path"])
         metrics = result.get("metrics", {})
         if not isinstance(metrics, dict) or any(
-            type(v) not in (int, float) or not math.isfinite(v) or v < 0
+            type(v) in (int, float) and (not math.isfinite(v) or v < 0)
             for v in metrics.values()
         ):
             raise ValueError(f"invalid metrics for {result['path']}")
+        for key in ("triangles", "vertices", "faces", "shells"):
+            if key in metrics and not isinstance(metrics[key], int):
+                raise ValueError(f"invalid metrics for {result['path']}")
         if result["status"] == "ok":
             timing = result.get("timing")
             if not isinstance(timing, dict) or not isinstance(
@@ -190,7 +193,7 @@ def run_file(entry, args):
         str(args.worker),
         str(source),
         str(directory / "metrics.json"),
-        str(directory / "mesh.stl"),
+        "-" if args.meshes == "none" else str(directory / "mesh.stl"),
     ]
     result["reproduce"] = shlex.join(
         ["env", f"RAYON_NUM_THREADS={args.threads}", "RUST_BACKTRACE=1"] + command
@@ -208,6 +211,31 @@ def run_file(entry, args):
                 result["failure"] = sample
                 break
             metrics = json.loads(metrics_path.read_text())
+            if metrics.get("schema") != 2:
+                raise ValueError("unsupported worker schema")
+            if metrics.get("status") == "input_error":
+                result["status"] = "input_error"
+                result["diagnostics"] = metrics
+                break
+            if metrics.get("status") != "ok":
+                raise ValueError("invalid worker status")
+            failures = metrics.get("failures")
+            completion = metrics.get("completion")
+            if completion not in ("complete", "partial") or not isinstance(
+                failures, list
+            ):
+                raise ValueError("invalid tessellation diagnostics")
+            if (completion == "complete") != (not failures):
+                raise ValueError("completion disagrees with failures")
+            for failure in failures:
+                if (
+                    not isinstance(failure, dict)
+                    or not isinstance(failure.get("entity_id"), int)
+                    or failure.get("kind")
+                    not in ("geometry", "unsupported", "panic", "invalid_entity")
+                    or not isinstance(failure.get("message"), str)
+                ):
+                    raise ValueError("invalid tessellation failure")
             required = (
                 "read_ms",
                 "parse_ms",
@@ -217,40 +245,82 @@ def run_file(entry, args):
                 "vertices",
                 "faces",
                 "shells",
-                "errors",
-                "panics",
-                "log_warn",
-                "log_error",
             )
+            browser_required = (
+                "browser_nonfinite",
+                "browser_triangles",
+                "browser_degenerate",
+                "browser_zero_normals",
+            )
+            browser_supplied = [k for k in browser_required if k in metrics]
+            if browser_supplied and len(browser_supplied) != len(browser_required):
+                raise ValueError("incomplete browser worker metrics")
+            degenerate_f64 = metrics.get("degenerate_f64", 0)
             if any(
-                not isinstance(metrics.get(k), (int, float))
-                or not math.isfinite(metrics[k])
-                or metrics[k] < 0
-                for k in required
+                not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+                for value in [metrics.get(k) for k in required]
+                + [metrics[k] for k in browser_supplied]
+                + [degenerate_f64]
             ):
                 raise ValueError("invalid worker metrics")
-            geometry = mesh_metrics(directory / "mesh.stl")
-            if geometry["triangle_count"] != metrics["triangles"]:
+            browser_metrics = "browser_triangles" in metrics
+            if browser_metrics and (
+                metrics["browser_triangles"] != metrics["triangles"]
+                or metrics["browser_degenerate"] > metrics["browser_triangles"]
+                or metrics["browser_zero_normals"] > metrics["browser_triangles"] * 3
+            ):
+                raise ValueError("inconsistent browser worker counts")
+            mesh_path = directory / "mesh.stl"
+            geometry = mesh_metrics(mesh_path) if mesh_path.exists() else None
+            if not browser_metrics:
+                raise ValueError("worker omitted browser diagnostics")
+            if (
+                geometry is not None
+                and geometry["triangle_count"] != metrics["triangles"]
+            ):
                 raise ValueError("worker triangle count does not match exported mesh")
             sample.update(metrics)
             sample["process_ms"] = metrics["parse_ms"] + metrics["triangulate_ms"]
+            deterministic = [
+                "triangles",
+                "faces",
+                "completion",
+                "failures",
+                "degenerate_f64",
+            ]
+            if browser_metrics:
+                deterministic += [
+                    "browser_nonfinite",
+                    "browser_triangles",
+                    "browser_degenerate",
+                    "browser_zero_normals",
+                ]
             if "metrics" in result and any(
-                result["metrics"][k] != metrics[k]
-                for k in (
-                    "triangles",
-                    "faces",
-                    "errors",
-                    "panics",
-                    "log_warn",
-                    "log_error",
-                )
+                result["metrics"].get(k) != metrics.get(k) for k in deterministic
             ):
                 result["status"] = "nondeterministic"
             result["metrics"] = metrics
-            result["geometry"] = geometry
-            if metrics["errors"] or metrics["panics"] or metrics["log_error"]:
+            if geometry is not None:
+                result["geometry"] = geometry
+            result["classification"] = {
+                "basis": "browser_f32_triangle_buffer",
+                "visual_verification": False,
+            }
+            result["quality_diagnostics"] = {
+                "browser_degenerate_triangles": metrics.get("browser_degenerate", 0),
+                "browser_zero_normal_vertices": metrics.get("browser_zero_normals", 0),
+                "degenerate_f64_review": degenerate_f64,
+            }
+            result["diagnostics"] = {"completion": completion, "failures": failures}
+            if failures:
                 result["status"] = "tessellation_error"
-            elif not geometry["validation"]["valid"]:
+            elif browser_metrics and (
+                metrics["browser_nonfinite"]
+                or not metrics["browser_triangles"]
+                or metrics["browser_degenerate"] >= metrics["browser_triangles"]
+            ):
                 result["status"] = "invalid_mesh"
             if index >= args.warmup:
                 result["samples"].append(sample)
@@ -280,6 +350,18 @@ def run_file(entry, args):
                     str(REPO / "scripts/corpus_geometry.py"),
                     str(source),
                     str(directory / "occt.stl"),
+                    "--compare",
+                    str(directory / "mesh.stl"),
+                    "--report",
+                    str(directory / "oracle.json"),
+                    "--relative-tolerance",
+                    str(args.relative_tolerance),
+                    "--absolute-tolerance",
+                    str(args.absolute_tolerance),
+                    "--surface-tolerance",
+                    str(args.surface_tolerance),
+                    "--surface-samples",
+                    str(args.surface_samples),
                 ],
                 directory / "occt.log",
                 args.timeout,
@@ -293,15 +375,10 @@ def run_file(entry, args):
                     result["status"] = "oracle_error"
                     if (directory / "occt.stl").exists():
                         result["oracle_geometry"] = mesh_metrics(directory / "occt.stl")
-                        if not result["oracle_geometry"]["validation"]["valid"]:
+                        if not result["oracle_geometry"]["comparable"]:
                             result["status"] = "oracle_invalid_mesh"
             else:
-                result["oracle"] = compare_meshes(
-                    directory / "mesh.stl",
-                    directory / "occt.stl",
-                    args.relative_tolerance,
-                    args.absolute_tolerance,
-                )
+                result["oracle"] = json.loads((directory / "oracle.json").read_text())
                 if not result["oracle"]["passed"]:
                     result["status"] = "oracle_mismatch"
         if digest(source) != entry["sha256"]:
@@ -325,8 +402,14 @@ def compare(results, baseline, config, threshold):
     changes = []
     old = {r["path"]: r for r in baseline["results"]}
     current = {r["path"]: r for r in results}
-    for key in ("occt", "relative_tolerance", "absolute_tolerance"):
-        if baseline["config"][key] != config[key]:
+    for key in (
+        "occt",
+        "relative_tolerance",
+        "absolute_tolerance",
+        "surface_tolerance",
+        "surface_samples",
+    ):
+        if baseline["config"].get(key) != config.get(key):
             changes.append(f"validation configuration changed: {key}")
     for name in sorted(old.keys() ^ current.keys()):
         changes.append(f"{name}: missing from current run or baseline")
@@ -341,11 +424,10 @@ def compare(results, baseline, config, threshold):
             continue
         if before["status"] == "ok" and after["status"] != "ok":
             changes.append(f"{name}: ok -> {after['status']}")
-        for key in ("errors", "panics", "log_warn", "log_error"):
-            if after.get("metrics", {}).get(key, 0) > before.get("metrics", {}).get(
-                key, 0
-            ):
-                changes.append(f"{name}: {key} increased")
+        if len(after.get("diagnostics", {}).get("failures", [])) > len(
+            before.get("diagnostics", {}).get("failures", [])
+        ):
+            changes.append(f"{name}: tessellation failures increased")
         for key in ("triangles", "faces"):
             if before.get("metrics", {}).get(key) != after.get("metrics", {}).get(key):
                 changes.append(f"{name}: {key} changed (inspect mesh)")
@@ -363,27 +445,33 @@ def markdown(report):
         "",
         f"Status counts: {dict(Counter(r['status'] for r in report['results']))}",
         "",
-        "| Model | Status | Median parse + mesh (ms) | Triangles | Diagnostics |",
-        "| --- | --- | ---: | ---: | --- |",
+        "| Model | Status | Median parse + mesh (ms) | Triangles | Quality review | Diagnostics |",
+        "| --- | --- | ---: | ---: | --- | --- |",
     ]
     for r in sorted(
         report["results"],
         key=lambda r: (
             r["status"] == "ok",
+            not any(r.get("quality_diagnostics", {}).values()),
             -r.get("timing", {}).get("process_ms", {}).get("median", 0),
         ),
     ):
         name = r["path"].replace("|", "\\|").replace("\n", " ")
         median = r.get("timing", {}).get("process_ms", {}).get("median", 0)
+        quality = ", ".join(
+            f"{k}: {v}" for k, v in r.get("quality_diagnostics", {}).items() if v
+        )
         lines.append(
-            f"| {name} | {r['status']} | {median:.3f} | {r.get('metrics', {}).get('triangles', '—')} | [artifacts]({r['artifacts']}/result.json) |"
+            f"| {name} | {r['status']} | {median:.3f} | {r.get('metrics', {}).get('triangles', '—')} | {quality or '—'} | [artifacts]({r['artifacts']}/result.json) |"
         )
     lines += ["", "## Baseline changes", ""] + [f"- {c}" for c in report["changes"]]
     lines += [
         "",
         "See manifest.json for exact inputs, results.json for raw samples and configuration,",
         "and cases/*/run-*.log for diagnostics/backtraces. Timing excludes STL export and process startup.",
-        "OCCT checks bounds and area only, not topology or mesh equivalence.",
+        "Each result records whether acceptance used browser f32 triangle-buffer metrics or the legacy strict STL gate; these classifications are not interchangeable fixes or visual verification.",
+        "Browser isolated degenerates, zero normals, and f64 degenerates are named review diagnostics, not strict failures. STL is optional diagnostic/world-unit transport for browser-metric workers.",
+        "OCCT compares bounds, area and bidirectional sampled surface distances. See oracle.json for directional errors and worst points; agreement does not prove topology or mesh equivalence.",
         "",
     ]
     return "\n".join(lines)
@@ -444,10 +532,27 @@ def main(argv=None):
         default=60,
         help="seconds per invocation, including OCCT",
     )
-    parser.add_argument("--meshes", choices=["all", "failures"], default="failures")
+    parser.add_argument(
+        "--meshes",
+        choices=["none", "all", "failures"],
+        default="failures",
+        help="none skips STL export and validation; requires a browser-metric worker",
+    )
     parser.add_argument("--occt", action="store_true")
     parser.add_argument("--relative-tolerance", type=nonnegative, default=0.05)
     parser.add_argument("--absolute-tolerance", type=nonnegative, default=0.01)
+    parser.add_argument(
+        "--surface-tolerance",
+        type=nonnegative,
+        default=0.1,
+        help="maximum sampled surface distance in millimeters (OCCT)",
+    )
+    parser.add_argument(
+        "--surface-samples",
+        type=positive,
+        default=10000,
+        help="area samples per direction, plus up to this many face probes",
+    )
     parser.add_argument(
         "--compare", type=Path, help="previous results.json (exact corpus required)"
     )
@@ -467,6 +572,8 @@ def main(argv=None):
         )
     if args.timing_threshold is not None and not args.compare:
         parser.error("--timing-threshold requires --compare")
+    if args.meshes == "none" and args.occt:
+        parser.error("--occt requires STL export; use --meshes failures or all")
     args.root, args.output, args.worker = (
         args.root.resolve(),
         args.output.resolve(),
@@ -514,10 +621,13 @@ def main(argv=None):
             "results": [],
             "changes": [],
         }
-        try:
-            report["cadquery_ocp"] = version("cadquery-ocp") if args.occt else None
-        except PackageNotFoundError:
-            report["cadquery_ocp"] = None
+        for package in ("cadquery-ocp", "libigl", "numpy", "scipy"):
+            try:
+                report[package.replace("-", "_")] = (
+                    version(package) if args.occt else None
+                )
+            except PackageNotFoundError:
+                report[package.replace("-", "_")] = None
         # Provenance is informational: the worker hash is authoritative, not checkout HEAD.
         for key, command in [
             ("git_head", ["git", "rev-parse", "HEAD"]),
@@ -556,6 +666,15 @@ def main(argv=None):
                 report["results"], baseline, config, args.timing_threshold
             )
         write_json(args.output / "results.json", report)
+        review = {
+            r["path"]
+            for r in report["results"]
+            if r["status"] != "ok" or any(r.get("quality_diagnostics", {}).values())
+        }
+        write_json(
+            args.output / "review-manifest.json",
+            {"schema": SCHEMA, "files": [e for e in entries if e["path"] in review]},
+        )
         (args.output / "report.md").write_text(markdown(report))
         print(f"Report: {args.output / 'report.md'}")
         return int(

@@ -97,12 +97,21 @@ impl <'a> TypeMap<'a> {
 }
 
 impl<'a> Type<'a> {
+    fn boxed_entity(&self) -> bool {
+        // Large schema records must not inflate every slot in the entity table.
+        // Keep the common point, placement and topology records inline.
+        matches!(self, Type::Entity { attrs, .. } if attrs.len() > 8)
+    }
+
     fn write_enum_variant<W>(&self, name: &str, buf: &mut W) -> std::fmt::Result
         where W: std::fmt::Write
     {
         match self {
-            Type::Entity{..} => writeln!(buf, "    {0}({0}_<'a>),",
-                                         to_camel(name)),
+            Type::Entity{..} => {
+                let payload = format!("{}_<'a>", to_camel(name));
+                writeln!(buf, "    {}({}),", to_camel(name),
+                    if self.boxed_entity() { format!("Box<{}>", payload) } else { payload })
+            },
             _ => Ok(()),
         }
     }
@@ -111,8 +120,8 @@ impl<'a> Type<'a> {
     {
         match self {
             Type::Entity{..} => writeln!(buf,
-                r#"            "{0}" => {1}_::parse_chunks(strs).map(|(s, v)| (s, Entity::{1}(v))),"#,
-                capitalize(name), to_camel(name)),
+                r#"            "{0}" => {1}_::parse_chunks(strs).map(|(s, v)| (s, Entity::{1}({2}))),"#,
+                capitalize(name), to_camel(name), if self.boxed_entity() { "Box::new(v)" } else { "v" }),
             _ => Ok(()),
         }
     }
@@ -478,11 +487,11 @@ use crate::{{
 }};
 use nom::{{
     branch::{{alt}},
-    bytes::complete::tag,
-    character::complete::{{alpha0, alphanumeric1, char}},
-    combinator::{{map, recognize}},
+    bytes::complete::{{tag, take_until}},
+    character::complete::char,
+    combinator::map,
     multi::{{many0}},
-    sequence::{{delimited, pair}},
+    sequence::delimited,
 }};
 use arrayvec::ArrayVec;")?;
 
@@ -500,10 +509,7 @@ pub enum Entity<'a> {{")?;
 }}
 impl<'a> ParseFromChunks<'a> for Entity<'a> {{
     fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {{
-        let (_, r) = recognize(pair(
-            alt((alpha0, tag("_"))),
-            many0(alt((alphanumeric1, tag("_")))),
-        ))(strs[0])?;
+        let (_, r) = take_until("(")(strs[0])?;
         match r {{"#)?;
     for k in &keys {
         type_map.0[k].write_enum_match(k, &mut buf)?;

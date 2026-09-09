@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foxtrot · Surface oracle review</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #10151e; color: #e8edf5; font: 15px system-ui, sans-serif; }
+  header, main { max-width: 1800px; margin: auto; padding: 24px; }
+  header { padding-bottom: 8px; }
+  h1 { margin: 0 0 8px; font-size: 26px; }
+  p { color: #aebccc; line-height: 1.5; }
+  .toolbar { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin: 20px 0; }
+  select, button { background: #263346; color: white; border: 1px solid #576981; border-radius: 5px; padding: 9px; }
+  select { max-width: 100%; }
+  #model { flex: 1; min-width: 200px; }
+  .notice { padding: 12px 16px; background: #30291b; border-left: 3px solid #e3b963; color: #f1d9a9; }
+  .panes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  article { min-width: 0; background: #192331; border: 1px solid #35455b; border-radius: 8px; overflow: hidden; }
+  h2 { font-size: 17px; padding: 15px; margin: 0; }
+  .viewport { height: 440px; position: relative; background: #192331; }
+  .badge { position: absolute; z-index: 1; top: 12px; left: 12px; padding: 6px 9px; border-radius: 4px; background: #8d2f36; color: white; font-weight: 700; letter-spacing: .04em; }
+  .badge[hidden] { display: none; }
+  canvas { width: 100%; height: 100%; display: block; }
+  .metrics { padding: 15px; min-height: 90px; color: #bfccdb; line-height: 1.6; font-variant-numeric: tabular-nums; }
+  #status { color: #a9d9ca; min-height: 24px; }
+  .legend { font-size: 13px; }
+  @media (max-width: 850px) { header, main { padding: 12px; } .viewport { height: 270px; } h2, .metrics { padding: 8px; font-size: 12px; } }
+</style>
+<script type="importmap">{"imports":{"three":"./three.module.js"}}</script>
+<header>
+  <h1>Foxtrot / Surface oracle review</h1>
+  <p>Comparison of all original failures · matched camera, scale and lighting · drag any pane to rotate all three; scroll to zoom.</p>
+  <div class="toolbar">
+    <button id="previous" aria-label="Previous model">←</button>
+    <select id="model" aria-label="Failed model"></select>
+    <button id="next" aria-label="Next model">→</button>
+  </div>
+  <div class="toolbar">
+    <label><input type="checkbox" id="wire"> Wireframe</label>
+    <button id="reset">Reset camera</button>
+  </div>
+  <div id="notice" class="notice"></div>
+</header>
+<main>
+  <div id="status" role="status">Loading report…</div>
+  <div class="panes">
+    <article><h2>01 / Before · Foxtrot</h2><div class="viewport"></div><div class="metrics"></div></article>
+    <article><h2>02 / After · current Foxtrot</h2><div class="viewport"><strong id="afterBadge" class="badge" hidden>UNRESOLVED · NOT FIXED</strong></div><div class="metrics"></div></article>
+    <article><h2>03 / Oracle · OCCT</h2><div class="viewport"></div><div class="metrics"></div></article>
+  </div>
+  <p class="legend">Distances: maximum sampled Foxtrot → OCCT / OCCT → Foxtrot, in mm. Acceptance threshold: 0.1 mm. Sampling is not a correctness proof. Neutral, double-sided, flat-shaded STL rendering compares geometry, not original STEP colors or browser vertex normals. No independent alignment or scaling is applied.</p>
+</main>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from './OrbitControls.js';
+import { STLLoader } from './STLLoader.js';
+const $ = id => document.getElementById(id);
+const rows = await fetch('./report.json').then(r => r.json());
+const loader = new STLLoader();
+let generation = 0, meshes = [], syncing = false, home;
+const views = [...document.querySelectorAll('.viewport')].map(element => {
+  const renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setClearColor(0x192331);
+  element.append(renderer.domElement);
+  const scene = new THREE.Scene();
+  scene.add(new THREE.HemisphereLight(0xd9eaff, 0x58606e, 2.5));
+  const light = new THREE.DirectionalLight(0xffffff, 3);
+  light.position.set(3, -4, 6); scene.add(light);
+  const camera = new THREE.PerspectiveCamera(35, 1, .001, 100000);
+  camera.up.set(0,0,1);
+  const controls = new OrbitControls(camera, renderer.domElement);
+  const view = {renderer, scene, camera, controls, element};
+  controls.addEventListener('change', () => {
+    if (syncing) return;
+    syncing = true;
+    for (const other of views) if (other !== view) {
+      other.camera.position.copy(camera.position); other.camera.quaternion.copy(camera.quaternion);
+      other.controls.target.copy(controls.target); other.controls.update();
+    }
+    syncing = false; render();
+  });
+  return view;
+});
+function render() { for (const v of views) v.renderer.render(v.scene, v.camera); }
+function resize() {
+  for (const v of views) {
+    const {width,height} = v.element.getBoundingClientRect();
+    v.renderer.setSize(width,height,false); v.camera.aspect = width/height; v.camera.updateProjectionMatrix();
+  }
+  render();
+}
+new ResizeObserver(resize).observe(document.querySelector('.panes'));
+function reset() {
+  if (!home) return;
+  syncing = true;
+  for (const v of views) {
+    v.camera.position.copy(home.center).add(new THREE.Vector3(1,-1,0.8).normalize().multiplyScalar(home.distance));
+    v.camera.near = home.radius / 1000; v.camera.far = home.radius * 1000; v.camera.updateProjectionMatrix();
+    v.controls.target.copy(home.center); v.controls.update();
+  }
+  syncing = false; render();
+}
+async function load() {
+  const run = ++generation, row = rows[Number($('model').value)];
+  const unresolved = row.afterStatus !== 'ok';
+  $('status').textContent = 'Loading all three meshes…';
+  $('notice').textContent = `Current Foxtrot status: ${row.afterStatus}; mesh completion: ${row.afterCompletion}. ${row.afterStatus === 'ok' ? 'Passes the sampled oracle check; this is not a correctness proof.' : 'Does not pass the reference comparison. Any partial mesh is diagnostic only.'} ${row.note || ''}`;
+  $('afterBadge').hidden = !unresolved;
+  $('afterBadge').textContent = row.afterCompletion === 'complete' ? 'REFERENCE MISMATCH' : 'PARTIAL MESH · NOT FIXED';
+  try {
+    const geometries = await Promise.all([row.before, row.after, row.reference].map(url => loader.loadAsync(url)));
+    if (run !== generation) { geometries.forEach(g => g.dispose()); return; }
+    meshes.forEach((m,i) => { views[i].scene.remove(m); m.geometry.dispose(); m.material.dispose(); });
+    meshes = geometries.map((geometry,i) => {
+      geometry.computeVertexNormals();
+      const material = new THREE.MeshStandardMaterial({color:0x83b5cf, roughness:.65, metalness:.12, side:THREE.DoubleSide, flatShading:true, wireframe:$('wire').checked});
+      const mesh = new THREE.Mesh(geometry,material); views[i].scene.add(mesh); return mesh;
+    });
+    const box = new THREE.Box3(); meshes.forEach(m => box.union(new THREE.Box3().setFromObject(m)));
+    const center = box.getCenter(new THREE.Vector3()), radius = box.getSize(new THREE.Vector3()).length()/2;
+    const aspect = Math.min(...views.map(v => v.camera.aspect));
+    home = {center, radius, distance: radius * 1.15 / Math.sin(Math.atan(Math.tan(THREE.MathUtils.degToRad(17.5)) * Math.min(1,aspect)))};
+    const values = [row.beforeDistances, row.afterDistances, null];
+    [...document.querySelectorAll('.metrics')].forEach((e,i) => {
+      e.textContent = geometries[i].getAttribute('position') ? `${(geometries[i].getAttribute('position').count/3).toLocaleString()} triangles` : 'No mesh produced';
+      if (i < 2) e.append(` · ${i === 0 ? row.beforeCompletion || 'unknown' : row.afterCompletion}`);
+      e.append(document.createElement('br'));
+      e.append(values[i] ? `${values[i].map(x => x.toFixed(4)).join(' / ')} mm` : i === 2 ? 'Reference deflection: 0.01 mm / 0.1 rad' : 'Oracle distance unavailable');
+    });
+    reset(); $('status').textContent = `${Number($('model').value)+1} / ${rows.length} — ${row.path}`;
+    document.body.dataset.ready = String(run);
+  } catch (error) { $('status').textContent = `Could not load comparison: ${error.message}`; }
+}
+rows.forEach((r,i) => { const o = new Option(`${i+1}. ${r.path.split('/').pop()}`,i); $('model').add(o); });
+$('model').onchange = load;
+$('previous').onclick = () => { $('model').value = (Number($('model').value)+rows.length-1)%rows.length; load(); };
+$('next').onclick = () => { $('model').value = (Number($('model').value)+1)%rows.length; load(); };
+$('wire').onchange = () => { meshes.forEach(m => m.material.wireframe = $('wire').checked); render(); };
+$('reset').onclick = reset;
+resize(); await load();
+</script>
+</html>

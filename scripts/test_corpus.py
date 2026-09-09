@@ -24,25 +24,45 @@ if mode == 'descendant':
 if mode == 'timeout': time.sleep(30)
 if mode == 'crash': sys.exit(7)
 if mode == 'protocol': sys.exit(0)
-data = dict(read_ms=1, parse_ms=2, triangulate_ms=3, export_ms=4,
-            triangles=1, vertices=3, faces=1, shells=1, errors=0,
-            panics=0, log_warn=0, log_error=0)
-if mode == 'partial': data['errors'] = 1
+data = dict(schema=2, status='ok', message=None, completion='complete', failures=[],
+            read_ms=1, parse_ms=2, triangulate_ms=3, export_ms=4,
+            triangles=1, vertices=3, faces=1, shells=1, degenerate_f64=0,
+            browser_nonfinite=0, browser_triangles=1, browser_degenerate=0,
+            browser_zero_normals=0)
+if mode == 'partial':
+    data.update(completion='partial', failures=[dict(entity_id=42, surface_id=43,
+                kind='geometry', message='could not triangulate')])
+if mode == 'input_error':
+    data.update(status='input_error', completion='failed', message='bad STEP')
 if mode == 'nonfinite': data['parse_ms'] = float('nan')
 if mode == 'counts': data['triangles'] = 2
+if mode == 'f64_invalid': data['degenerate_f64'] = 1
+if mode == 'f64_nonfinite': data['degenerate_f64'] = float('nan')
+if mode.startswith('browser_'):
+    data.update(triangles=2, browser_nonfinite=0, browser_triangles=2, browser_degenerate=0,
+                browser_zero_normals=0)
+if mode == 'browser_some_collapsed': data.update(browser_degenerate=1, browser_zero_normals=3)
+if mode == 'browser_all_collapsed': data['browser_degenerate'] = 2
+if mode == 'browser_nonfinite_components': data['browser_nonfinite'] = 1
+if mode == 'browser_missing': del data['browser_zero_normals']
+if mode == 'browser_f64_invalid': data['degenerate_f64'] = 1
+if mode == 'browser_bad_number': data['browser_degenerate'] = float('nan')
 marker = metrics.with_suffix('.count')
 count = int(marker.read_text()) if marker.exists() else 0
 marker.write_text(str(count + 1))
 if mode == 'vary': data['faces'] += count
+if mode == 'browser_vary': data['browser_zero_normals'] += count
 metrics.write_text(json.dumps(data))
 if mode == 'stale' and count: sys.exit(0)
 if mode == 'invalid':
     mesh.write_bytes(bytes(80) + struct.pack('<I', 0))
-    data['triangles'] = 0
+    data.update(triangles=0, browser_triangles=0)
     metrics.write_text(json.dumps(data))
     sys.exit(0)
-mesh.write_bytes(bytes(80) + struct.pack('<I', 1) +
-                 struct.pack('<12fH', 0,0,0, 0,0,0, 1,0,0, 0,1,0, 0))
+facets = 2 if mode.startswith('browser_') else 1
+mesh.write_bytes(bytes(80) + struct.pack('<I', facets) +
+                 struct.pack('<12fH', 0,0,0, 0,0,0, 1,0,0, 0,1,0, 0) * facets)
+if mode == 'browser_no_stl' or str(mesh) == '-': mesh.unlink()
 print('worker diagnostic')
 """
 
@@ -141,7 +161,7 @@ class CorpusTests(unittest.TestCase):
         self.assertEqual(self.run_harness("first")[0], 2)  # Never clobber artifacts.
 
     def test_failures_are_isolated_reported_and_rerunnable(self):
-        for mode in ("ok", "crash", "timeout", "partial", "protocol"):
+        for mode in ("ok", "crash", "timeout", "partial", "input_error", "protocol"):
             self.model(mode + ".step", mode)
         code, report, output = self.run_harness(
             "failures", "--timeout", "0.3", "--jobs", "2"
@@ -155,6 +175,7 @@ class CorpusTests(unittest.TestCase):
                 "crash.step": "crash",
                 "timeout.step": "timeout",
                 "partial.step": "tessellation_error",
+                "input_error.step": "input_error",
                 "protocol.step": "harness_error",
             },
         )
@@ -162,9 +183,9 @@ class CorpusTests(unittest.TestCase):
             "rerun", "--rerun", str(output / "results.json"), "--timeout", "0.1"
         )
         self.assertEqual(code, 1)
-        self.assertEqual(len(rerun["results"]), 4)
+        self.assertEqual(len(rerun["results"]), 5)
         self.assertTrue(all(r["path"] != "ok.step" for r in rerun["results"]))
-        self.assertEqual(len((output / "progress.jsonl").read_text().splitlines()), 5)
+        self.assertEqual(len((output / "progress.jsonl").read_text().splitlines()), 6)
 
     def test_comparison_requires_same_corpus_content_and_settings(self):
         self.model("one.step")
@@ -193,7 +214,7 @@ class CorpusTests(unittest.TestCase):
         bad_timing = copy.deepcopy(report)
         bad_timing["results"][0]["timing"] = []
         bad_metrics = copy.deepcopy(report)
-        bad_metrics["results"][0]["metrics"]["errors"] = "oops"
+        bad_metrics["results"][0]["metrics"]["triangles"] = "oops"
         for i, value in enumerate(
             [[], None, {"schema": 1}, duplicate, bad_timing, bad_metrics]
         ):
@@ -213,16 +234,70 @@ class CorpusTests(unittest.TestCase):
             "nonfinite": "harness_error",
             "counts": "harness_error",
             "invalid": "invalid_mesh",
+            "f64_invalid": "ok",
+            "f64_nonfinite": "harness_error",
             "vary": "nondeterministic",
-            "stale": "harness_error",
+            "stale": "ok",
         }
         for mode, status in expected.items():
             self.model(mode + ".step", mode)
             code, report, _ = self.run_harness(
                 mode, "--include", mode + ".step", "--repeat", "2"
             )
-            self.assertEqual(code, 1)
+            self.assertEqual(code, int(status != "ok"))
             self.assertEqual(report["results"][0]["status"], status)
+
+    def test_browser_acceptance_and_quality_diagnostics(self):
+        expected = {
+            "browser_some_collapsed": "ok",
+            "browser_all_collapsed": "invalid_mesh",
+            "browser_nonfinite_components": "invalid_mesh",
+            "browser_missing": "harness_error",
+            "browser_bad_number": "harness_error",
+            "browser_f64_invalid": "ok",
+            "browser_no_stl": "ok",
+            "browser_vary": "nondeterministic",
+        }
+        for mode, status in expected.items():
+            with self.subTest(mode=mode):
+                self.model(mode + ".step", mode)
+                code, report, _ = self.run_harness(
+                    "case-" + mode,
+                    "--include",
+                    mode + ".step",
+                    "--repeat",
+                    "2" if mode == "browser_vary" else "1",
+                )
+                result = report["results"][0]
+                self.assertEqual(code, int(status != "ok"))
+                self.assertEqual(result["status"], status)
+                if status != "harness_error":
+                    self.assertEqual(
+                        result["classification"]["basis"],
+                        "browser_f32_triangle_buffer",
+                    )
+        some = json.loads(
+            (self.base / "case-browser_some_collapsed" / "results.json").read_text()
+        )["results"][0]
+        self.assertEqual(some["quality_diagnostics"]["browser_degenerate_triangles"], 1)
+        self.assertEqual(some["quality_diagnostics"]["browser_zero_normal_vertices"], 3)
+        f64 = json.loads(
+            (self.base / "case-browser_f64_invalid" / "results.json").read_text()
+        )["results"][0]
+        self.assertEqual(f64["quality_diagnostics"]["degenerate_f64_review"], 1)
+
+    def test_no_stl_scan_keeps_browser_diagnostics(self):
+        self.model("one.step", "browser_some_collapsed")
+        code, report, output = self.run_harness("fast", "--meshes", "none")
+        self.assertEqual(code, 0)
+        result = report["results"][0]
+        self.assertNotIn("geometry", result)
+        self.assertEqual(result["quality_diagnostics"]["browser_degenerate_triangles"], 1)
+        self.assertFalse(list(output.rglob("*.stl")))
+        self.assertIn("browser_degenerate_triangles: 1", (output / "report.md").read_text())
+        review = json.loads((output / "review-manifest.json").read_text())
+        self.assertEqual([e["path"] for e in review["files"]], ["one.step"])
+        self.assertEqual(review["files"][0]["sha256"], result["sha256"])
 
     def test_timing_gate_and_retained_comparison_meshes(self):
         self.model("one.step")

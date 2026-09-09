@@ -8,13 +8,13 @@ fn checked_in_models_tessellate_without_errors() {
             .join("../examples")
             .join(name);
         let data = std::fs::read(path).expect("Could not read example model");
-        let flat = StepFile::strip_flatten(&data);
-        let step = StepFile::parse(&flat);
+        let flat = StepFile::strip_flatten(&data).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
         let (mesh, stats) = triangulate(&step);
 
         assert!(!mesh.triangles.is_empty(), "{} produced no triangles", name);
         assert!(stats.num_faces > 0, "{} contained no faces", name);
-        assert_eq!(stats.num_errors, 0, "{} had tessellation errors", name);
-        assert_eq!(stats.num_panics, 0, "{} had tessellation panics", name);
+        assert_eq!(stats.num_errors(), 0, "{} had tessellation errors", name);
+        assert_eq!(stats.num_panics(), 0, "{} had tessellation panics", name);
     }
 }

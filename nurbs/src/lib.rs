@@ -17,6 +17,20 @@ mod sampled_surface;
 use smallvec::{SmallVec};
 type VecF = SmallVec<[f64; 8]>;
 
+// Translate homogeneous controls by the Cartesian anchor before accumulating
+// the quotient. A constant Cartesian coordinate then contributes exactly zero
+// to every numerator derivative, even when weights vary.
+fn rational_difference(p: nalgebra_glm::DVec4, origin: nalgebra_glm::DVec4) -> nalgebra_glm::DVec4 {
+    let xyz = p.xyz() - (origin.xyz() / origin.w) * p.w;
+    nalgebra_glm::DVec4::new(xyz.x, xyz.y, xyz.z, p.w - origin.w)
+}
+
+/// Compute `a.norm_squared() - b.norm_squared()` in factored form so a small
+/// resolved change is not erased by subtracting two large squared norms.
+fn squared_norm_difference(a: nalgebra_glm::DVec3, b: nalgebra_glm::DVec3) -> f64 {
+    nalgebra_glm::dot(&(a - b), &(a + b))
+}
+
 pub use crate::abstract_curve::AbstractCurve;
 pub use crate::abstract_surface::AbstractSurface;
 pub use crate::bspline_curve::BSplineCurve;
@@ -27,4 +41,4 @@ pub use crate::nd_surface::NDBSplineSurface;
 pub use crate::nurbs_curve::NURBSCurve;
 pub use crate::nurbs_surface::NURBSSurface;
 pub use crate::sampled_curve::SampledCurve;
-pub use crate::sampled_surface::SampledSurface;
+pub use crate::sampled_surface::{ProjectionScratch, SampledSurface};

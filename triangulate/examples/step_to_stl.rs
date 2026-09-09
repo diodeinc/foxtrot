@@ -24,22 +24,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start = std::time::SystemTime::now();
     let data = std::fs::read(input)?;
-    let flat = StepFile::strip_flatten(&data);
-    let entities = StepFile::parse(&flat);
+    let flat = StepFile::strip_flatten(&data)?;
+    let entities = StepFile::parse(&flat)?;
     let end = std::time::SystemTime::now();
     let since_the_epoch = end.duration_since(start)
         .expect("Time went backwards");
     println!("Loaded + parsed in {:?}", since_the_epoch);
 
     let start = std::time::SystemTime::now();
-    let tri = triangulate(&entities);
+    let (mesh, stats) = triangulate(&entities);
     let end = std::time::SystemTime::now();
     let since_the_epoch = end.duration_since(start)
         .expect("Time went backwards");
     println!("Triangulated in {:?}", since_the_epoch);
 
+    if !stats.is_complete() {
+        for failure in &stats.failures {
+            eprintln!("Entity #{}: {}", failure.entity_id, failure.message);
+        }
+        return Err("refusing to export incomplete tessellation".into());
+    }
     if let Some(o) = matches.value_of("output") {
-        tri.0.save_stl(o)?;
+        mesh.save_stl(o)?;
     }
 
     Ok(())

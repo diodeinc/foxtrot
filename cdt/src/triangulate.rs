@@ -1,1419 +1,369 @@
-use crate::{
-    contour::{Contour, ContourData},
-    Error, Point,
-    half::Half, hull::Hull,
-    indexes::{PointIndex, PointVec, EdgeIndex, HullIndex, EMPTY_EDGE},
-    predicates::{acute, orient2d, in_circle, centroid, distance2, pseudo_angle},
+use spade::{
+    handles::FixedVertexHandle, ConstrainedDelaunayTriangulation, Point2,
+    Triangulation as SpadeTriangulation,
 };
 
-#[derive(Debug)]
-enum Walk {
-    Inside(EdgeIndex),
-    Done(EdgeIndex),
-    /// A collinear intermediate point was found on the src→dst line.
-    /// The caller should lock src→mid, then continue with mid→dst.
-    Through(PointIndex),
-}
+use crate::{Error, Point};
 
-/// This `struct` contains all of the data needed to generate a (constrained)
-/// Delaunay triangulation of a set of input points and edges.  It is a
-/// **low-level** API; consider using the module-level functions if you don't
-/// need total control.
+type Engine = ConstrainedDelaunayTriangulation<Point2<f64>, (), bool>;
+
+/// An incrementally-built constrained Delaunay triangulation.
+///
+/// Each call to [`step`](Self::step) inserts exactly one input point.  After
+/// the last point, one final call installs every constraint and classifies
+/// faces by even/odd boundary parity. Duplicate coordinates share a vertex,
+/// but every input index remains mapped to that vertex.
 pub struct Triangulation {
-    pub(crate) points: PointVec<Point>,    // Sorted in the constructor
-    angles: PointVec<f64>,          // pseudo-angles for each point
-    remap: PointVec<usize>,         // self.points[i] = input[self.remap[i]]
-    next: PointIndex,               // Progress of the triangulation
-    constrained: bool,
-
-    // If a point p terminates fixed edges, then endings[p] will be a tuple
-    // range into ending_data containing the starting points of those edges.
-    endings: PointVec<(usize, usize)>,
-    ending_data: Vec<PointIndex>,
-
-    // This stores the start of an edge (as a pseudoangle) as an index into
-    // the edges array
-    pub(crate) hull: Hull,
-    pub(crate) half: Half,
+    points: Vec<Point>,
+    coordinate_scale: f64,
+    edges: Vec<(usize, usize, bool)>,
+    engine: Engine,
+    input_handles: Vec<FixedVertexHandle>,
+    vertex_input: Vec<usize>,
+    selected: Vec<bool>,
+    next: usize,
+    complete: bool,
 }
 
 impl Triangulation {
-    /// Builds a complete triangulation from the given points
-    ///
-    /// # Errors
-    /// This may return [`Error::EmptyInput`], [`Error::InvalidInput`], or
-    /// [`Error::CannotInitialize`] if the input is invalid.
-    pub fn build(points: & [Point]) -> Result<Triangulation, Error> {
-        let mut t = Self::new(points)?;
-        t.run()?;
-        Ok(t)
+    /// Builds a complete unconstrained triangulation.
+    pub fn build(points: &[Point]) -> Result<Self, Error> {
+        let mut result = Self::new(points)?;
+        result.run()?;
+        Ok(result)
     }
 
-    /// Builds a complete triangulation from the given points and edges.
-    /// The points are a flat array of positions in 2D spaces; edges are
-    /// undirected and expressed as indexes into the points list.
-    ///
-    /// # Errors
-    /// This may return [`Error::EmptyInput`], [`Error::InvalidInput`],
-    /// [`Error::InvalidEdge`], or [`Error::CannotInitialize`] if the input is
-    /// invalid.
-    pub fn build_with_edges<'a, E>(points: &[Point], edges: E)
-        -> Result<Triangulation, Error>
-        where E: IntoIterator<Item=&'a (usize, usize)> + Copy
+    /// Builds a complete triangulation with fixed boundary edges.
+    pub fn build_with_edges<'a, E>(points: &[Point], edges: E) -> Result<Self, Error>
+    where
+        E: IntoIterator<Item = &'a (usize, usize)> + Copy,
     {
-        let mut t = Self::new_with_edges(points, edges)?;
-        t.run()?;
-        Ok(t)
+        let mut result = Self::new_with_edges(points, edges)?;
+        result.run()?;
+        Ok(result)
     }
 
-    /// Builds a complete triangulation from the given points and contours
-    /// (which are represented as indexes into the points array).
-    ///
-    /// # Errors
-    /// This may return [`Error::EmptyInput`], [`Error::InvalidInput`],
-    /// [`Error::InvalidEdge`], [`Error::OpenContour`] or
-    /// [`Error::CannotInitialize`] if the input is invalid.
-    pub fn build_from_contours<V>(points: &[Point], contours: &[V])
-        -> Result<Triangulation, Error>
-        where for<'b> &'b V: IntoIterator<Item=&'b usize>
+    /// Builds a complete triangulation from closed contours.
+    pub fn build_from_contours<V>(points: &[Point], contours: &[V]) -> Result<Self, Error>
+    where
+        for<'a> &'a V: IntoIterator<Item = &'a usize>,
     {
-        let mut t = Self::new_from_contours(points, contours)?;
-        t.run()?;
-        Ok(t)
+        let mut result = Self::new_from_contours(points, contours)?;
+        result.run()?;
+        Ok(result)
     }
 
-    fn validate_input<'a, E>(points: &[Point], edges: E)
-        -> Result<(), Error>
-        where E: IntoIterator<Item=&'a (usize, usize)> + Copy
+    /// Creates an empty engine which will incrementally insert `points`.
+    pub fn new(points: &[Point]) -> Result<Self, Error> {
+        Self::new_with_edges(points, &[])
+    }
+
+    /// Creates an empty engine which will incrementally insert `points` and
+    /// then install `edges` in a final step.
+    pub fn new_with_edges<'a, E>(points: &[Point], edges: E) -> Result<Self, Error>
+    where
+        E: IntoIterator<Item = &'a (usize, usize)> + Copy,
+    {
+        Self::new_with_constraints(points, edges.into_iter().map(|&(a, b)| (a, b, true)))
+    }
+
+    /// Creates an incremental triangulation with tagged constraints `(a, b,
+    /// boundary)`. All constraints prevent edge flips, but only boundaries
+    /// toggle inside/outside parity. Crossings must already be split at shared
+    /// input vertices. With no boundary constraints, emit the full convex hull.
+    pub fn new_with_constraints<E>(points: &[Point], edges: E) -> Result<Self, Error>
+    where
+        E: IntoIterator<Item = (usize, usize, bool)>,
     {
         if points.is_empty() {
-            Err(Error::EmptyInput)
-        } else if points.iter().any(|p| p.0.is_nan() || p.0.is_infinite() ||
-                                        p.1.is_nan() || p.1.is_infinite()) {
-            Err(Error::InvalidInput)
-        } else if edges.into_iter().any(|e| e.0 >= points.len() ||
-                                            e.1 >= points.len() ||
-                                            e.0 == e.1) {
-            Err(Error::InvalidEdge)
-        } else if points.len() < 3 {
-            Err(Error::TooFewPoints)
-        } else {
-            Ok(())
+            return Err(Error::EmptyInput);
         }
-    }
-
-    /// Constructs a new triangulation of the given points.  The points are a
-    /// flat array of positions in 2D spaces; edges are undirected and expressed
-    /// as indexes into the `points` list.
-    ///
-    /// The triangulation is not actually run in this constructor; use
-    /// [`Triangulation::step`] or [`Triangulation::run`] to triangulate,
-    /// or [`Triangulation::build_with_edges`] to get a complete triangulation
-    /// right away.
-    ///
-    /// # Errors
-    /// This may return [`Error::EmptyInput`], [`Error::InvalidInput`],
-    /// [`Error::InvalidEdge`], or [`Error::CannotInitialize`] if the input is
-    /// invalid.
-    pub fn new_with_edges<'a, E>(points: &[Point], edges: E)
-        -> Result<Triangulation, Error>
-        where E: IntoIterator<Item=&'a (usize, usize)> + Copy
-    {
-        Self::validate_input(points, edges)?;
-
-        //  Picking the seed triangle and center point is tricky!
-        //
-        //  We want a center which is contained within the seed triangle,
-        //  and with the property that the seed triangle is the closest
-        //  three points when sorted by distance to the center.
-        //
-        //  The paper suggests using the center of the bounding box, but in
-        //  that case, you can end up with cases where the center is _outside_
-        //  of the initial seed triangle, which is awkward.
-        //
-        //  delaunator and its ports instead pick the circumcenter of a
-        //  triangle near the bbox center, which has the same issue.
-        //
-        //  Picking the centroid of the seed triangle instead of the
-        //  circumcenter can also lead to issues, as another point could be
-        //  closer, which will violate the condition that points are always
-        //  outside the hull when they are added to the triangulation.
-        //
-        //  We iterate, repeatedly picking a center and checking to see if the
-        //  conditions hold; otherwise, we pick a new center and try again.
-
-        // Start by picking a center which is at the center of the bbox
-        let (x_bounds, y_bounds) = Self::bbox(points);
-        let mut center = ((x_bounds.0 + x_bounds.1) / 2.0,
-                          (y_bounds.0 + y_bounds.1) / 2.0);
-
-        // The scratch buffer contains our points, their indexes, and a distance
-        // relative to the current center.  We leave distance unpopulated
-        // because it's calculated at the beginning of the loop below.
-        let mut scratch: Vec<(usize, f64)> = (0..points.len())
-            .map(|j| (j, distance2(center, points[j])))
-            .collect();
-
-        // Find the three closest points
-        let arr = min3(&scratch, &points);
-
-        // Pick out the triangle points, ensuring that they're clockwise
-        let pa = arr[0];
-        let mut pb = arr[1];
-        let mut pc = arr[2];
-        if orient2d(points[pa], points[pb], points[pc]) < 0.0 {
-            std::mem::swap(&mut pb, &mut pc);
+        if points.len() < 3 {
+            return Err(Error::TooFewPoints);
         }
-
-        // Pick this triangle's centroid as our starting point
-        center = centroid(points[pa], points[pb], points[pc]);
-
-        // Sort with a special comparison function that puts the first
-        // three keys at the start of the list, and uses partial_cmp
-        // otherwise.  The order of the first three keys is not
-        // guaranteed, which we fix up below.
-        scratch.sort_unstable_by(|k, r|
-            if k.0 == pa || k.0 == pb || k.0 == pc {
-                std::cmp::Ordering::Less
-            } else if r.0 == pa || r.0 == pb || r.0 == pc {
-                std::cmp::Ordering::Greater
-            } else {
-                // Compare by radius first, then break ties with pseudoangle
-                // This should be reproducible, i.e. two identical points should
-                // end up next to each other in the list, although with
-                // floating-point values, you _never know_.
-                match k.1.partial_cmp(&r.1).unwrap_or(std::cmp::Ordering::Equal) {
-                    std::cmp::Ordering::Equal => {
-                        let pk = points[k.0];
-                        let pr = points[r.0];
-                        let ak = pseudo_angle((pk.0 - center.0, pk.1 - center.1));
-                        let ar = pseudo_angle((pr.0 - center.0, pr.1 - center.1));
-                        ak.partial_cmp(&ar).unwrap_or(std::cmp::Ordering::Equal)
-                    },
-                    e => e,
+        // A binary similarity changes neither represented geometry nor exact
+        // predicate signs. Fit the whole input into Spade's exponent interval;
+        // never snap small components to zero or rescale axes independently.
+        let mut min = f64::INFINITY;
+        let mut max = 0.0_f64;
+        for &(x, y) in points {
+            for value in [x, y] {
+                if !value.is_finite() {
+                    return Err(Error::InvalidInput);
                 }
-            });
-
-        // Sanity-check that our three target points are at the head of the
-        // list, as expected.
-        if ((scratch[0].0 == pa) as u8 +
-            (scratch[1].0 == pa) as u8 +
-            (scratch[2].0 == pa) as u8 != 1) ||
-           ((scratch[0].0 == pb) as u8 +
-            (scratch[1].0 == pb) as u8 +
-            (scratch[2].0 == pb) as u8 != 1) ||
-           ((scratch[0].0 == pc) as u8 +
-            (scratch[1].0 == pc) as u8 +
-            (scratch[2].0 == pc) as u8 != 1)
+                let value = value.abs();
+                if value != 0.0 {
+                    min = min.min(value);
+                    max = max.max(value);
+                }
+            }
+        }
+        let mut coordinate_scale = 1.0;
+        while min * coordinate_scale < spade::MIN_ALLOWED_VALUE {
+            coordinate_scale *= 2.0;
+        }
+        while max * coordinate_scale > spade::MAX_ALLOWED_VALUE {
+            coordinate_scale *= 0.5;
+        }
+        if min * coordinate_scale < spade::MIN_ALLOWED_VALUE {
+            // No uniform binary scale can represent this dynamic range.
+            return Err(Error::InvalidInput);
+        }
+        let edges: Vec<_> = edges.into_iter().collect();
+        if edges
+            .iter()
+            .any(|&(a, b, _)| a >= points.len() || b >= points.len() || a == b)
         {
-            return Err(Error::CannotInitialize);
+            return Err(Error::InvalidEdge);
         }
-
-        // Apply sorting to initial three points, ignoring distance
-        // values at this point because they're unused.
-        scratch[0].0 = pa;
-        scratch[1].0 = pb;
-        scratch[2].0 = pc;
-
-        // These are the points used in the Triangulation struct
-        let mut sorted_points = PointVec::with_capacity(points.len());
-
-        // usize in original array -> PointIndex in sorted array
-        let mut map_forward = vec![PointIndex::empty(); points.len()];
-
-        // PointIndex in sorted array -> usize in original array
-        let mut map_reverse = PointVec::with_capacity(points.len());
-
-        for i in 0..scratch.len() {
-            // The first three points are guaranteed to be unique by the
-            // min3 selection function, so they have no dupe
-            let mut dupe = None;
-            let p = scratch[i];
-            if i >= 3 {
-                // Check each point against its nearest neighbor and the
-                // three original points, since they could be duplicates
-                // and may not be adjacent
-                for j in &[i - 1, 0, 1, 2] {
-                    let pa = points[scratch[*j].0];
-                    let pb = points[p.0];
-                    if (pa.0 - pb.0).abs() < f64::EPSILON &&
-                       (pa.1 - pb.1).abs() < f64::EPSILON
-                    {
-                        dupe = Some(scratch[*j].0);
-                        break;
-                    }
-                }
-            };
-            map_forward[p.0] = match dupe {
-                None => {
-                    sorted_points.push(points[p.0]);
-                    map_reverse.push(p.0)
-                },
-                Some(d) => {
-                    if map_forward[d] == PointIndex::empty() {
-                        return Err(Error::HalfEdgeInvariant);
-                    }
-                    map_forward[d]
-                },
-            };
-        }
-
-        ////////////////////////////////////////////////////////////////////////
-        let has_edges = edges.into_iter().count() > 0;
-        let mut out = Triangulation {
-            hull: Hull::new(sorted_points.len(), has_edges),
-            half: Half::new(sorted_points.len()),
-            constrained: has_edges,
-
-            remap: map_reverse,
-            next: PointIndex::new(0),
-            angles: PointVec::of(sorted_points.iter()
-                .map(|p| pseudo_angle((p.0 - center.0, p.1 - center.1)))
-                .collect()),
-
-            // Endings are assigned later
-            endings: PointVec::of(vec![(0,0); sorted_points.len()]),
-            ending_data: vec![],
-
-            points: sorted_points, // moved out here
-        };
-
-        let pa = out.next;
-        let pb = out.next + 1;
-        let pc = out.next + 2;
-        out.next += 3;
-        let e_ab = out.half.insert(pa, pb, pc,
-                                   EMPTY_EDGE, EMPTY_EDGE, EMPTY_EDGE)?;
-        if e_ab != EdgeIndex::new(0) {
-            return Err(Error::HalfEdgeInvariant);
-        }
-        let e_bc = out.half.next(e_ab);
-        let e_ca = out.half.prev(e_ab);
-
-        /*
-         *              a
-         *             / ^
-         *            /   \
-         *           V  f  \
-         *          b-------> c
-         */
-        out.hull.initialize(pa, out.angles[pa], e_ca)?;
-        out.hull.insert_bare(out.angles[pb], pb, e_ab)?;
-        out.hull.insert_bare(out.angles[pc], pc, e_bc)?;
-
-        ////////////////////////////////////////////////////////////////////////
-        // Iterate over edges, counting which points have a termination
-        let mut termination_count = PointVec::of(vec![0; out.points.len()]);
-        let mut remapped_edges = Vec::new();
-        for &(src, dst) in edges {
-            let src = map_forward[src];
-            let dst = map_forward[dst];
-            if src == PointIndex::empty() || dst == PointIndex::empty() {
-                return Err(Error::InvalidEdge);
-            }
-            remapped_edges.push(if src > dst { (dst, src) } else { (src, dst) });
-        }
-        for (src, dst) in remapped_edges.iter().copied() {
-            // Lock any edges that appear in the seed triangle.  Because the
-            // (src, dst) tuple is sorted, there are only three possible
-            // matches here.
-            if (src, dst) == (pa, pb) {
-                out.half.toggle_lock_sign(e_ab);
-            } else if (src, dst) == (pa, pc) {
-                out.half.toggle_lock_sign(e_ca);
-            } else if (src, dst) == (pb, pc) {
-                out.half.toggle_lock_sign(e_bc);
-            }
-            termination_count[dst] += 1;
-        }
-        // Ending data will be tightly packed into the ending_data array; each
-        // point stores its range into that array in self.endings[pt].  If the
-        // point has no endings, then the range is (n,n) for some value n.
-        let mut cumsum = 0;
-        for (dst, t) in termination_count.iter().enumerate() {
-            out.endings[PointIndex::new(dst)] = (cumsum, cumsum);
-            cumsum += t;
-        }
-        out.ending_data.resize(cumsum, PointIndex::new(0));
-        for (src, dst) in remapped_edges.iter().copied() {
-            let t = &mut out.endings[dst].1;
-            out.ending_data[*t] = src;
-            *t += 1;
-        }
-
-        // ...and we're done!
-        Ok(out)
+        Ok(Self {
+            points: points
+                .iter()
+                .map(|&(x, y)| (x * coordinate_scale, y * coordinate_scale))
+                .collect(),
+            coordinate_scale,
+            edges,
+            engine: Engine::new(),
+            input_handles: Vec::with_capacity(points.len()),
+            vertex_input: Vec::new(),
+            selected: Vec::new(),
+            next: 0,
+            complete: false,
+        })
     }
 
-    /// Constructs a new unconstrained triangulation
-    ///
-    /// The triangulation is not actually run in this constructor; use
-    /// [`Triangulation::step`] or [`Triangulation::run`] to triangulate,
-    /// or [`Triangulation::build`] to get a complete triangulation right away.
-    ///
-    /// # Errors
-    /// This may return [`Error::EmptyInput`], [`Error::InvalidInput`], or
-    /// [`Error::CannotInitialize`] if the input is invalid.
-    pub fn new(points: &[Point]) -> Result<Triangulation, Error> {
-        let edges: [(usize, usize); 0] = [];
+    /// Creates an incremental triangulation from closed contours.
+    pub fn new_from_contours<V>(points: &[Point], contours: &[V]) -> Result<Self, Error>
+    where
+        for<'a> &'a V: IntoIterator<Item = &'a usize>,
+    {
+        let mut edges = Vec::new();
+        for contour in contours {
+            let vertices: Vec<_> = contour.into_iter().copied().collect();
+            if vertices.len() >= 2 && vertices.first() != vertices.last() {
+                return Err(Error::OpenContour);
+            }
+            edges.extend(vertices.windows(2).map(|v| (v[0], v[1])));
+        }
         Self::new_with_edges(points, &edges)
     }
 
-    /// Triangulates a set of contours, given as indexed paths into the point
-    /// list.  Each contour must be closed (i.e. the last point in the contour
-    /// must equal the first point), otherwise [`Error::OpenContour`] will be
-    /// returned.
-    ///
-    /// The triangulation is not actually run in this constructor; use
-    /// [`Triangulation::step`] or [`Triangulation::run`] to triangulate,
-    /// or [`Triangulation::build_from_contours`] to get a complete
-    /// triangulation right away.
-    ///
-    /// # Errors
-    /// This may return [`Error::EmptyInput`], [`Error::InvalidInput`],
-    /// [`Error::InvalidEdge`], [`Error::OpenContour`] or
-    /// [`Error::CannotInitialize`] if the input is invalid.
-    pub fn new_from_contours<'a, V>(pts: &[Point], contours: &[V])
-        -> Result<Triangulation, Error>
-        where for<'b> &'b V: IntoIterator<Item=&'b usize>
-    {
-        let mut edges = Vec::new();
-        for c in contours {
-            let next = edges.len();
-            for (a, b) in c.into_iter().zip(c.into_iter().skip(1)) {
-                edges.push((*a, *b));
-            }
-            if let Some(start) = edges.get(next) {
-                let last = edges.last().ok_or(Error::OpenContour)?;
-                if start.0 != last.1 {
-                    return Err(Error::OpenContour);
-                }
-            }
-        }
-        Self::new_with_edges(&pts, &edges)
-    }
-
-    /// Runs the triangulation algorithm until completion
-    ///
-    /// # Errors
-    /// This may return [`Error::PointOnFixedEdge`], [`Error::NoMorePoints`],
-    /// or [`Error::CrossingFixedEdge`] if those error conditions are met.
+    /// Runs all remaining insertion and finalization steps.
     pub fn run(&mut self) -> Result<(), Error> {
-        let n = self.points.len();
-        let mut step_count = 0usize;
         while !self.done() {
-            log::trace!("CDT step {}/{} (next={:?})", step_count, n, self.next);
             self.step()?;
-            step_count += 1;
-            if step_count > n + 10 {
-                log::warn!("CDT run: {} steps for {} points, bailing out",
-                           step_count, n);
-                return Err(Error::HalfEdgeInvariant);
-            }
         }
-        log::trace!("CDT completed in {} steps for {} points", step_count, n);
         Ok(())
     }
 
-    pub(crate) fn orient2d(&self, pa: PointIndex, pb: PointIndex, pc: PointIndex) -> f64 {
-        orient2d(self.points[pa], self.points[pb], self.points[pc])
-    }
-
-    fn acute(&self, pa: PointIndex, pb: PointIndex, pc: PointIndex) -> f64 {
-        acute(self.points[pa], self.points[pb], self.points[pc])
-    }
-
-    /// Checks whether the triangulation is done
+    /// Returns whether constraints and face classification are complete.
     pub fn done(&self) -> bool {
-        self.next == self.points.len() + 1
+        self.complete
     }
 
-    /// Walks the upper hull, making it convex.
-    /// This should only be called once from `finalize()`.
-    fn make_outer_hull_convex(&mut self) -> Result<(), Error> {
-        // Walk the hull from left to right, flattening any convex regions
-        if self.next != self.points.len() {
-            return Err(Error::HalfEdgeInvariant);
+    /// Advances by one point insertion, or finalizes after all points exist.
+    pub fn step(&mut self) -> Result<(), Error> {
+        if self.complete {
+            return Err(Error::NoMorePoints);
         }
-        let mut start = self.hull.start()?;
-        let mut hl = start;
-        let mut hr = self.hull.right_hull(hl);
-        loop {
-            /*
-                ^
-                 \
-                  \el/hl
-                   \
-                    <-------------
-                        er/hr
-            */
-            let el = self.hull.edge(hl);
-            let er = self.hull.edge(hr);
-
-            let edge_l = self.half.edge_checked(el)?;
-            let edge_r = self.half.edge_checked(er)?;
-            if edge_r.dst != edge_l.src {
-                return Err(Error::HalfEdgeInvariant);
+        if self.next < self.points.len() {
+            let p = self.points[self.next];
+            let before = self.engine.num_vertices();
+            let handle = self
+                .engine
+                .insert(Point2::new(p.0, p.1))
+                .map_err(|_| Error::InvalidInput)?;
+            if self.engine.num_vertices() != before {
+                debug_assert_eq!(handle.index(), self.vertex_input.len());
+                self.vertex_input.push(self.next);
             }
+            self.input_handles.push(handle);
+            self.next += 1;
+            return Ok(());
+        }
+        self.finalize()
+    }
 
-            // If this triangle on the hull is strictly convex, fill it
-            if self.orient2d(edge_l.dst, edge_l.src, edge_r.src) > 0.0 {
-                self.hull.erase(hr);
-                let new_edge = self.half.insert(
-                    edge_r.src, edge_l.dst, edge_l.src,
-                    el, er, EMPTY_EDGE)?;
-                self.hull.update(hl, new_edge);
-                self.legalize(self.half.next(new_edge))?;
-                self.legalize(self.half.prev(new_edge))?;
+    fn finalize(&mut self) -> Result<(), Error> {
+        if self.engine.num_inner_faces() == 0 {
+            return Err(Error::CannotInitialize);
+        }
+        for &(a, b, boundary) in &self.edges {
+            let from = self.input_handles[a];
+            let to = self.input_handles[b];
+            if from == to {
+                continue;
+            }
+            let added = self.engine.try_add_constraint(from, to);
+            if added.is_empty() {
+                return Err(Error::CrossingFixedEdge);
+            }
+            for edge in added {
+                let parity = self
+                    .engine
+                    .undirected_edge_data_mut(edge.as_undirected())
+                    .data_mut();
+                *parity ^= boundary;
+            }
+        }
+        self.classify()?;
+        self.complete = true;
+        Ok(())
+    }
 
-                // Try stepping back in case this reveals another convex tri
-                hr = hl;
-                hl = self.hull.left_hull(hl);
-
-                // Record this as the start of the convex region
-                start = hl;
-            } else {
-                // Continue walking along the hull
-                let next = self.hull.right_hull(hr);
-                hl = hr;
-                hr = next;
-                if hl == start {
+    fn classify(&mut self) -> Result<(), Error> {
+        if !self.edges.iter().any(|&(_, _, boundary)| boundary) {
+            self.selected = vec![true; self.engine.num_inner_faces()];
+            return Ok(());
+        }
+        let mut state = vec![None; self.engine.num_inner_faces() + 1];
+        state[0] = Some(false); // Spade's outer face always has fixed index zero.
+                                // Cache one incident edge per face. The same edge-cycle traversal
+                                // works for triangles and the exterior face, without per-face allocation.
+        let starts: Vec<_> = self
+            .engine
+            .all_faces()
+            .map(|face| face.adjacent_edge().expect("noncollinear triangulation"))
+            .collect();
+        let mut queue = vec![0usize];
+        let mut cursor = 0;
+        while cursor < queue.len() {
+            let face_index = queue[cursor];
+            cursor += 1;
+            let value = state[face_index].unwrap();
+            let first = starts[face_index];
+            let mut edge = first;
+            loop {
+                let other = edge.rev().face().fix().index();
+                let parity = *edge.as_undirected().data().data();
+                let expected = value ^ parity;
+                match state[other] {
+                    None => {
+                        state[other] = Some(expected);
+                        queue.push(other);
+                    }
+                    Some(found) if found != expected => return Err(Error::OpenContour),
+                    _ => {}
+                }
+                edge = edge.next();
+                if edge == first {
                     break;
                 }
             }
         }
-        Ok(())
-    }
-
-    /// Finalizes the triangulation by making the outer hull convex (in the case
-    /// of unconstrained triangulation), or removing unattached triangles (for
-    /// CDT).
-    fn finalize(&mut self) -> Result<(), Error> {
-        if self.next != self.points.len() {
+        if state.iter().any(Option::is_none) {
             return Err(Error::HalfEdgeInvariant);
         }
-
-        if self.constrained {
-            // For a constrained triangulation, flood fill and erase triangles
-            // that are outside the shape boundaries.
-            let h = self.hull.start()?;
-            let e = self.hull.edge(h);
-            self.half.flood_erase_from(e)?;
-        } else {
-            // For an unconstrained triangulation, make the outer hull convex
-            self.make_outer_hull_convex()?;
-        }
-
-        self.next += 1usize;
+        self.selected = state[1..].iter().map(|v| v == &Some(true)).collect();
         Ok(())
     }
 
-    /// Checks that invariants of the algorithm are maintained. This is a slow
-    /// operation and should only be used for debugging.
-    ///
-    /// # Panics
-    /// Panics if invariants are not correct
+    /// Checks mapping, constraint and classified-face invariants.
     pub fn check(&self) {
-        self.hull.check();
-        self.half.check();
-    }
-
-    /// Advances the triangulation by one step.
-    ///
-    /// # Errors
-    /// This may return [`Error::PointOnFixedEdge`], [`Error::NoMorePoints`],
-    /// or [`Error::CrossingFixedEdge`] if those error conditions are met.
-    pub fn step(&mut self) -> Result<(), Error> {
-        if self.done() {
-            return Err(Error::NoMorePoints);
-        } else if self.next == self.points.len() {
-            self.finalize()?;
-            return Ok(());
-        }
-
-        // Pick the next point in our pre-sorted array
-        let p = self.next;
-        self.next += 1usize;
-
-        // Find the hull edge which will be split by this point
-        let h_ab = self.hull.get(self.angles[p])?;
-        let e_ab = self.hull.edge(h_ab);
-
-        /*
-         *              p [new point]
-         *             / ^
-         *            /   \
-         *           V  f  \
-         *          --------> [new edge]
-         *          b<------a [previous hull edge]
-         *              e
-         */
-        let edge = self.half.edge_checked(e_ab)?;
-        let a = edge.src;
-        let b = edge.dst;
-        if edge.next == EMPTY_EDGE
-            || edge.prev == EMPTY_EDGE
-            || edge.buddy != EMPTY_EDGE
-            || a == b
-            || a == p
-            || b == p
-        {
-            return Err(Error::HalfEdgeInvariant);
-        }
-
-        let o = self.orient2d(b, a, p);
-        let h_p = if o <= 0.0 {
-            /*
-                    b<-------p<------a
-                     \      ^|      ^
-                      \      |     /
-                  next \     |    / prev
-                        \    |   /
-                         \   |  /
-                          \  |v/
-                           V |/
-                            c
-
-                Special case: if p is exactly on the line (or inside), then we
-                split the line instead of inserting a new triangle.
-            */
-            // When the hull edge is fixed (constrained), split it and
-            // propagate the fixed status to both halves.  For o == 0
-            // this is exact; for o < 0 (point slightly inside the hull
-            // triangle due to angle-ordering) it approximately preserves
-            // the constraint, which is acceptable for mesh generation.
-            let was_fixed = edge.sign;
-
-            if edge.buddy != EMPTY_EDGE {
-                return Err(Error::HalfEdgeInvariant);
-            }
-            let edge_bc = self.half.edge_checked(edge.next)?;
-            let edge_ca = self.half.edge_checked(edge.prev)?;
-            let c = edge_bc.dst;
-            if c != edge_ca.src {
-                return Err(Error::HalfEdgeInvariant);
-            }
-
-            let hull_right = self.hull.right_hull(h_ab);
-            let hull_left = self.hull.left_hull(h_ab);
-
-            self.half.erase(e_ab);
-
-            let e_pc = self.half.insert(p, c, a, edge_ca.buddy, EMPTY_EDGE, EMPTY_EDGE)?;
-            let e_cp = self.half.insert(c, p, b, EMPTY_EDGE, edge_bc.buddy, e_pc)?;
-
-            // If the original edge was fixed, mark the split halves
-            // as fixed too so the constraint is preserved.
-            if was_fixed.is_some() {
-                self.half.set_sign(self.half.prev(e_pc), was_fixed); // a→p
-                self.half.set_sign(self.half.next(e_cp), was_fixed); // p→b
-            }
-
-            // Update the hull point at b to point to the new split edge
-            self.hull.update(h_ab, self.half.next(e_cp));
-
-            // Split the edge in the hull
-            let h_ap = self.hull.insert(
-                h_ab, self.angles[p], p, self.half.prev(e_pc));
-
-            // If either of the other triangle edges (in the now-deleted
-            // triangle) were attached to the hull, then patch them up.
-            if self.hull.edge(hull_right) == edge.prev {
-                self.hull.update(hull_right, self.half.next(e_pc));
-            }
-            if self.hull.edge(hull_left) == edge.next {
-                self.hull.update(hull_left, self.half.prev(e_cp));
-            }
-
-            self.legalize(self.half.prev(e_cp))?;
-            self.legalize(self.half.next(e_pc))?;
-            h_ap
-        } else {
-            let f = self.half.insert(b, a, p, EMPTY_EDGE, EMPTY_EDGE, e_ab)?;
-            if o <= 0.0 {
-                return Err(Error::HalfEdgeInvariant);
-            }
-
-            // Replaces the previous item in the hull
-            self.hull.update(h_ab, self.half.prev(f));
-
-            let h_p = if self.angles[a] != self.angles[p] {
-                // Insert the new edge into the hull, using the previous
-                // HullIndex as a hint to avoid searching for its position.
-                let h_ap = self.hull.insert(
-                    h_ab, self.angles[p], p, self.half.next(f));
-                self.legalize(f)?;
-                h_ap
-            } else {
-                /*  Rare case when p and a are in a perfect vertical line:
-                 *
-                 *  We already inserted the left triangle and attached p-b to
-                 *  the hull index.  We insert a bonus right triangle here and
-                 *  attach c-p to to p's hull index, rather than splitting a-b
-                 *  in the hull.
-                 *
-                 *                 /p [new point]
-                 *               /  | ^
-                 *             /    |   \
-                 *           V  f   |  g  \
-                 *          -------->------>\
-                 *          b<------a<------c [previous hull edge]
-                 *              e
-                 */
-                let h_ca = self.hull.right_hull(h_ab);
-                let e_ca = self.hull.edge(h_ca);
-                let edge_ca = self.half.edge_checked(e_ca)?;
-                if a != edge_ca.dst {
-                    return Err(Error::HalfEdgeInvariant);
-                }
-                let c = edge_ca.src;
-                let g = self.half.insert(a, c, p,
-                    EMPTY_EDGE, self.half.next(f), e_ca)?;
-
-                // h_ca has the same X position as c-p, so we update the same
-                // slot in the hull, then move the point in the look-up table.
-                self.hull.update(h_ca, self.half.next(g));
-                self.hull.move_point(a, p);
-
-                // Legalize the two new triangle edges
-                self.legalize(f)?;
-                self.legalize(g)?;
-                h_ca
-            };
-
-            // Check and fill acute angles
-            self.check_acute_left(p, h_p)?;
-            self.check_acute_right(p, h_p)?;
-            h_p
-        };
-
-        // Finally, we check whether this point terminates any edges that are
-        // locked in the triangulation (the "constrainted" part of Constrained
-        // Delaunay Triangulation).
-        let (start, end) = self.endings[p];
-        for i in start..end {
-            self.handle_fixed_edge(h_p, p, self.ending_data[i])?;
-        }
-
-        Ok(())
-    }
-
-    fn check_acute_left(&mut self, p: PointIndex, h_p: HullIndex) -> Result<(), Error> {
-        /* Search for sharp angles on the left side.
-         *
-         *      q       p [new point]
-         *     / ^    e/ ^
-         *    /   \   /   \
-         *   /     \ V     \
-         *          b------->
-         */
-        let mut h_b = h_p;
-        loop {
-            // Move one edge to the left.  In the first iteration of the loop,
-            // h_b will be pointing at the b->p edge.
-            h_b = self.hull.left_hull(h_b);
-            let e_pb = self.hull.edge(h_b);
-            let edge_pb = self.half.edge_checked(e_pb)?;
-            let b = edge_pb.dst;
-
-            // Pick out the next item in the list
-            let h_q = self.hull.left_hull(h_b);
-            let e_bq = self.hull.edge(h_q);
-            let edge_bq = self.half.edge_checked(e_bq)?;
-            let q = edge_bq.dst;
-
-            // If we're building a constrained triangulation, then we force the
-            // outer hull to be convex, so each point-to-point connection
-            // is guaranteed to stay within the triangulation.  This is slightly
-            // less efficient than the acute check, but dramatically simplifies
-            // the code for fixing edges.
-            //
-            // For unconstrained triangulations, we check that the inner angle
-            // is less that pi/2, per Zalik '05.
-            if (!self.constrained && self.acute(p, b, q) <= 0.0) ||
-                self.orient2d(p, b, q) >= 0.0
-            {
-                break;
-            }
-
-            // Friendship ended with q-b-p
-            self.hull.erase(h_b);
-
-            // Now p-q is my new friend
-            let e_pq = self.half.insert(p, q, b, e_bq, e_pb, EMPTY_EDGE)?;
-            self.hull.update(h_q, e_pq);
-            h_b = h_p;
-
-            // Then legalize from the two new triangle edges (bp and qb)
-            self.legalize(self.half.next(e_pq))?;
-            self.legalize(self.half.prev(e_pq))?;
-        }
-        Ok(())
-    }
-
-    fn check_acute_right(&mut self, p: PointIndex, h_p: HullIndex) -> Result<(), Error> {
-        /*  Rightward equivalent of check_acute_left
-         *         p        q
-         *        / ^      / \
-         *       /   \e   /   \
-         *      V     \  v     \
-         *     -------->a       \
-         */
-        let mut h_a = h_p;
-        loop {
-            // Move one edge to the left.  In the first iteration of the loop,
-            // h_a will be pointing at the p->a edge.
-            let e_ap = self.hull.edge(h_a);
-            let edge_ap = self.half.edge_checked(e_ap)?;
-            let a = edge_ap.src;
-            if a == p {
-                return Err(Error::HalfEdgeInvariant);
-            }
-
-            // Scoot over by one to look at the a-q edge
-            h_a = self.hull.right_hull(h_a);
-            let e_qa = self.hull.edge(h_a);
-            let edge_qa = self.half.edge_checked(e_qa)?;
-            let q = edge_qa.src;
-
-            // Same check as above
-            if (!self.constrained && self.acute(p, a, q) <= 0.0)  ||
-                self.orient2d(p, a, q) <= 0.0
-            {
-                break;
-            }
-
-            self.hull.erase(h_a);
-            let edge_qp = self.half.insert(q, p, a, e_ap, e_qa, EMPTY_EDGE)?;
-            self.hull.update(h_p, edge_qp);
-            h_a = h_p;
-
-            // Then legalize from the two new triangle edges (bp and qb)
-            self.legalize(self.half.next(edge_qp))?;
-            self.legalize(self.half.prev(edge_qp))?;
-        }
-        Ok(())
-    }
-
-    /// Finds which mode to begin walking through the triangulation when
-    /// inserting a fixed edge.  h is a [`HullIndex`] equivalent to the `src`
-    /// point, and `dst` is the destination of the new fixed edge.
-    fn find_hull_walk_mode(&self, h: HullIndex, src: PointIndex, dst: PointIndex)
-        -> Result<Walk, Error> {
-        /*  We've just built a triangle that contains a fixed edge, and need
-            to walk through the triangulation and implement that edge.
-
-            The only thing we know going in is that point src is on the hull of
-            the triangulation with HullIndex h.
-
-            We start by finding the triangle a->src->b which contains the edge
-            src->dst, e.g.
-
-                     src
-                     / :^
-                    / :  \
-                   /  :   \h
-                  /  :     \
-                 V   :      \
-                b---:------->a
-                    :
-                   dst
-
-            Because the triangulation is convex, we know that this triangle
-            exists; we can't escape the triangulation.
-        */
-        let e_right = self.hull.edge(h);
-        let h_left = self.hull.left_hull(h);
-        let e_left = self.hull.edge(h_left);
-
-        // Note that e_right-e_left may be a wedge that contains multiple
-        // triangles (for example, this would be the case if there was an edge
-        // flip of b->a)
-        let wedge_left = self.half.edge_checked(e_left)?.dst;
-        let wedge_right = self.half.edge_checked(e_right)?.src;
-
-        // If the fixed edge is directly attached to src, then we can declare
-        // that we're done right away (and the caller will lock the edge)
-        if dst == wedge_left {
-            return Ok(Walk::Done(e_left));
-        } else if dst == wedge_right {
-            return Ok(Walk::Done(e_right));
-        }
-
-        // Otherwise, check the winding to see which side we're on.
-        let o_left = self.orient2d(src, wedge_left, dst);
-        let o_right = self.orient2d(src, dst, wedge_right);
-
-        // If a point is collinear with the fixed edge (orient2d == 0),
-        // split the fixed edge at that point instead of erroring.
-        if o_left == 0.0 {
-            return Ok(Walk::Through(wedge_left));
-        } else if o_right == 0.0 {
-            return Ok(Walk::Through(wedge_right));
-        }
-
-        // Walk the inside of the wedge until we find the
-        // subtriangle which captures the p-src line.
-        let mut index_a_src = self.half.edge_checked(e_left)?.prev;
-
-        loop {
-            let edge_a_src = self.half.edge_checked(index_a_src)?;
-            let a = edge_a_src.src;
-            if a == dst {
-                /* Lucky break: the src point is one of the edges directly
-                   within the wedge, e.g.:
-                          src
-                         / ^\
-                        /  | \
-                       /   |  \
-                      /    |   \
-                     V     |    \
-                    ------>a------ (a == dst)
-                */
-                return Ok(Walk::Done(index_a_src));
-            }
-
-            // Keep walking through the fan
-            let intersected_index = edge_a_src.prev;
-
-            let o = self.orient2d(src, dst, a);
-            // If we've found the intersection point, then we return the new
-            // (inner) edge.  The walking loop will transition to Left or Right
-            // if this edge doesn't have a buddy.
-            if o > 0.0 {
-                /*
-                          src
-                         /:^\
-                        / :| \
-                       /  :|  \
-                      /  : |   \
-                     V   : |    \
-                    ----:->a------
-                        :
-                       dst
-                */
-                // We may exit either into another interior triangle or
-                // leave the triangulation and walk the hull, but we don't
-                // need to decide that right now.
-                return Ok(Walk::Inside(intersected_index));
-            } else if o < 0.0 {
-                /*  Sorry, Mario; your src-dst line is in another triangle
-
-                          src
-                         / ^:\
-                        /  |: \
-                       /   | : \
-                      /    | :  \
-                     V     |  :  \
-                    ------>a--:---
-                              :
-                              dst
-
-                    (so keep going through the triangle)
-                */
-                let buddy = edge_a_src.buddy;
-
-                // We can't have walked out of the wedge, because otherwise
-                // o_right would be < 0.0 and we wouldn't be in this branch
-                if buddy == EMPTY_EDGE {
-                    return Err(Error::WedgeEscape);
-                }
-                index_a_src = self.half.edge_checked(buddy)?.prev;
-            } else {
-                // Hit a vertex exactly on the src→dst line; split there
-                return Ok(Walk::Through(a));
-            }
+        assert_eq!(self.input_handles.len(), self.next);
+        assert_eq!(self.vertex_input.len(), self.engine.num_vertices());
+        assert!(self
+            .input_handles
+            .iter()
+            .all(|h| h.index() < self.engine.num_vertices()));
+        if self.complete {
+            assert_eq!(self.selected.len(), self.engine.num_inner_faces());
         }
     }
 
-    fn walk_fill(&mut self, src: PointIndex, dst: PointIndex, mut e: EdgeIndex) -> Result<(), Error> {
-        let mut steps_left = Contour::new_pos(src, ContourData::None);
-        let mut steps_right = Contour::new_neg(src, ContourData::None);
-        let mut walk_iters = 0usize;
-        let walk_limit = self.points.len() * 10 + 100;
-
-        /*
-         * We start inside a triangle, then escape it right away:
-                     src
-                     / :^
-                    / :  \
-                 hl/  :   \hr
-                  /  :     \
-                 V   :  e   \
-                b---:------->a
-                    :
-                   dst
-         */
-        let edge_ba = self.half.edge_checked(e)?;
-        let e_ac = edge_ba.next;
-        let e_cb = edge_ba.prev;
-        let edge_ac = self.half.edge_checked(e_ac)?;
-        let edge_cb = self.half.edge_checked(e_cb)?;
-
-        // Delete this triangle from the triangulation; it will be
-        // reconstructed later in a more perfect form.
-        self.half.erase(e);
-
-        steps_left.push(self, edge_ba.src,
-            if edge_cb.buddy != EMPTY_EDGE {
-                ContourData::Buddy(edge_cb.buddy)
-            } else {
-                let hl = self.hull.index_of(edge_cb.dst)?;
-                if self.hull.edge(hl) != e_cb {
-                    return Err(Error::HalfEdgeInvariant);
+    /// Iterates triangles as counter-clockwise original input indices.
+    pub fn triangles(&self) -> impl Iterator<Item = (usize, usize, usize)> + '_ {
+        self.engine
+            .inner_faces()
+            .enumerate()
+            .filter_map(move |(i, face)| {
+                if self.complete && !self.selected[i] {
+                    return None;
                 }
-                ContourData::Hull(hl, edge_cb.sign)
-            })?;
-        steps_right.push(self, edge_ba.dst,
-            if edge_ac.buddy != EMPTY_EDGE {
-                ContourData::Buddy(edge_ac.buddy)
-            } else {
-                let hr = self.hull.index_of(edge_ac.dst)?;
-                if self.hull.edge(hr) != e_ac {
-                    return Err(Error::HalfEdgeInvariant);
-                }
-                ContourData::Hull(hr, edge_ac.sign)
-            })?;
-
-        // Exit this triangle, either onto the hull or continuing inside
-        // the triangulation.
-        if edge_ba.fixed() {
-            return Err(Error::CrossingFixedEdge);
-        }
-        if edge_ba.buddy == EMPTY_EDGE {
-            return Err(Error::HalfEdgeInvariant);
-        }
-        e = edge_ba.buddy;
-
-        loop {
-            walk_iters += 1;
-            if walk_iters > walk_limit {
-                log::warn!("walk_fill: exceeded {} iterations for src={:?}→dst={:?} \
-                           ({} points), likely infinite loop",
-                           walk_limit, src, dst, self.points.len());
-                return Err(Error::WedgeEscape);
-            }
-            /*            src
-                         :
-                   b<--:-------a
-                    \ :  e     ^
-                     :\      /
-                    :   v  /
-                   :     c
-                  dst
-             */
-            let edge_ab = self.half.edge_checked(e)?;
-            let e_bc = edge_ab.next;
-            let e_ca = edge_ab.prev;
-            let edge_bc = self.half.edge_checked(e_bc)?;
-            let edge_ca = self.half.edge_checked(e_ca)?;
-            let c = edge_bc.dst;
-
-            // Erase this triangle from the triangulation before
-            // pushing vertices to the contours, which could create
-            // new triangles.  At this point, you're not allowed to use
-            // self.half for any of the triangle edges, which is why
-            // we stored them all above.
-            self.half.erase(e);
-
-            // Handle the termination case, if c is the destination
-            if c == dst {
-                // The left (above) contour is either on the hull
-                // (if no buddy is present) or inside the triangulation
-                let e_dst_src = steps_left.push(self, c,
-                    if edge_bc.buddy == EMPTY_EDGE {
-                        let h = self.hull.index_of(edge_bc.dst)?;
-                        if self.hull.edge(h) != e_bc {
-                            return Err(Error::HalfEdgeInvariant);
-                        }
-                        ContourData::Hull(h, edge_bc.sign)
-                    } else {
-                        ContourData::Buddy(edge_bc.buddy)
-                    })?.ok_or(Error::HalfEdgeInvariant)?;
-
-                // This better have terminated the triangulation of
-                // the upper contour with a dst-src edge
-                let edge_dst_src = self.half.edge_checked(e_dst_src)?;
-                if edge_dst_src.dst != src || edge_dst_src.src != dst {
-                    return Err(Error::HalfEdgeInvariant);
-                }
-
-                // The other contour will finish up with the other
-                // half of the fixed edge as its buddy.  This edge
-                // could also be on the hull, so we do the same check
-                // as above.
-                let e_src_dst = steps_right.push(self, c,
-                    if edge_ca.buddy == EMPTY_EDGE {
-                        let h = self.hull.index_of(edge_ca.dst)?;
-                        if self.hull.edge(h) != e_ca {
-                            return Err(Error::HalfEdgeInvariant);
-                        }
-                        ContourData::Hull(h, edge_ca.sign)
-                    } else {
-                        ContourData::Buddy(edge_ca.buddy)
-                    })
-                    ?.ok_or(Error::HalfEdgeInvariant)?;
-
-                // Similarly, this better have terminated the
-                // triangulation of the lower contour.
-                let edge_src_dst = self.half.edge_checked(e_src_dst)?;
-                if edge_src_dst.src != src || edge_src_dst.dst != dst {
-                    return Err(Error::HalfEdgeInvariant);
-                }
-
-                self.half.link(e_src_dst, e_dst_src)?;
-                self.half.toggle_lock_sign(e_src_dst); // locks both sides
-
-                break;
-            }
-
-            let o_psc = self.orient2d(src, dst, c);
-            e = if o_psc > 0.0 {
-                // Store the c-a edge as our buddy, and exit via b-c
-                // (unless c-a is the 0th edge, which has no buddy)
-                steps_right.push(self, c,
-                    if edge_ca.buddy == EMPTY_EDGE {
-                        let h = self.hull.index_of(edge_ca.dst)?;
-                        if self.hull.edge(h) != e_ca {
-                            return Err(Error::HalfEdgeInvariant);
-                        }
-                        ContourData::Hull(h, edge_ca.sign)
-                    } else {
-                        ContourData::Buddy(edge_ca.buddy)
-                    })?;
-
-                // Exit the triangle, either onto the hull or staying
-                // in the triangulation
-                if edge_bc.fixed() {
-                    return Err(Error::CrossingFixedEdge);
-                }
-                if edge_bc.buddy == EMPTY_EDGE {
-                    return Err(Error::HalfEdgeInvariant);
-                }
-                edge_bc.buddy
-            } else if o_psc < 0.0 {
-                /*         src
-                            :
-                       b<-- :-a
-                        |  : ^
-                        |  :/
-                        | :/
-                        | :
-                        V/:
-                        c dst
-                 */
-                // Store the b-c edge as our buddy and exit via c-a,
-                //
-                // (c-b may be a hull edge, so we check for that)
-                steps_left.push(self, c,
-                    if edge_bc.buddy == EMPTY_EDGE {
-                        let h = self.hull.index_of(edge_bc.dst)?;
-                        if self.hull.edge(h) != e_bc {
-                            return Err(Error::HalfEdgeInvariant);
-                        }
-                        ContourData::Hull(h, edge_bc.sign)
-                    } else {
-                        ContourData::Buddy(edge_bc.buddy)
-                    })?;
-
-                if edge_ca.fixed() {
-                    return Err(Error::CrossingFixedEdge);
-                }
-                if edge_ca.buddy == EMPTY_EDGE {
-                    return Err(Error::HalfEdgeInvariant);
-                }
-                edge_ca.buddy
-            } else {
-                // c is collinear with src→dst.  Close the contours here
-                // (same as the c==dst termination), lock src→c, then
-                // continue with c→dst via handle_fixed_edge.
-                let e_c_src = steps_left.push(self, c,
-                    if edge_bc.buddy == EMPTY_EDGE {
-                        let h = self.hull.index_of(edge_bc.dst)?;
-                        if self.hull.edge(h) != e_bc {
-                            return Err(Error::HalfEdgeInvariant);
-                        }
-                        ContourData::Hull(h, edge_bc.sign)
-                    } else {
-                        ContourData::Buddy(edge_bc.buddy)
-                    })?.ok_or(Error::HalfEdgeInvariant)?;
-
-                let e_src_c = steps_right.push(self, c,
-                    if edge_ca.buddy == EMPTY_EDGE {
-                        let h = self.hull.index_of(edge_ca.dst)?;
-                        if self.hull.edge(h) != e_ca {
-                            return Err(Error::HalfEdgeInvariant);
-                        }
-                        ContourData::Hull(h, edge_ca.sign)
-                    } else {
-                        ContourData::Buddy(edge_ca.buddy)
-                    })?.ok_or(Error::HalfEdgeInvariant)?;
-
-                self.half.link(e_src_c, e_c_src)?;
-                self.half.toggle_lock_sign(e_src_c);
-
-                // Continue with the remaining portion c→dst
-                let h_c = self.hull.index_of(c)?;
-                return self.handle_fixed_edge(h_c, c, dst);
-            }
-        }
-        Ok(())
-    }
-
-    fn handle_fixed_edge(&mut self, mut h: HullIndex, mut src: PointIndex, dst: PointIndex) -> Result<(), Error> {
-        // Use a loop to handle Through (tail-call elimination for the
-        // second recursive call, mid→dst).
-        for _ in 0..1000 {
-            match self.find_hull_walk_mode(h, src, dst)? {
-                // Easy mode: the fixed edge is directly connected to the new
-                // point, so we lock it and return immediately.
-                Walk::Done(e) => { self.half.toggle_lock_sign(e); return Ok(()); },
-
-                // Otherwise, we're guaranteed to be inside the triangulation,
-                // because the hull is convex by construction.
-                Walk::Inside(e) => return self.walk_fill(src, dst, e),
-
-                // A collinear intermediate point was found on src→dst.
-                // Lock src→mid, then continue the loop with mid→dst.
-                Walk::Through(mid) => {
-                    if mid == src || mid == dst {
-                        return Err(Error::PointOnFixedEdge(src.0 as usize));
-                    }
-                    self.handle_fixed_edge(h, src, mid)?;
-                    h = self.hull.index_of(mid)?;
-                    src = mid;
-                    // Loop continues with mid→dst
-                },
-            }
-        }
-        // Safety: if we hit the loop limit, bail out
-        Err(Error::PointOnFixedEdge(src.0 as usize))
-    }
-
-    pub(crate) fn legalize(&mut self, e_ab: EdgeIndex) -> Result<(), Error> {
-        /* We're given this
-         *            c
-         *          /  ^
-         *         /    \
-         *        /      \
-         *       /        \
-         *      V     e    \
-         *     a----------->\
-         *     \<-----------b
-         *      \    f     ^
-         *       \        /
-         *        \      /
-         *         \    /
-         *          V  /
-         *           d
-         *  We check whether d is within the circumcircle of abc.
-         *  If so, then we flip the edge and recurse based on the triangles
-         *  across from edges ad and db.
-         *
-         *  This function may be called with a half-empty edge, e.g. while
-         *  recursing; in that case, then return immediately.
-         */
-        if e_ab == EMPTY_EDGE {
-            return Ok(());
-        }
-        let edge = self.half.edge_checked(e_ab)?;
-        if edge.fixed() || edge.buddy == EMPTY_EDGE {
-            return Ok(());
-        }
-        let a = edge.src;
-        let b = edge.dst;
-        let c = self.half.edge_checked(self.half.next_checked(e_ab)?)?.dst;
-
-        let e_ba = edge.buddy;
-        let e_ad = self.half.next_checked(e_ba)?;
-        let d = self.half.edge_checked(e_ad)?.dst;
-
-        if in_circle(self.points[a], self.points[b], self.points[c],
-                     self.points[d]) > 0.0
-        {
-            let e_db = self.half.prev_checked(e_ba)?;
-
-            self.half.swap(e_ab)?;
-            self.legalize(e_ad)?;
-            self.legalize(e_db)?;
-        }
-        Ok(())
-    }
-
-    /// Calculates a bounding box, returning `((xmin, xmax), (ymin, ymax))`
-    pub(crate) fn bbox(points: &[Point]) -> ((f64, f64), (f64, f64)) {
-        let (mut xmin, mut xmax) = (std::f64::INFINITY, -std::f64::INFINITY);
-        let (mut ymin, mut ymax) = (std::f64::INFINITY, -std::f64::INFINITY);
-        for (px, py) in points.iter() {
-            xmin = px.min(xmin);
-            ymin = py.min(ymin);
-            xmax = px.max(xmax);
-            ymax = py.max(ymax);
-        }
-        ((xmin, xmax), (ymin, ymax))
-    }
-
-    /// Returns all of the resulting triangles, as indexes into the original
-    /// `points` array from the constructor.
-    pub fn triangles(&self) -> impl Iterator<Item=(usize, usize, usize)> + '_ {
-        self.half.iter_triangles()
-            .map(move |(a, b, c)|
-                (self.remap[a], self.remap[b], self.remap[c]))
-    }
-
-    /// Checks whether the given point is inside or outside the triangulation.
-    /// This is extremely inefficient, and should only be used for debugging
-    /// or unit tests.
-    pub fn inside(&self, p: Point) -> bool {
-        self.half.iter_triangles()
-            .any(|(a, b, c)| {
-                orient2d(self.points[a], self.points[b], p) >= 0.0 &&
-                orient2d(self.points[b], self.points[c], p) >= 0.0 &&
-                orient2d(self.points[c], self.points[a], p) >= 0.0
+                let v = face.vertices();
+                Some((
+                    self.vertex_input[v[0].fix().index()],
+                    self.vertex_input[v[1].fix().index()],
+                    self.vertex_input[v[2].fix().index()],
+                ))
             })
     }
 
-    /// Writes the current state of the triangulation to an SVG file,
-    /// without debug visualizations.
+    /// Returns whether `point` is covered by an emitted triangle.
+    pub fn inside(&self, point: Point) -> bool {
+        let point = (
+            point.0 * self.coordinate_scale,
+            point.1 * self.coordinate_scale,
+        );
+        self.triangles()
+            .any(|(a, b, c)| contains(self.points[a], self.points[b], self.points[c], point))
+    }
+
+    /// Writes the current triangulation to an SVG file.
     pub fn save_svg(&self, filename: &str) -> std::io::Result<()> {
         std::fs::write(filename, self.to_svg(false))
     }
 
-    /// Writes the current state of the triangulation to an SVG file,
-    /// including the upper hull as a debugging visualization.
+    /// Writes an SVG with pending source constraints highlighted.
     pub fn save_debug_svg(&self, filename: &str) -> std::io::Result<()> {
         std::fs::write(filename, self.to_svg(true))
     }
 
-    /// Converts the current state of the triangulation to an SVG.  When `debug`
-    /// is true, includes the upper hull and to-be-fixed edges; otherwise, just
-    /// shows points, triangles, and fixed edges from the half-edge graph.
+    /// Renders points, current engine edges, constraints, and selected faces.
     pub fn to_svg(&self, debug: bool) -> String {
-        let (x_bounds, y_bounds) = Self::bbox(&self.points);
-        let scale = 800.0 /
-            (x_bounds.1 - x_bounds.0).max(y_bounds.1 - y_bounds.0);
-        let line_width = 2.0;
-        let dx = |x| { scale * (x - x_bounds.0) + line_width};
-        let dy = |y| { scale * (y_bounds.1 - y) + line_width};
-
-         let mut out = String::new();
-         // Put a dummy rectangle in the SVG so that rsvg-convert doesn't clip
-         out.push_str(&format!(
-            r#"<svg viewbox="auto" xmlns="http://www.w3.org/2000/svg" width="{}" height="{}">
-    <rect x="0" y="0" width="{}" height="{}"
-     style="fill:rgb(0,0,0)" />"#,
-            scale * (x_bounds.1 - x_bounds.0) + line_width*2.0,
-            scale * (y_bounds.1 - y_bounds.0) + line_width*2.0,
-            dx(x_bounds.1) + line_width,
-            dy(y_bounds.0) + line_width));
-
-        // Draw endings in green (they will be overdrawn in white if they're
-        // included in the triangulation).
-        if debug {
-            for (p, (start, end)) in self.endings.iter().enumerate() {
-                for i in *start..*end {
-                    let dst = PointIndex::new(p);
-                    let src = self.ending_data[i];
-                     out.push_str(&format!(
-                        r#"
-            <line x1="{}" y1="{}" x2="{}" y2="{}"
-             style="stroke:rgb(0,255,0)"
-             stroke-width="{}" stroke-linecap="round" />"#,
-                        dx(self.points[src].0),
-                        dy(self.points[src].1),
-                        dx(self.points[dst].0),
-                        dy(self.points[dst].1),
-                        line_width));
-                }
+        let (mut min_x, mut max_x, mut min_y, mut max_y) = (
+            self.points[0].0,
+            self.points[0].0,
+            self.points[0].1,
+            self.points[0].1,
+        );
+        for &(x, y) in &self.points {
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+        let span = (max_x - min_x).max(max_y - min_y).max(1.0e-30);
+        let s = 800.0 / span;
+        let x = |v| (v - min_x) * s + 2.0;
+        let y = |v| (max_y - v) * s + 2.0;
+        let mut out = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="804" height="804"><rect width="100%" height="100%" fill="black"/>"#
+        );
+        for edge in self.engine.undirected_edges() {
+            let p = edge.positions();
+            let fixed = edge.is_constraint_edge();
+            out.push_str(&format!(
+                r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="2"/>"#,
+                x(p[0].x),
+                y(p[0].y),
+                x(p[1].x),
+                y(p[1].y),
+                if fixed { "white" } else { "red" }
+            ));
+        }
+        if debug && !self.complete {
+            for &(a, b, _) in &self.edges {
+                let (p, q) = (self.points[a], self.points[b]);
+                out.push_str(&format!(r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="lime" stroke-width="2" stroke-dasharray="4"/>"#,x(p.0),y(p.1),x(q.0),y(q.1)));
             }
         }
-
-         // Push every edge into the SVG
-         for (pa, pb, fixed) in self.half.iter_edges() {
-             out.push_str(&format!(
-                r#"
-    <line x1="{}" y1="{}" x2="{}" y2="{}"
-     style="{}"
-     stroke-width="{}"
-     stroke-linecap="round" />"#,
-                dx(self.points[pa].0),
-                dy(self.points[pa].1),
-                dx(self.points[pb].0),
-                dy(self.points[pb].1),
-                if fixed { "stroke:rgb(255,255,255)" }
-                    else { "stroke:rgb(255,0,0)" },
-                line_width))
-         }
-
-         if debug {
-             for e in self.hull.values() {
-                 let edge = self.half.edge(e);
-                 let (pa, pb) = (edge.src, edge.dst);
-                 out.push_str(&format!(
-                    r#"
-        <line x1="{}" y1="{}" x2="{}" y2="{}"
-         style="stroke:rgb(255,255,0)"
-         stroke-width="{}" stroke-dasharray="{}"
-         stroke-linecap="round" />"#,
-                    dx(self.points[pa].0),
-                    dy(self.points[pa].1),
-                    dx(self.points[pb].0),
-                    dy(self.points[pb].1),
-                    line_width, line_width * 2.0))
-             }
-         }
-
-         for p in self.points.iter() {
-             out.push_str(&format!(
-                r#"
-        <circle cx="{}" cy="{}" r="{}" style="fill:rgb(255,128,128)" />"#,
-                dx(p.0), dy(p.1), line_width));
+        for &(px, py) in &self.points[..self.next] {
+            out.push_str(&format!(
+                r#"<circle cx="{}" cy="{}" r="2" fill="pink"/>"#,
+                x(px),
+                y(py)
+            ));
         }
-
-        out.push_str("\n</svg>");
+        out.push_str("</svg>");
         out
     }
 }
 
-// Finds the three points in the given buffer with the lowest score, returning
-// then in order (so that out[0] is closest)
-//
-// This is faster than sorting an entire array each time.
-fn min3(buf: &[(usize, f64)], points: &[(f64, f64)]) -> [usize; 3] {
-    let mut array = [(0, std::f64::INFINITY); 3];
-    for &(p, score) in buf.iter() {
-        if score < array[0].1 {
-            array[0] = (p, score);
-        }
-    }
-    for &(p, score) in buf.iter() {
-        if score < array[1].1 {
-            // If there is one point picked already, then don't
-            // pick it again, since that will be doomed to be colinear.
-            let p0 = points[array[0].0];
-            if (p0.0 - points[p].0).abs() >= std::f64::EPSILON ||
-               (p0.1 - points[p].1).abs() >= std::f64::EPSILON
-            {
-                array[1] = (p, score);
-            }
-        }
-    }
-    for &(p, score) in buf.iter() {
-        if score < array[2].1 {
-            let p0 = points[array[0].0];
-            let p1 = points[array[1].0];
-            if orient2d(p0, p1, points[p]).abs() > std::f64::EPSILON {
-                array[2] = (p, score);
-            }
-        }
-    }
-
-    let mut out = [0usize; 3];
-    for (i, a) in array.iter().enumerate() {
-        out[i] = a.0;
-    }
-    // TODO: return a reasonable error if all inputs are colinear or duplicates
-    out
+fn contains(a: Point, b: Point, c: Point, p: Point) -> bool {
+    let cross =
+        |u: Point, v: Point, w: Point| (v.0 - u.0) * (w.1 - u.1) - (v.1 - u.1) * (w.0 - u.0);
+    cross(a, b, p) >= 0.0 && cross(b, c, p) >= 0.0 && cross(c, a, p) >= 0.0
 }
 
 #[cfg(test)]
@@ -1421,255 +371,192 @@ mod tests {
     use super::*;
 
     #[test]
-    fn simple_triangle() {
-        let pts = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
-        let t = Triangulation::build(&pts[0..]).expect("Could not construct");
-        assert!(t.inside((0.5, 0.5)));
+    fn binary_scaling_preserves_topology_and_query_units() {
+        let points = [(0., 0.), (4., 0.), (3., 3.), (0., 2.), (1., 1.)];
+        let edges = [(0, 1), (1, 2), (2, 3), (3, 0)];
+        let reference = Triangulation::build_with_edges(&points, &edges).unwrap();
+        let triangles: Vec<_> = reference.triangles().collect();
+        for scale in [f64::from_bits(1), 2.0_f64.powi(-200), 2.0_f64.powi(1000)] {
+            let scaled: Vec<_> = points
+                .iter()
+                .map(|&(x, y)| (x * scale, y * scale))
+                .collect();
+            let t = Triangulation::build_with_edges(&scaled, &edges).unwrap();
+            t.check();
+            assert_eq!(t.triangles().collect::<Vec<_>>(), triangles);
+            assert!(t.inside((scale, scale)));
+            assert!(!t.inside((5.0 * scale, scale)));
+        }
     }
 
     #[test]
-    fn duplicate_point() {
-        let points = vec![
-            (0.0, 0.0),
-            (1.0, 0.0),
-            (1.1, 1.1),
-            (1.1, 1.1),
-            (0.0, 1.0),
+    fn small_components_are_preserved_not_welded() {
+        let tiny = 2.0_f64.powi(-160);
+        let points = [(0., 0.), (1., 0.), (1., 1.), (0., 1.), (tiny, 0.5)];
+        let t =
+            Triangulation::build_with_edges(&points, &[(0, 1), (1, 2), (2, 3), (3, 0)]).unwrap();
+        assert_eq!(t.engine.num_vertices(), 5);
+        assert!(t.points[4].0 > 0.0);
+        assert_eq!(t.points[4].0 / t.coordinate_scale, tiny);
+        assert_eq!(t.triangles().count(), 4);
+        assert_eq!(
+            Triangulation::build(&[(0., 0.), (1e300, 0.), (0., 1e-300)]).err(),
+            Some(Error::InvalidInput)
+        );
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                Triangulation::build(&[(0., 0.), (1., 0.), (0., invalid)]).err(),
+                Some(Error::InvalidInput)
+            );
+        }
+    }
+
+    #[test]
+    fn holes_and_nested_loops_use_even_odd_parity() {
+        let p = [
+            (0., 0.),
+            (4., 0.),
+            (4., 4.),
+            (0., 4.),
+            (1., 1.),
+            (3., 1.),
+            (3., 3.),
+            (1., 3.),
         ];
-        let edges = vec![
+        let e = [
             (0, 1),
             (1, 2),
-            (3, 4),
-            (4, 0),
-        ];
-        let t = Triangulation::build_with_edges(&points, &edges);
-        assert!(!t.is_err());
-        assert!(t.unwrap().inside((0.5, 0.5)));
-    }
-
-    #[test]
-    fn simple_circle() {
-        let mut edges = Vec::new();
-        let mut points = Vec::new();
-        const N: usize = 22;
-        for i in 0..N {
-            let a = (i as f64) / (N as f64) * core::f64::consts::PI * 2.0;
-            let x = a.cos();
-            let y = a.sin();
-            points.push((x, y));
-            edges.push((i, (i + 1) % N));
-        }
-        let t = Triangulation::build_with_edges(&points, &edges)
-            .expect("Could not build triangulation");
-        assert!(t.inside((0.0, 0.0)));
-        assert!(!t.inside((1.01, 0.0)));
-    }
-
-    #[test]
-    fn dupe_start() {
-        let points = vec![
-            // Duplicate nearest points
-            (0.5, 0.5),
-            (0.5, 0.5),
-            (0.5, 0.6),
-            (0.6, 0.5),
-            (0.5, 0.4),
-
-            // Force the center to be at 0.5, 0.5
-            (0.0, 0.0),
-            (1.0, 0.0),
-            (1.0, 1.0),
-            (0.0, 1.0),
-        ];
-        let edges = vec![
-            (1, 2),
             (2, 3),
-            (3, 4),
-            (4, 0),
-        ];
-        let t = Triangulation::build_with_edges(&points, &edges)
-            .expect("Could not build triangulation");
-        assert!(t.inside((0.55, 0.5)));
-        assert!(!t.inside((0.45, 0.5)));
-    }
-
-    #[test]
-    fn colinear_start() {
-        let points = vec![
-            // Force the center to be at 0.5, 0.5
-            (0.0, 0.0),
-            (1.0, 0.0),
-            (1.0, 1.0),
-            (0.0, 1.0),
-
-            // Threee colinear points
-            (0.5, 0.4),
-            (0.5, 0.5),
-            (0.5, 0.6),
-            (0.6, 0.5),
-        ];
-        let edges = vec![
+            (3, 0),
             (4, 5),
             (5, 6),
             (6, 7),
             (7, 4),
         ];
-        let t = Triangulation::build_with_edges(&points, &edges)
-            .expect("Could not build triangulation");
-        assert!(t.inside((0.55, 0.5)));
-        assert!(!t.inside((0.45, 0.5)));
+        let t = Triangulation::build_with_edges(&p, &e).unwrap();
+        assert!(t.inside((0.5, 0.5)));
+        assert!(!t.inside((2., 2.)));
+        assert!(!t.inside((5., 2.)));
     }
 
     #[test]
-    fn fuzzy_circle() {
-        let mut edges = Vec::new();
-        let mut points = Vec::new();
-        const N: usize = 32;
-        for i in 0..N {
-            let a = (i as f64) / (N as f64) * core::f64::consts::PI * 2.0;
-            let x = a.cos();
-            let y = a.sin();
-            points.push((x, y));
-            edges.push((i, (i + 1) % N));
-        }
-        const M: usize = 32;
-
-        use std::iter::repeat_with;
-        use rand::{Rng, SeedableRng};
-        use itertools::Itertools;
-
-        // Use a ChaCha RNG to be reproducible across platforms
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(12345);
-        points.extend(repeat_with(|| rng.gen_range(-1.0..1.0))
-            .tuple_windows()
-            .filter(|(x, y): &(f64, f64)| (x*x + y*y).sqrt() < 0.95)
-            .take(M));
-
-        let t = Triangulation::build_with_edges(&points, &edges)
-            .expect("Could not build triangulation");
-        assert!(t.inside((0.0, 0.0)));
-        assert!(!t.inside((1.01, 0.0)));
-    }
-
-    #[test]
-    fn spiral_circle() {
-        let mut edges = Vec::new();
-        let mut points = Vec::new();
-        const N: usize = 16;
-        for i in 0..N {
-            let a = (i as f64) / (N as f64) * core::f64::consts::PI * 2.0;
-            let x = a.cos();
-            let y = a.sin();
-            points.push((x, y));
-            edges.push((i, (i + 1) % N));
-        }
-        const M: usize = 32;
-        for i in 0..(2*M) {
-            let a = (i as f64) / (M as f64) * core::f64::consts::PI * 2.0;
-            let scale = (i as f64 + 1.1).powf(0.2);
-            let x = a.cos() / scale;
-            let y = a.sin() / scale;
-            points.push((x, y));
-        }
-
-        let t = Triangulation::build_with_edges(&points, &edges)
-            .expect("Could not build triangulation");
-        assert!(t.inside((0.0, 0.0)));
-        assert!(!t.inside((1.01, 0.0)));
-    }
-
-    #[test]
-    fn nested_circles() {
-        let mut edges = Vec::new();
-        let mut points = Vec::new();
-        const N: usize = 32;
-        for i in 0..N {
-            let a = (i as f64) / (N as f64) * core::f64::consts::PI * 2.0;
-            let x = a.cos();
-            let y = a.sin();
-            points.push((x, y));
-            edges.push((i, (i + 1) % N));
-        }
-        for i in 0..N {
-            let a = (i as f64) / (N as f64) * core::f64::consts::PI * 2.0;
-            let x = a.cos() / 2.0;
-            let y = a.sin() / 2.0;
-            points.push((x, y));
-            edges.push((N + i, N + (i + 1) % N));
-        }
-
-        let t = Triangulation::build_with_edges(&points, &edges)
-            .expect("Could not build triangulation");
-        assert!(!t.inside((0.0, 0.0)));
-        assert!(!t.inside((1.01, 0.0)));
-        assert!(t.inside((0.75, 0.0)));
-        assert!(t.inside((0.0, 0.8)));
-    }
-
-    #[test]
-    fn grid() {
-        let mut points = Vec::new();
-        const N: usize = 32;
-        for i in 0..N {
-            for j in 0..N {
-                points.push((i as f64, j as f64));
-            }
-        }
-        let t = Triangulation::build(&points)
-            .expect("Could not build triangulation");
+    fn duplicates_and_collinear_boundary_vertices_preserve_provenance() {
+        let p = [
+            (0., 0.),
+            (4., 0.),
+            (4., 4.),
+            (0., 4.),
+            (2., 0.),
+            (4., 4.),
+            (2., 2.),
+        ];
+        let e = [(0, 1), (1, 5), (5, 3), (3, 0)];
+        let t = Triangulation::build_with_edges(&p, &e).unwrap();
         t.check();
+        assert!(t.inside((2., 2.)));
+        assert!(t
+            .triangles()
+            .all(|(a, b, c)| a < p.len() && b < p.len() && c < p.len()));
     }
 
     #[test]
-    fn grid_with_fixed_circle() {
-        let mut edges = Vec::new();
-        let mut points = Vec::new();
-        const N: usize = 32;
-        for i in 0..N {
-            let a = (i as f64) / (N as f64) * core::f64::consts::PI * 2.0;
-            let x = a.cos() * 0.9;
-            let y = a.sin() * 0.9;
-            points.push((x, y));
-            edges.push((i, (i + 1) % N));
-        }
-        const M: usize = 32;
-        for i in 0..M {
-            for j in 0..M {
-                points.push((i as f64 / M as f64 * 2.0 - 1.0,
-                             j as f64 / M as f64 * 2.0 - 1.0));
+    fn duplicate_boundary_xor_cancels_without_unlocking() {
+        let p = [(0., 0.), (1., 0.), (1., 1.), (0., 1.)];
+        let e = [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+        ];
+        let t = Triangulation::build_with_edges(&p, &e).unwrap();
+        assert_eq!(t.triangles().count(), 0);
+        assert_eq!(t.engine.num_constraints(), 4);
+    }
+
+    #[test]
+    fn internal_constraints_preserve_holes_and_overlapping_boundary_parity() {
+        let points = [
+            (0., 0.),
+            (4., 0.),
+            (4., 4.),
+            (0., 4.),
+            (1., 1.),
+            (3., 1.),
+            (3., 3.),
+            (1., 3.),
+            (2., 0.),
+        ];
+        let boundary = [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+        ];
+        let internal = [(0, 1), (0, 4), (1, 5), (2, 6), (3, 7), (4, 6)];
+        for internal_first in [false, true] {
+            let mut edges: Vec<_> = boundary
+                .iter()
+                .map(|&(a, b)| (a, b, true))
+                .chain(internal.iter().map(|&(a, b)| (a, b, false)))
+                .collect();
+            if internal_first {
+                edges.reverse();
             }
+            let mut t = Triangulation::new_with_constraints(&points, edges).unwrap();
+            t.run().unwrap();
+            assert!(t.inside((0.5, 0.5)));
+            assert!(!t.inside((2., 2.)));
+            assert!(!t.inside((5., 2.)));
+            let area: f64 = t
+                .triangles()
+                .map(|(a, b, c)| {
+                    let (a, b, c) = (points[a], points[b], points[c]);
+                    ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)) / 2.
+                })
+                .sum();
+            assert_eq!(area, 12.);
+            assert_eq!(t.engine.num_constraints(), 14);
         }
-        let t = Triangulation::build_with_edges(&points, &edges)
-            .expect("Could not build triangulation");
-        t.check();
+        let mut t = Triangulation::new_with_constraints(&points, [(0, 2, false)]).unwrap();
+        t.run().unwrap();
+        assert!(t.inside((2., 2.)));
     }
 
     #[test]
-    fn new_from_contours() {
-        let t = Triangulation::build_from_contours::<Vec<usize>>(
-            &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)], &vec![]);
-        assert!(t.is_ok());
-
-        let t = Triangulation::build_from_contours(
-            &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)], &[vec![]]);
-        assert!(t.is_ok());
-
-        let t = Triangulation::build_from_contours(
-            &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)], &[vec![0]]);
-        assert!(t.is_ok());
-
-        let t = Triangulation::build_from_contours(
-            &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)], &[vec![0, 1]]);
-        assert!(t.is_err());
-        if let Err(e) = t {
-            assert!(e == Error::OpenContour);
-        }
+    fn crossing_open_and_degenerate_inputs_are_rejected() {
+        let p = [(0., 0.), (1., 0.), (1., 1.), (0., 1.)];
+        assert_eq!(
+            Triangulation::build_with_edges(&p, &[(0, 2), (1, 3)]).err(),
+            Some(Error::CrossingFixedEdge)
+        );
+        assert_eq!(
+            Triangulation::build_with_edges(&p, &[(0, 1)]).err(),
+            Some(Error::OpenContour)
+        );
+        assert_eq!(
+            Triangulation::build(&[(0., 0.), (1., 0.), (2., 0.)]).err(),
+            Some(Error::CannotInitialize)
+        );
     }
 
     #[test]
-    fn legalize_empty_edge_is_noop() {
-        let pts = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
-        let mut t = Triangulation::build(&pts).expect("Could not construct");
-        assert_eq!(t.legalize(EMPTY_EDGE), Ok(()));
+    fn thin_translated_polygon_is_not_snapped() {
+        let p = [
+            (1e9, 1e9),
+            (1e9 + 1., 1e9),
+            (1e9 + 1., 1e9 + 1e-5),
+            (1e9, 1e9 + 1e-5),
+        ];
+        let e = [(0, 1), (1, 2), (2, 3), (3, 0)];
+        let t = Triangulation::build_with_edges(&p, &e).unwrap();
+        assert_eq!(t.triangles().count(), 2);
     }
 }
