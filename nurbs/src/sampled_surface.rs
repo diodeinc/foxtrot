@@ -444,7 +444,8 @@ where
         // A closed boundary has two parameter representatives. The nearest
         // geometric sample cannot distinguish them, so solve each bounded
         // representative rather than wrapping iterates across the cut.
-        let mut seeds = vec![best_uv];
+        // Two seam choices per parameter give at most four seeds.
+        let mut seeds: smallvec::SmallVec<[DVec2; 4]> = smallvec::smallvec![best_uv];
         for (i, (min, max, open)) in [
             (self.surf.min_u(), self.surf.max_u(), self.surf.u_open),
             (self.surf.min_v(), self.surf.max_v(), self.surf.v_open),
