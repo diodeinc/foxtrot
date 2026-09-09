@@ -1001,7 +1001,7 @@ fn advanced_face(
         .values()
         .all(|&(forward, reverse)| forward == reverse)
     {
-        if let Some(full) = surf.untrimmed_mesh(face_color, same_sense) {
+        if let Some(full) = surf.untrimmed_mesh(face_color, same_sense, tolerance) {
             *mesh = full;
             return Ok(());
         }

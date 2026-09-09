@@ -1,5 +1,17 @@
 # Würth and KiCad STEP repair worklog
 
+## Review: tolerance-driven untrimmed tori — 2026-09-09
+
+Replace the fixed 32×32 torus grid with separate angular resolutions derived
+from the native-coordinate chord budget and both radii. A second-derivative
+bound covers triangle interiors, including the mixed term. Wrapped indices
+still produce a closed mesh. Check the vertex-index product before allocation.
+
+Both targeted release tests pass: closure, winding and area; and analytic
+point-to-torus distance at triangle edges/interiors for three radius ratios
+and three unit scales. This includes R=100, r=1 at the 0.01 mm budget that
+the fixed grid missed by roughly 48×.
+
 ## Review: preserve shared spatial boundaries — 2026-09-09
 
 Reject newly sampled Steiner points lying exactly on trim constraints before

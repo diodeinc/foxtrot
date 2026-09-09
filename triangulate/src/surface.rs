@@ -323,7 +323,7 @@ impl Surface {
 
     /// Tessellate a compact surface with no physical trim. Identify seam
     /// vertices by wrapped grid indices instead of cutting a planar polygon.
-    pub fn untrimmed_mesh(&self, color: DVec3, same_sense: bool) -> Option<Mesh> {
+    pub fn untrimmed_mesh(&self, color: DVec3, same_sense: bool, tolerance: f64) -> Option<Mesh> {
         let Self::Torus {
             mat,
             major_radius,
@@ -336,13 +336,18 @@ impl Surface {
         if !(major_radius > minor_radius && *minor_radius > 0.) {
             return None;
         }
-        const N: u32 = 32;
+        // Taylor's bound over each parameter triangle is at most
+        // ((R+r)*du² + r*dv²)/4, including the mixed derivative.
+        // Allocate half the error budget to each angular direction.
+        let nu = (2. * PI * ((major_radius + minor_radius) / (2. * tolerance)).sqrt()).ceil().max(3.) as u32;
+        let nv = (2. * PI * (minor_radius / (2. * tolerance)).sqrt()).ceil().max(3.) as u32;
+        nu.checked_mul(nv)?;
         let mut mesh = Mesh::default();
         let sense = if same_sense { 1. } else { -1. };
-        for u in 0..N {
-            let (su, cu) = (2. * PI * u as f64 / N as f64).sin_cos();
-            for v in 0..N {
-                let (sv, cv) = (2. * PI * v as f64 / N as f64).sin_cos();
+        for u in 0..nu {
+            let (su, cu) = (2. * PI * u as f64 / nu as f64).sin_cos();
+            for v in 0..nv {
+                let (sv, cv) = (2. * PI * v as f64 / nv as f64).sin_cos();
                 let radius = major_radius + minor_radius * cv;
                 let pos = mat * DVec4::new(minor_radius * sv, radius * su, radius * cu, 1.);
                 let norm = mat * DVec4::new(sv, cv * su, cv * cu, 0.);
@@ -351,10 +356,10 @@ impl Surface {
                     norm: norm.xyz() * sense,
                     color,
                 });
-                let a = u * N + v;
-                let b = ((u + 1) % N) * N + v;
-                let c = ((u + 1) % N) * N + (v + 1) % N;
-                let d = u * N + (v + 1) % N;
+                let a = u * nv + v;
+                let b = ((u + 1) % nu) * nv + v;
+                let c = ((u + 1) % nu) * nv + (v + 1) % nv;
+                let d = u * nv + (v + 1) % nv;
                 // Su × Sv points inward for this parameterization.
                 for [i, j, k] in [[a, c, b], [a, d, c]] {
                     let verts = if same_sense { [i, j, k] } else { [i, k, j] };
@@ -1678,6 +1683,30 @@ mod tests {
     use nurbs::{KnotVector, NURBSSurface};
 
     #[test]
+    fn untrimmed_torus_respects_distance_budget_in_native_units() {
+        for major in [1.2, 4., 100.] {
+            for scale in [0.001, 1., 25.4] {
+                let tolerance = 0.01 * scale;
+                let surface = Surface::new_torus_with_ref_direction(
+                    DVec3::new(7., -2., 3.) * scale, DVec3::y(), DVec3::z(),
+                    major * scale, scale,
+                ).unwrap();
+                let Surface::Torus { mat_i, .. } = &surface else { unreachable!() };
+                let mesh = surface.untrimmed_mesh(DVec3::zeros(), true, tolerance).unwrap();
+                for triangle in &mesh.triangles {
+                    let [a, b, c] = [triangle.verts.x, triangle.verts.y, triangle.verts.z]
+                        .map(|i| mesh.verts[i as usize].pos);
+                    for [u, v] in [[0.5, 0.], [0., 0.5], [0.5, 0.5], [0.3, 0.6], [1./3., 1./3.]] {
+                        let p = (mat_i * (a * (1.-u-v) + b*u + c*v).push(1.)).xyz();
+                        let distance = (p.x.hypot(p.y.hypot(p.z) - major*scale) - scale).abs();
+                        assert!(distance <= tolerance, "R={major}, scale={scale}, error={distance}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn untrimmed_torus_is_closed_oriented_and_covers_the_surface_once() {
         for same_sense in [true, false] {
             let surface = Surface::new_torus_with_ref_direction(
@@ -1688,7 +1717,7 @@ mod tests {
                 1.,
             )
             .unwrap();
-            let mesh = surface.untrimmed_mesh(DVec3::zeros(), same_sense).unwrap();
+            let mesh = surface.untrimmed_mesh(DVec3::zeros(), same_sense, 0.01).unwrap();
             let mut edges = std::collections::HashMap::<_, (usize, i32)>::new();
             let mut area = 0.;
             for triangle in &mesh.triangles {
