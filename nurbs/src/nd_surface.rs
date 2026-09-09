@@ -11,6 +11,70 @@ pub struct NDBSplineSurface<const D: usize> {
     control_points: Vec<Vec<TVec<f64, D>>>,
 }
 
+/// Projection-local slab of equal-sized, row-major Bezier control nets.
+/// Recycle rejected patches; storage follows the live frontier, not the total
+/// number of subdivisions. A split reuses its parent's slot for the left half.
+pub(crate) struct BezierPatches<const D: usize> {
+    controls: Vec<TVec<f64, D>>,
+    free: Vec<usize>,
+    shape: [usize; 2],
+    scratch: Vec<TVec<f64, D>>,
+}
+
+impl<const D: usize> BezierPatches<D> {
+    pub fn new(shape: [usize; 2]) -> Self {
+        Self { controls: Vec::new(), free: Vec::new(), shape, scratch: Vec::new() }
+    }
+
+    fn allocate(&mut self) -> usize {
+        self.free.pop().unwrap_or_else(|| {
+            let start = self.controls.len();
+            self.controls.resize(start + self.shape[0] * self.shape[1], TVec::zeros());
+            start
+        })
+    }
+
+    pub fn insert(&mut self, controls: &[TVec<f64, D>]) -> usize {
+        let slot = self.allocate();
+        self.controls[slot..slot + self.shape[0] * self.shape[1]].copy_from_slice(controls);
+        slot
+    }
+
+    pub fn release(&mut self, slot: usize) {
+        self.free.push(slot);
+    }
+
+    pub fn split(&mut self, left: usize, axis: usize) -> usize {
+        let right = self.allocate();
+        let count = self.shape[axis];
+        let stride = if axis == 0 { self.shape[1] } else { 1 };
+        for lane in 0..self.shape[1 - axis] {
+            let start = if axis == 0 { lane } else { lane * self.shape[1] };
+            self.scratch.clear();
+            for i in 0..count {
+                self.scratch.push(self.controls[left + start + i * stride]);
+            }
+            self.controls[right + start + (count - 1) * stride] = self.scratch[count - 1];
+            for n in (1..count).rev() {
+                for i in 0..n {
+                    self.scratch[i] = (self.scratch[i] + self.scratch[i + 1]) * 0.5;
+                }
+                self.controls[left + start + (count - n) * stride] = self.scratch[0];
+                self.controls[right + start + (n - 1) * stride] = self.scratch[n - 1];
+            }
+        }
+        right
+    }
+}
+
+impl<const D: usize> std::ops::Index<usize> for BezierPatches<D> {
+    type Output = [TVec<f64, D>];
+
+    fn index(&self, slot: usize) -> &Self::Output {
+        &self.controls[slot..slot + self.shape[0] * self.shape[1]]
+    }
+}
+
 impl NDBSplineSurface<4> {
     /// Relative Cartesian travel per parameter unit, estimated from control
     /// polygons. Knot units and homogeneous weights are not spatial lengths.
@@ -103,17 +167,18 @@ impl<const D: usize> NDBSplineSurface<D> {
         self.v_knots.max_t()
     }
 
-    pub(crate) fn bezier_cell(&self, spans: [usize; 2]) -> Vec<Vec<TVec<f64, D>>> {
+    pub(crate) fn bezier_cell(&self, spans: [usize; 2]) -> Vec<TVec<f64, D>> {
         let [u, v] = spans;
         let rows: Vec<_> = self.control_points.iter().map(|row|
             crate::nd_curve::bezier_controls(&self.v_knots, row, v, self.v_knots[v], self.v_knots[v+1])
         ).collect();
-        let mut result = vec![Vec::new(); self.u_knots.degree()+1];
+        let width = self.v_knots.degree() + 1;
+        let mut result = vec![TVec::zeros(); (self.u_knots.degree() + 1) * width];
         for j in 0..=self.v_knots.degree() {
             let column: Vec<_> = rows.iter().map(|row| row[j]).collect();
             for (i, p) in crate::nd_curve::bezier_controls(&self.u_knots, &column, u,
                 self.u_knots[u], self.u_knots[u+1]).into_iter().enumerate() {
-                result[i].push(p);
+                result[i * width + j] = p;
             }
         }
         result
@@ -331,6 +396,32 @@ impl<const D: usize> NDBSplineSurface<D> {
 mod tests {
     use super::*;
     use nalgebra_glm::DVec4;
+
+    #[test]
+    fn patch_slab_splits_rectangular_homogeneous_nets_and_recycles_slots() {
+        // Unequal degrees expose transposed strides. Varying homogeneous
+        // weights also catches accidental Cartesian rather than affine splits.
+        let point = |x| DVec4::new(x, x + 10., -2. * x, x + 1.);
+        let source = [0., 8., 4., 16., 12., 32.].map(point);
+        let mut patches = BezierPatches::new([3, 2]);
+        let a = patches.insert(&source);
+        let b = patches.split(a, 0);
+        assert_eq!(patches[a], [0., 8., 2., 12., 5., 18.].map(point));
+        assert_eq!(patches[b], [5., 18., 8., 24., 12., 32.].map(point));
+
+        patches.release(a);
+        let c = patches.split(b, 1);
+        assert_eq!(c, a); // Right child can occupy a slot before its parent.
+        assert_eq!(patches[b], [5., 11.5, 8., 16., 12., 22.].map(point));
+        assert_eq!(patches[c], [11.5, 18., 16., 24., 22., 32.].map(point));
+        let capacities = (patches.controls.capacity(), patches.scratch.capacity(), patches.free.capacity());
+        for axis in (0..128).map(|i| i % 2) {
+            patches.release(c);
+            assert_eq!(patches.split(b, axis), c);
+            assert_eq!(patches.controls.len(), 12);
+            assert_eq!((patches.controls.capacity(), patches.scratch.capacity(), patches.free.capacity()), capacities);
+        }
+    }
 
     #[test]
     fn chart_scale_uses_cartesian_lengths_and_parameter_units() {

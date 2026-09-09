@@ -1,5 +1,38 @@
 # Würth and KiCad STEP repair worklog
 
+## Projection-local recycling slab — 2026-09-09
+
+Replace nested Bezier subdivision grids with flat row-major control nets in
+a projection-local slab. Queue entries carry slot offsets rather than owned
+grids. Split in place into the parent slot and one allocated/recycled slot;
+return rejected patches to the free list. One strided de Casteljau routine
+handles both axes, preserving operation order and breadth-first traversal.
+No unsafe code or new dependency. Unlike a monotonic arena, retained storage
+tracks the maximum live frontier rather than every patch ever visited.
+
+The rectangular, varying-weight regression checks both split axes, reuse of
+a slot before the parent, and 128 further splits without buffer growth.
+All 155 release library tests and wasm32 checking pass. All 42 stress/control
+oriented STL triangle multisets match the pre-change captures.
+
+Valgrind on CRJ009-ML4-TH reports 405,902 versus 213,582 allocations and
+78,996,865 versus 61,187,502 cumulative bytes allocated: 47.4% fewer allocations
+and 22.5% less allocation traffic. Both executions report zero memory errors.
+These are whole standalone Foxtrot profiler totals, not slab-only counts or
+peak memory. Preserve before/after heap logs in the data-layout report.
+
+The previous optimized worker versus slab ABBA capture pools six samples per
+board: 1.840485 versus 1.753312 seconds, about 4.7% less API time. Host drift
+is significant; individual blocks span 1.686–1.934 seconds. Do not combine
+this percentage with the earlier origin/master result as a fresh comparison.
+All scene counts, coverage and diagnostics remain unchanged.
+
+Reject the sample-table XYZ/UV SoA experiment: its 1.959526-second capture is
+effectively tied with the adjacent 1.943387-second pre-change capture. The
+extra stream does not establish a benefit here. Evidence:
+`local/board-comparison/{soa,slab,slab-paired-*,slab-geometry,slab-controls}`
+and `slab-geometry-check.json`.
+
 ## Board performance paired checkpoint — 2026-09-08
 
 Retained implementation: e1f2e97. Replay baseline–HEAD–HEAD–baseline, three

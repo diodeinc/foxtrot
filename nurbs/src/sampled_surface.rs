@@ -1,4 +1,4 @@
-use crate::{abstract_surface::AbstractSurface, nd_surface::NDBSplineSurface};
+use crate::{abstract_surface::AbstractSurface, nd_surface::{BezierPatches, NDBSplineSurface}};
 use log::error;
 use nalgebra_glm::{dot, DVec2, DVec3};
 use std::collections::VecDeque;
@@ -22,7 +22,7 @@ struct SurfaceCell<const N: usize> {
     spans: [usize; 2],
     bounds: [DVec3; 2],
     samples: std::ops::Range<usize>,
-    controls: OnceLock<Vec<Vec<nalgebra_glm::TVec<f64, N>>>>,
+    controls: OnceLock<Vec<nalgebra_glm::TVec<f64, N>>>,
 }
 
 struct DistanceModel {
@@ -500,18 +500,19 @@ where
         let scale = self.cells.iter().map(|c| (c.bounds[1]-c.bounds[0]).norm()).fold(0., f64::max);
         let tolerance = f64::EPSILON.sqrt() * scale + PROJECTION_TOL * p.norm();
         let mut queue = VecDeque::new();
+        let mut patches = BezierPatches::new([self.surf.u_knots.degree() + 1, self.surf.v_knots.degree() + 1]);
         if error.sqrt() > tolerance {
             for cell in &self.cells {
                 let lower = (cell.bounds[0]-p).sup(&(p-cell.bounds[1])).sup(&DVec3::zeros()).norm();
                 if lower+tolerance >= error.sqrt() { continue; }
                 let controls = cell.controls.get_or_init(|| self.surf.bezier_cell(cell.spans));
-                queue.push_back((controls.clone(),
+                queue.push_back((patches.insert(controls),
                     DVec2::new(self.surf.u_knots[cell.spans[0]], self.surf.v_knots[cell.spans[1]]),
                     DVec2::new(self.surf.u_knots[cell.spans[0]+1], self.surf.v_knots[cell.spans[1]+1]),
                     cell.spans));
             }
         }
-        while let Some((controls, lo, hi, spans)) = queue.pop_front() {
+        while let Some((patch, lo, hi, spans)) = queue.pop_front() {
             let mid = (lo + hi) * 0.5;
             let d = self.surf.derivs_in_span::<2>(mid, spans, p);
             let normal = d[1][0].cross(&d[0][1]);
@@ -523,7 +524,7 @@ where
             let residual = result.map_or(DVec3::zeros(), |uv| self.surf.derivs_relative_to::<1>(uv, p)[0][0]);
             let direction = residual.try_normalize(0.).unwrap_or_else(DVec3::zeros);
             let mut support = f64::INFINITY;
-            for q in controls.iter().flatten().copied().map(crate::nd_curve::cartesian) {
+            for q in patches[patch].iter().copied().map(crate::nd_curve::cartesian) {
                 bounds[0] = bounds[0].inf(&q); bounds[1] = bounds[1].sup(&q);
                 let offset = DVec3::new((q-p).dot(&normal), (q-p).dot(&tangent), (q-p).dot(&bitangent));
                 slab[0] = slab[0].inf(&offset); slab[1] = slab[1].sup(&offset);
@@ -538,7 +539,10 @@ where
             let lower = (bounds[0]-p).sup(&(p-bounds[1])).sup(&DVec3::zeros()).norm()
                 .max(slab[0].sup(&(-slab[1])).sup(&DVec3::zeros()).norm())
                 .max(support-roundoff);
-            if lower + tolerance >= error.sqrt() { continue; }
+            if lower + tolerance >= error.sqrt() {
+                patches.release(patch);
+                continue;
+            }
             for seed in [lo, hi, DVec2::new(lo.x, hi.y), DVec2::new(hi.x, lo.y), mid] {
                 // Every evaluated point is a feasible upper bound. Accelerate
                 // improvements with Newton, rather than repeatedly solving the
@@ -557,26 +561,15 @@ where
             // of distance-bound uncertainty and can indefinitely starve an axis.
             let axis = usize::from((hi.y-lo.y)/(self.surf.v_knots[spans[1]+1]-self.surf.v_knots[spans[1]])
                 > (hi.x-lo.x)/(self.surf.u_knots[spans[0]+1]-self.surf.u_knots[spans[0]]));
-            if mid[axis] == lo[axis] || mid[axis] == hi[axis] { continue; }
-            let mut halves = [controls.clone(), controls.clone()];
-            if axis == 0 {
-                for j in 0..controls[0].len() {
-                    let column: Vec<_> = controls.iter().map(|row| row[j]).collect();
-                    for (side, column) in crate::nd_curve::split_bezier(&column).iter().enumerate() {
-                        for (i, &p) in column.iter().enumerate() { halves[side][i][j] = p; }
-                    }
-                }
-            } else {
-                for (i, row) in controls.iter().enumerate() {
-                    let [a,b] = crate::nd_curve::split_bezier(row);
-                    halves[0][i] = a; halves[1][i] = b;
-                }
+            if mid[axis] == lo[axis] || mid[axis] == hi[axis] {
+                patches.release(patch);
+                continue;
             }
+            let right = patches.split(patch, axis);
             let mut left_hi = hi; left_hi[axis] = mid[axis];
             let mut right_lo = lo; right_lo[axis] = mid[axis];
-            let [a,b] = halves;
-            queue.push_back((a, lo, left_hi, spans));
-            queue.push_back((b, right_lo, hi, spans));
+            queue.push_back((patch, lo, left_hi, spans));
+            queue.push_back((right, right_lo, hi, spans));
         }
         if result.is_none() {
             error!("Could not find UV coordinates");
