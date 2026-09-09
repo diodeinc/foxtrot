@@ -27,6 +27,14 @@ is significant; individual blocks span 1.686–1.934 seconds. Do not combine
 this percentage with the earlier origin/master result as a fresh comparison.
 All scene counts, coverage and diagnostics remain unchanged.
 
+A fresh origin/master–slab–slab–origin/master capture gives 2.113073 versus
+1.618770 seconds, 23.4% less elapsed time; the stricter 30% target is still
+unmet. Both paired comparisons together take 154.8 seconds, excluding builds.
+Full report, raw samples and heap logs:
+`.amp/in/artifacts/foxtrot-data-layout/`. Remove 111.9 MiB of superseded direct
+iteration mesh copies after verifying equivalence; retain the boxed-before
+and slab-after meshes, all small reports, frozen workers and source corpus.
+
 Reject the sample-table XYZ/UV SoA experiment: its 1.959526-second capture is
 effectively tied with the adjacent 1.943387-second pre-change capture. The
 extra stream does not establish a benefit here. Evidence:
