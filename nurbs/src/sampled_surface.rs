@@ -514,12 +514,20 @@ where
         // A local stationary point is only an upper bound. Refine the actual
         // homogeneous control hull until no remaining patch can improve the
         // distance at the geometric resolution of f64 input coordinates.
-        let scale = self.cells.iter().map(|c| (c.bounds[1]-c.bounds[0]).norm()).fold(0., f64::max);
-        let tolerance = f64::EPSILON.sqrt() * scale + PROJECTION_TOL * p.norm();
-        if error.sqrt() > tolerance {
+        // Keep uncertainty componentwise: a wide coordinate must not erase
+        // a resolvable separation in a thin coordinate. Retain the original
+        // control scale through subdivision, including cancellation against p.
+        let scale = self.cells.iter().fold(DVec3::zeros(), |scale, c|
+            scale.sup(&c.bounds[0].abs()).sup(&c.bounds[1].abs()));
+        let roundoff = PROJECTION_TOL * (p.abs() + scale);
+        let threshold = |result: Option<DVec2>| result.map_or(f64::INFINITY, |uv|
+            (self.surf.derivs_relative_to::<1>(uv, p)[0][0].abs() - roundoff)
+                .sup(&DVec3::zeros()).norm());
+        if threshold(result) > 0. {
             for cell in &self.cells {
-                let lower = (cell.bounds[0]-p).sup(&(p-cell.bounds[1])).sup(&DVec3::zeros()).norm();
-                if lower+tolerance >= error.sqrt() { continue; }
+                let lower = ((cell.bounds[0]-p).sup(&(p-cell.bounds[1])) - roundoff)
+                    .sup(&DVec3::zeros()).norm();
+                if lower >= error.sqrt() { continue; }
                 let controls = cell.controls.get_or_init(|| self.surf.bezier_cell(cell.spans));
                 queue.push_back((patches.insert(controls),
                     DVec2::new(self.surf.u_knots[cell.spans[0]], self.surf.v_knots[cell.spans[1]]),
@@ -548,16 +556,26 @@ where
             // Any supporting plane bounds the hull. The incumbent residual
             // preserves correlation along oblique extrusion axes that boxes
             // lose, especially at constrained endpoint minima.
-            let roundoff = PROJECTION_TOL * (p.norm() + bounds[0].abs().sup(&bounds[1].abs()).norm());
             // An orthonormal control box also bounds distance beyond a finite
             // patch edge; the normal slab alone only bounds its infinite plane.
-            let lower = (bounds[0]-p).sup(&(p-bounds[1])).sup(&DVec3::zeros()).norm()
-                .max(slab[0].sup(&(-slab[1])).sup(&DVec3::zeros()).norm())
-                .max(support-roundoff);
-            if lower + tolerance >= error.sqrt() {
+            let slab_roundoff = DVec3::new(normal.abs().dot(&roundoff),
+                tangent.abs().dot(&roundoff), bitangent.abs().dot(&roundoff));
+            // Stop when distance comparisons overlap at input resolution,
+            // not when an optimistic bound beats an optimistic incumbent.
+            // Fixed arithmetic uncertainty cannot shrink with subdivision.
+            // This is a numerical tie, not certified exact domination.
+            let box_gap = (bounds[0]-p).sup(&(p-bounds[1]));
+            let slab_gap = slab[0].sup(&(-slab[1]));
+            let support_roundoff = direction.abs().dot(&roundoff);
+            let bound = |sign: f64| (box_gap + sign * roundoff).sup(&DVec3::zeros()).norm()
+                .max((slab_gap + sign * slab_roundoff).sup(&DVec3::zeros()).norm())
+                .max(support + sign * support_roundoff);
+            // Definitely farther patches need no candidate evaluations.
+            if result.is_some() && bound(-1.) >= (residual.abs() + roundoff).norm() {
                 patches.release(patch);
                 continue;
             }
+            let bound_ceiling = bound(1.);
             for seed in [lo, hi, DVec2::new(lo.x, hi.y), DVec2::new(hi.x, lo.y), mid] {
                 // Every evaluated point is a feasible upper bound. Accelerate
                 // improvements with Newton, rather than repeatedly solving the
@@ -571,7 +589,15 @@ where
                     if d < error { error = d; result = Some(uv); }
                 }
             }
-            if error.sqrt() <= tolerance { break; }
+            if error == 0. { break; }
+            // Subdivision cannot resolve geometry inside the original input
+            // uncertainty. Evaluate this patch's candidates above, then stop
+            // rather than subdividing a rounded control hull indefinitely.
+            if bound_ceiling >= threshold(result)
+                || (0..3).all(|i| bounds[1][i] - bounds[0][i] <= roundoff[i]) {
+                patches.release(patch);
+                continue;
+            }
             // Both parameter widths must shrink. Curvature is not a measure
             // of distance-bound uncertainty and can indefinitely starve an axis.
             let axis = usize::from((hi.y-lo.y)/(self.surf.v_knots[spans[1]+1]-self.surf.v_knots[spans[1]])
@@ -642,6 +668,24 @@ mod tests {
         close(uv.x, 0., 1e-10);
         close(uv.y, 0.5, 1e-10);
         close((sampled.surf.point(uv)-target).norm_squared(), 0.02, 1e-12);
+    }
+
+    #[test]
+    fn single_cell_projection_resolves_close_branches_in_parameter_space() {
+        let surf = NDBSplineSurface::new(true, true,
+            KnotVector::from_multiplicities(3, &[0., 1.], &[4, 4]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [-1., 3., -3., 1.].iter().enumerate().map(|(i, &y)|
+                [0., 1.].iter().map(|&z| DVec3::new(i as f64 * 1e-10 / 3., y, z)).collect()).collect());
+        let sampled = SampledSurface::new(surf);
+        for u in [0.47, 0.5, 0.53] {
+            // Independent power-basis form of the cubic, including targets
+            // not at a subdivision midpoint or one of the initial samples.
+            let y = -1. + u * (12. + u * (-30. + 20. * u));
+            let uv = sampled.uv_from_point(DVec3::new(u * 1e-10, y, 0.37)).unwrap();
+            close(uv.x, u, 1e-8);
+            close(uv.y, 0.37, 1e-10);
+        }
     }
 
     #[test]

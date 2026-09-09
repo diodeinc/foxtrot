@@ -1,5 +1,44 @@
 # Würth and KiCad STEP repair worklog
 
+## Review: resolve thin spline branches without a global spatial floor — 2026-09-09
+
+Remove the sqrt(EPS) × largest-cell-diagonal search cutoff. It returned
+u=0.11270166537925833 instead of u=0.5 on a cubic extrusion only 1e-10 wide.
+Use componentwise input-scale allowances for boxes and projected bounds.
+Evaluate feasible candidates before treating overlapping distance uncertainty
+as a numerical tie; prune definitely farther patches before those evaluations.
+Keep componentwise hull-width and representable-parameter termination.
+
+An initial downward-bound/contracted-incumbent comparison was insufficient:
+the AT1H capacitor timed out with over 4 GiB RSS while subdividing already
+unresolvable hulls. Oracle consultation identified the nonvanishing allowance
+gap. The overlap stopping rule completes that case in 5.6 seconds / 28 MiB
+in the focused replay. No model-specific seeds or geometric tolerance changes.
+The regression also exercises non-midpoint targets u=0.47 and u=0.53.
+
+This is nearest-point search to an engineering f64 input resolution, not
+certified interval arithmetic or a universal parameter-branch guarantee.
+Large common normal offsets can still conceal tiny branch-distance differences
+in independently rounded scalar objectives; preserving that correlation would
+require factored objective bounds as well as candidate comparisons.
+
+Verification: all 158 release library tests pass; wasm32 checking passes.
+All 42 stress/control cases process. Across 32 accessible boards × 3 repeats,
+all 96 completion states, Foxtrot diagnostics and finite/index validations
+match pre-review HEAD. The 33 credential-blocked repositories remain untested;
+pre-existing missing-model references remain unchanged. Five of seven OCCT
+stress checks pass; OCCT rejects Coilcraft's source as invalid, and the LED
+has a pre-existing reverse-distance mismatch with an unchanged mesh. All seven
+final oriented triangle multisets match the OCCT-tested meshes. The capacitor
+before/after/oracle render was inspected: no gross regression, as expected.
+
+Paired board capture, sum of per-board median Foxtrot time: pre-review HEAD
+1.695261 s → corrected HEAD 1.852119 s (9.3% slower). This is a correctness
+cost, not a performance win or a fresh origin/master comparison. Captures took
+19.6 s and 18.9 s respectively. Evidence: `local/board-comparison/review-before`,
+`review-verified`, `review-verified-{geometry,controls}`, and `review-oracle`;
+visual review: `.amp/in/artifacts/review-fixes/`.
+
 ## Review: tolerance-driven untrimmed tori — 2026-09-09
 
 Replace the fixed 32×32 torus grid with separate angular resolutions derived
