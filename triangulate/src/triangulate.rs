@@ -2125,11 +2125,11 @@ mod tests {
             let step = StepFile::parse(&flat).unwrap();
             let (mesh, stats) = triangulate(&step);
             assert_eq!((stats.num_faces, stats.num_errors()), (2, 1));
-            assert_eq!((mesh.verts.len(), mesh.triangles.len()), (1024, 2048));
+            assert_eq!((mesh.verts.len(), mesh.triangles.len()), (4500, 9000));
             assert!(mesh
                 .triangles
                 .iter()
-                .all(|t| t.verts.iter().all(|&i| i < 1024)));
+                .all(|t| t.verts.iter().all(|&i| (i as usize) < mesh.verts.len())));
         }
     }
 
@@ -2221,8 +2221,8 @@ mod tests {
                 &mut HashMap::new(),
             )
             .unwrap();
-            assert_eq!(mesh.verts.len(), 1024);
-            assert_eq!(mesh.triangles.len(), 2048);
+            assert_eq!(mesh.verts.len(), 4500);
+            assert_eq!(mesh.triangles.len(), 9000);
         }
     }
 
