@@ -1,5 +1,17 @@
 # Würth and KiCad STEP repair worklog
 
+## Review: preserve shared spatial boundaries — 2026-09-09
+
+Reject newly sampled Steiner points lying exactly on trim constraints before
+CDT insertion. Their surface-evaluated positions need not lie on the shared
+spatial chord. Keep the edge-owned vertices unchanged instead of letting one
+face split a chord independently. Exact orientation predicates handle diagonal
+as well as axis-aligned trims without introducing a geometric epsilon.
+
+The parabolic-extrusion regression reproduces the differing cap/side boundary
+before filtering and verifies identical spatial segments afterward. Targeted
+release test `spline_samples_preserve` passes.
+
 ## Face-batch projection scratch and inline seeds — 2026-09-09
 
 Keep the at-most-four seam alternatives inline using the existing SmallVec

@@ -1026,7 +1026,8 @@ fn advanced_face(
     let mut constraints: Vec<_> = edges.iter().map(|&(a, b)| (a, b, true)).collect();
     let bonus_points = pts.len();
     crate::timing::time("face:add_steiner_points", || {
-        prepared.add_steiner_points(&mut pts, &mut mesh.verts)
+        prepared.add_steiner_points(&mut pts, &mut mesh.verts);
+        retain_interior_samples(&mut pts, &mut mesh.verts, &edges, bonus_points);
     });
     crate::timing::time("face:resolve_crossing_edges", || {
         resolve_crossing_edges(&mut pts, &mut constraints, &mut mesh.verts)
@@ -1862,6 +1863,32 @@ fn segment_intersection_weights(
     Some((weights(ca, cb), weights(ac, ad)))
 }
 
+/// Interior samples must not move a prescribed spatial trim chord merely
+/// because the CDT splits its UV constraint at a collinear sample.
+fn retain_interior_samples(
+    pts: &mut Vec<(f64, f64)>,
+    verts: &mut Vec<mesh::Vertex>,
+    edges: &[(usize, usize)],
+    first: usize,
+) {
+    let coord = |(x, y)| robust::Coord { x, y };
+    let mut end = first;
+    for i in first..pts.len() {
+        let p = pts[i];
+        if edges.iter().any(|&(a, b)| {
+            let (a, b) = (pts[a], pts[b]);
+            p.0 >= a.0.min(b.0) && p.0 <= a.0.max(b.0)
+                && p.1 >= a.1.min(b.1) && p.1 <= a.1.max(b.1)
+                && robust::orient2d(coord(a), coord(b), coord(p)) == 0.
+        }) { continue; }
+        pts[end] = p;
+        verts[end] = verts[i];
+        end += 1;
+    }
+    pts.truncate(end);
+    verts.truncate(end);
+}
+
 /// Split all proper constraint intersections in batches. Both children retain
 /// their parent's boundary parity; boundary geometry owns the lifted position
 /// when an internal refinement edge crosses a trim.
@@ -1988,6 +2015,50 @@ fn resolve_crossing_edges(
 mod tests {
     use super::*;
     use nurbs::AbstractSurface;
+
+    #[test]
+    fn spline_samples_preserve_the_spatial_edges_shared_with_a_cap() {
+        let surface = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(true, true,
+            KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            [(0., 0.), (0.5, 0.), (1., 1.)].iter().map(|&(x, y)|
+                [0., 1.].iter().map(|&z| DVec4::new(x, y, z, 1.)).collect()).collect())));
+        let boundary: Vec<_> = (0..=8).map(|i| (i, 0.))
+            .chain((0..=8).rev().map(|i| (i, 1.))).map(|(i, z)| {
+                let u = i as f64 / 8.;
+                mesh::Vertex { pos: DVec3::new(u, u*u, z), norm: DVec3::zeros(), color: DVec3::zeros() }
+            }).collect();
+        let edges: Vec<_> = (0..boundary.len()).map(|i| (i, (i+1)%boundary.len())).collect();
+        let key = |a: DVec3, b: DVec3| {
+            let (a, b) = if a.x < b.x { (a, b) } else { (b, a) };
+            [a, b].map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()])
+        };
+        let mut cap: Vec<_> = boundary[..9].windows(2).map(|p| key(p[0].pos,p[1].pos)).collect();
+        cap.sort();
+        for filtered in [false, true] {
+            let mut verts = boundary.clone();
+            let prepared = surface.prepare(&verts, &edges, true, 0., false).unwrap();
+            let mut pts = prepared.lower_verts(&verts).unwrap();
+            prepared.add_steiner_points(&mut pts, &mut verts);
+            if filtered { retain_interior_samples(&mut pts, &mut verts, &edges, boundary.len()); }
+            let t = cdt::Triangulation::build_with_edges(&pts, &edges).unwrap();
+            let mut side = Vec::new();
+            for (a,b,c) in t.triangles() {
+                for (a,b) in [(a,b),(b,c),(c,a)] {
+                    let (a,b) = (verts[a].pos,verts[b].pos);
+                    if a.z == 0. && b.z == 0. { side.push(key(a,b)); }
+                }
+            }
+            side.sort();
+            if filtered { assert_eq!(side, cap); } else { assert_ne!(side, cap); }
+        }
+        // A diagonal trim is inside the bounding box: strict bbox checks
+        // alone cannot prevent the same ownership violation.
+        let mut pts = vec![(0.,0.),(2.,2.),(0.,2.),(1.,1.),(0.5,1.)];
+        let mut verts = vec![boundary[0]; pts.len()];
+        retain_interior_samples(&mut pts,&mut verts,&[(0,1),(1,2),(2,0)],3);
+        assert_eq!(pts, [(0.,0.),(2.,2.),(0.,2.),(0.5,1.)]);
+    }
 
     #[test]
     fn crossing_vertices_receive_face_normals_and_color() {
