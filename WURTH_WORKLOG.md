@@ -1,5 +1,34 @@
 # Würth and KiCad STEP repair worklog
 
+## Face-batch projection scratch and inline seeds — 2026-09-09
+
+Keep the at-most-four seam alternatives inline using the existing SmallVec
+dependency (separate commit 2469b8a; 58 NURBS tests pass). Then introduce
+caller-owned ProjectionScratch and retain the slab/queue capacities across
+each face's vertex-lowering batch and each boundary-refinement pass. Reset
+logical contents and the control-net shape on every query; never carry
+seeds, results, or pending subdivision work between points. Scratch remains
+local to the caller, without synchronization or thread-local state, and is
+dropped after the batch rather than retained for the entire corpus.
+
+Extend the slab regression to reset into a transposed shape without capacity
+growth, and run the multi-sheet projection regression with reused scratch.
+All 155 release library tests and wasm32 checking pass. All 42 stress/control
+oriented STL triangle multisets match the slab iteration; all 384 board scene
+samples retain counts, coverage, diagnostics and finite/index validity.
+
+Combined changes versus the preceding slab implementation: Valgrind on
+CRJ009-ML4-TH reports 213,582 to 211,055 allocations (1.2% fewer), and
+61,187,530 to 59,832,246 cumulative bytes allocated (2.2% less). Both runs
+report zero memory errors. These are whole standalone profiler totals, not
+peak memory or isolated scratch counts. The paired six-sample/board capture
+is 1.624949 to 1.611180 seconds (0.8% less), too small relative to observed
+timing variation to claim a demonstrated latency improvement. No new
+origin/master comparison is inferred from these incremental measurements.
+
+Evidence: `local/board-comparison/face-scratch-*`; review report, raw captures,
+and heap logs: `.amp/in/artifacts/foxtrot-face-scratch/`.
+
 ## Projection-local recycling slab — 2026-09-09
 
 Replace nested Bezier subdivision grids with flat row-major control nets in

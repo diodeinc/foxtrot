@@ -7,7 +7,7 @@ use crate::{
     mesh::{Mesh, Triangle, Vertex},
     Error,
 };
-use nurbs::{AbstractSurface, SampledSurface};
+use nurbs::{AbstractSurface, ProjectionScratch, SampledSurface};
 
 #[derive(Debug, Clone)]
 enum SplineChart {
@@ -540,10 +540,6 @@ impl Surface {
 }
 
 impl PreparedSurface<'_> {
-    fn surf_lower(p: DVec3, surf: &SampledSurface<4>) -> Result<DVec2, Error> {
-        surf.uv_from_point(p).ok_or(Error::CouldNotLower)
-    }
-
     fn spline_raw(surf: &SampledSurface<4>, chart: &SplineChart, mapped: DVec2) -> Option<DVec2> {
         chart.raw(mapped).map(|raw| {
             DVec2::new(
@@ -563,10 +559,13 @@ impl PreparedSurface<'_> {
         })
     }
 
-    /// Lowers a 3D point on a specific surface into a 2D space defined by
-    /// the surface type.  This should only be called from `lower_verts`,
-    /// to ensure that `prepare` is called first.
+    #[cfg(test)]
     fn lower(&self, p: DVec3) -> Result<DVec2, Error> {
+        self.lower_with_scratch(p, &mut ProjectionScratch::default())
+    }
+
+    /// Lower one point in this prepared chart, reusing only allocation storage.
+    fn lower_with_scratch(&self, p: DVec3, scratch: &mut ProjectionScratch<4>) -> Result<DVec2, Error> {
         let p_ = DVec4::new(p.x, p.y, p.z, 1.0);
         match (self.surface, &self.chart) {
             (Surface::Torus { mat_i,major_radius,.. }, FaceChart::TorusStrip { periodic,cut,scale }) => {
@@ -650,7 +649,7 @@ impl PreparedSurface<'_> {
             (Surface::NURBS { surf, .. }, FaceChart::Spline(chart)) => {
                 // Project before applying the chart. Source uncertainty does
                 // not make nearby regular points part of a collapsed pole.
-                Ok(chart.lower(Self::surf_lower(p, surf)?))
+                Ok(chart.lower(surf.uv_from_point_with_scratch(p, scratch).ok_or(Error::CouldNotLower)?))
             }
             (Surface::Sphere { radius, .. }, FaceChart::Sphere { mat_i, .. }) => {
                 // mat_i is constructed in prepare to be a reasonable basis
@@ -896,6 +895,7 @@ impl PreparedSurface<'_> {
     pub fn refine_boundary(&self, pts: &mut Vec<(f64, f64)>, edges: &mut Vec<(usize, usize)>,
         verts: &mut Vec<Vertex>, tolerance: f64,
     ) -> Result<(), Error> {
+        let mut scratch = ProjectionScratch::default();
         let mut i = 0;
         while i < edges.len() {
             let (a, b) = edges[i];
@@ -922,7 +922,7 @@ impl PreparedSurface<'_> {
             if pos == va.pos || pos == vb.pos || pts.len() >= 1_000_000 {
                 return Err(Error::InvalidGeometry("boundary chart approximation did not converge"));
             }
-            let mut uv = self.lower(pos)?;
+            let mut uv = self.lower_with_scratch(pos, &mut scratch)?;
             for (axis, period) in self.mapped_periods().iter().enumerate() {
                 if let Some(period) = period { uv[axis] = Self::unwrap_near(uv[axis], (pa[axis]+pb[axis])*0.5, *period); }
             }
@@ -936,10 +936,11 @@ impl PreparedSurface<'_> {
     }
 
     fn lower_verts_inner(&self, verts: &[Vertex]) -> Result<Vec<(f64, f64)>, Error> {
+        let mut scratch = ProjectionScratch::default();
         let mut pts = Vec::with_capacity(verts.len());
         for v in verts {
             // Project to the 2D subspace for triangulation
-            let proj = self.lower(v.pos)?;
+            let proj = self.lower_with_scratch(v.pos, &mut scratch)?;
             pts.push((proj.x, proj.y));
         }
         Ok(pts)

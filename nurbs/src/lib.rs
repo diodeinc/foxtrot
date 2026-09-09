@@ -41,4 +41,4 @@ pub use crate::nd_surface::NDBSplineSurface;
 pub use crate::nurbs_curve::NURBSCurve;
 pub use crate::nurbs_surface::NURBSSurface;
 pub use crate::sampled_curve::SampledCurve;
-pub use crate::sampled_surface::SampledSurface;
+pub use crate::sampled_surface::{ProjectionScratch, SampledSurface};

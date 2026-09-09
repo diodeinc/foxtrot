@@ -11,9 +11,10 @@ pub struct NDBSplineSurface<const D: usize> {
     control_points: Vec<Vec<TVec<f64, D>>>,
 }
 
-/// Projection-local slab of equal-sized, row-major Bezier control nets.
+/// Reusable slab of equal-sized, row-major Bezier control nets.
 /// Recycle rejected patches; storage follows the live frontier, not the total
 /// number of subdivisions. A split reuses its parent's slot for the left half.
+#[derive(Default)]
 pub(crate) struct BezierPatches<const D: usize> {
     controls: Vec<TVec<f64, D>>,
     free: Vec<usize>,
@@ -22,8 +23,11 @@ pub(crate) struct BezierPatches<const D: usize> {
 }
 
 impl<const D: usize> BezierPatches<D> {
-    pub fn new(shape: [usize; 2]) -> Self {
-        Self { controls: Vec::new(), free: Vec::new(), shape, scratch: Vec::new() }
+    pub fn reset(&mut self, shape: [usize; 2]) {
+        self.controls.clear();
+        self.free.clear();
+        self.scratch.clear();
+        self.shape = shape;
     }
 
     fn allocate(&mut self) -> usize {
@@ -403,7 +407,8 @@ mod tests {
         // weights also catches accidental Cartesian rather than affine splits.
         let point = |x| DVec4::new(x, x + 10., -2. * x, x + 1.);
         let source = [0., 8., 4., 16., 12., 32.].map(point);
-        let mut patches = BezierPatches::new([3, 2]);
+        let mut patches = BezierPatches::default();
+        patches.reset([3, 2]);
         let a = patches.insert(&source);
         let b = patches.split(a, 0);
         assert_eq!(patches[a], [0., 8., 2., 12., 5., 18.].map(point));
@@ -421,6 +426,14 @@ mod tests {
             assert_eq!(patches.controls.len(), 12);
             assert_eq!((patches.controls.capacity(), patches.scratch.capacity(), patches.free.capacity()), capacities);
         }
+        patches.release(c);
+        patches.reset([2, 3]);
+        let a = patches.insert(&source);
+        let b = patches.split(a, 0);
+        assert_eq!(a, 0);
+        assert_eq!(patches[a], [0., 8., 4., 8., 10., 18.].map(point));
+        assert_eq!(patches[b], [8., 10., 18., 16., 12., 32.].map(point));
+        assert_eq!((patches.controls.capacity(), patches.scratch.capacity(), patches.free.capacity()), capacities);
     }
 
     #[test]

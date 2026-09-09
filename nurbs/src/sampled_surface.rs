@@ -15,6 +15,15 @@ pub struct SampledSurface<const N: usize> {
     cells: Vec<SurfaceCell<N>>,
 }
 
+/// Caller-owned storage for a batch of independent surface projections.
+/// Each query resets logical contents while retaining allocated capacity;
+/// no seed or geometric result carries over to the next point or surface.
+#[derive(Default)]
+pub struct ProjectionScratch<const N: usize> {
+    patches: BezierPatches<N>,
+    queue: VecDeque<(usize, DVec2, DVec2, [usize; 2])>,
+}
+
 const PROJECTION_TOL: f64 = 64. * f64::EPSILON;
 
 #[derive(Debug, Clone)]
@@ -432,6 +441,13 @@ where
     }
 
     pub fn uv_from_point(&self, p: DVec3) -> Option<DVec2> {
+        self.uv_from_point_with_scratch(p, &mut ProjectionScratch::default())
+    }
+
+    pub fn uv_from_point_with_scratch(&self, p: DVec3, scratch: &mut ProjectionScratch<N>) -> Option<DVec2> {
+        let ProjectionScratch { patches, queue } = scratch;
+        patches.reset([self.surf.u_knots.degree() + 1, self.surf.v_knots.degree() + 1]);
+        queue.clear();
         assert!(!self.samples.is_empty());
         let mut best = (f64::INFINITY, u32::MAX);
         kd_nearest(&self.samples, &self.kd, 0, p, &mut best);
@@ -500,8 +516,6 @@ where
         // distance at the geometric resolution of f64 input coordinates.
         let scale = self.cells.iter().map(|c| (c.bounds[1]-c.bounds[0]).norm()).fold(0., f64::max);
         let tolerance = f64::EPSILON.sqrt() * scale + PROJECTION_TOL * p.norm();
-        let mut queue = VecDeque::new();
-        let mut patches = BezierPatches::new([self.surf.u_knots.degree() + 1, self.surf.v_knots.degree() + 1]);
         if error.sqrt() > tolerance {
             for cell in &self.cells {
                 let lower = (cell.bounds[0]-p).sup(&(p-cell.bounds[1])).sup(&DVec3::zeros()).norm();
@@ -638,9 +652,10 @@ mod tests {
             [-1., 3., -3., 1.].iter().enumerate().map(|(i,&y)|
                 [0.,1.].iter().map(|&z| DVec3::new(i as f64 * 0.001 / 3., y, z)).collect()).collect());
         let sampled = SampledSurface::new(surf);
+        let mut scratch = ProjectionScratch::default();
         for i in 1..40 {
             let target = sampled.surf.point(DVec2::new(i as f64 / 40., 0.37));
-            let uv = sampled.uv_from_point(target).unwrap();
+            let uv = sampled.uv_from_point_with_scratch(target, &mut scratch).unwrap();
             assert!((sampled.surf.point(uv)-target).norm() < 1e-10);
         }
     }
