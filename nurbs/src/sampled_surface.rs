@@ -481,10 +481,17 @@ where
                 }
             }
         }
+        // Rational evaluation translates every control by the query point.
+        // Do that once, preserving the evaluator's fused homogeneous arithmetic.
+        // Polynomial evaluation instead subtracts the reference after forming
+        // its control differences, so keep its original evaluation path.
+        let translated = (N == 4).then(|| self.surf.translated(p));
+        let evaluator = translated.as_ref().unwrap_or(&self.surf);
+        let reference = if N == 4 { DVec3::zeros() } else { p };
         // Sibling patches share corners. Cache exact evaluations only within
         // this query; carrying distances across points or surfaces is invalid.
         let mut distance = |uv: DVec2| *distances.entry((uv.x.to_bits(), uv.y.to_bits()))
-            .or_insert_with(|| self.surf.derivs_relative_to::<1>(uv, p)[0][0].norm_squared());
+            .or_insert_with(|| evaluator.derivs_relative_to::<1>(uv, reference)[0][0].norm_squared());
         let domain = [&self.surf.u_knots, &self.surf.v_knots].map(|k| 0..k.len());
         let mut result = seeds
             .iter()
@@ -546,10 +553,16 @@ where
         }
         while let Some((patch, lo, hi, spans)) = queue.pop_front() {
             let mid = (lo + hi) * 0.5;
-            let d = self.surf.derivs_in_span::<2>(mid, spans, p);
-            let normal = d[1][0].cross(&d[0][1]);
+            // Only a bounding frame, not a mesh normal: any orthonormal frame
+            // encloses the control hull. Chords avoid evaluating surface jets.
+            let nu = self.surf.u_knots.degree() + 1;
+            let nv = self.surf.v_knots.degree() + 1;
+            let control = |i| crate::nd_curve::cartesian(patches[patch][i]);
+            let du = control((nu-1)*nv + nv/2) - control(nv/2);
+            let dv = control((nu/2)*nv + nv-1) - control((nu/2)*nv);
+            let normal = du.cross(&dv);
             let normal = if normal.norm_squared() > 0. { normal.normalize() } else { DVec3::zeros() };
-            let tangent = if d[1][0].norm_squared() > 0. { d[1][0].normalize() } else { DVec3::zeros() };
+            let tangent = if du.norm_squared() > 0. { du.normalize() } else { DVec3::zeros() };
             let bitangent = normal.cross(&tangent);
             let mut slab = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
             let mut bounds = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
@@ -610,10 +623,23 @@ where
                 patches.release(patch);
                 continue;
             }
-            // Both parameter widths must shrink. Curvature is not a measure
-            // of distance-bound uncertainty and can indefinitely starve an axis.
-            let axis = usize::from((hi.y-lo.y)/(self.surf.v_knots[spans[1]+1]-self.surf.v_knots[spans[1]])
-                > (hi.x-lo.x)/(self.surf.u_knots[spans[0]+1]-self.surf.u_knots[spans[0]]));
+            // Favor the direction with greater control-polygon bend, but only
+            // by three binary subdivision levels. Unlike a growing aspect
+            // ratio, this constant bias keeps both parameter widths shrinking.
+            let mut width = DVec2::new(
+                (hi.x-lo.x)/(self.surf.u_knots[spans[0]+1]-self.surf.u_knots[spans[0]]),
+                (hi.y-lo.y)/(self.surf.v_knots[spans[1]+1]-self.surf.v_knots[spans[1]]));
+            let center = control((nu/2)*nv + nv/2);
+            let u_bend = (center - control(nv/2)).cross(&du).norm_squared() / du.norm_squared();
+            let v_bend = (center - control((nu/2)*nv)).cross(&dv).norm_squared() / dv.norm_squared();
+            // Degenerate chords give NaN: neither comparison wins, retaining
+            // balanced subdivision rather than trusting an undefined bend.
+            if u_bend > v_bend { width.x *= 8.; }
+            if v_bend > u_bend { width.y *= 8.; }
+            let mut axis = usize::from(width.y > width.x);
+            if mid[axis] == lo[axis] || mid[axis] == hi[axis] {
+                axis = 1 - axis;
+            }
             if mid[axis] == lo[axis] || mid[axis] == hi[axis] {
                 patches.release(patch);
                 continue;

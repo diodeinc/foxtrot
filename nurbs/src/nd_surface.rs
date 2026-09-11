@@ -171,6 +171,20 @@ impl<const D: usize> NDBSplineSurface<D> {
         self.v_knots.max_t()
     }
 
+    /// Translate homogeneous controls once for repeated reference-relative
+    /// evaluations. Keep the fused translation used by the rational evaluator.
+    pub(crate) fn translated(&self, reference: DVec3) -> Self {
+        let mut surface = self.clone();
+        for p in surface.control_points.iter_mut().flatten() {
+            let weight = if D == 4 { p[3] } else { 1. };
+            for i in 0..3 {
+                p[i] = if weight == 1. { p[i] - reference[i] }
+                    else { (-reference[i]).mul_add(weight, p[i]) };
+            }
+        }
+        surface
+    }
+
     pub(crate) fn bezier_cell(&self, spans: [usize; 2]) -> Vec<TVec<f64, D>> {
         let [u, v] = spans;
         let rows: Vec<_> = self.control_points.iter().map(|row|
@@ -346,6 +360,11 @@ impl<const D: usize> NDBSplineSurface<D> {
         difference: impl Fn(TVec<f64, D>, TVec<f64, D>) -> TVec<f64, D>,
     ) -> (TVec<f64, D>, [[TVec<f64, D>; E]; E]) {
         const { assert!(E > 0); }
+        if E == 1 {
+            let Nu = self.u_knots.basis_funs_for_span(spans[0], uv.x);
+            let Nv = self.v_knots.basis_funs_for_span(spans[1], uv.y);
+            return self.tensor_product::<E>(spans, &Nu, &Nv, difference);
+        }
         let Nu = self.u_knots.basis_funs_derivs_for_span(spans[0], uv.x, min(E - 1, self.u_knots.degree()));
         let Nv = self.v_knots.basis_funs_derivs_for_span(spans[1], uv.y, min(E - 1, self.v_knots.degree()));
         self.tensor_product::<E>(spans, &Nu, &Nv, difference)
@@ -368,7 +387,8 @@ impl<const D: usize> NDBSplineSurface<D> {
         let origin = self.control_points[uspan - p + uanchor][vspan - q + vanchor];
         // Transform each control once, sharing it across derivative orders.
         // Each accumulator still visits controls in the original order.
-        let mut temp = vec![TVec::zeros(); (q + 1) * (Nu.len() / (p + 1))];
+        let mut temp: smallvec::SmallVec<[TVec<f64, D>; 4]> =
+            smallvec::smallvec![TVec::zeros(); (q + 1) * (Nu.len() / (p + 1))];
         for s in 0..=q {
             // Apply partition of unity separately on each axis. A
             // coordinate independent of u must not acquire u roundoff,

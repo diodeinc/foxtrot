@@ -28,6 +28,7 @@ impl AbstractSurface for NURBSSurface {
 
     fn derivs_in_span<const E: usize>(&self, uv: DVec2, spans: [usize; 2], reference: DVec3) -> [[DVec3; E]; E] {
         let shift = |p: nalgebra_glm::DVec4| {
+            if reference == DVec3::zeros() { return p; }
             // Multiplication by one is exact: subtraction has the same single
             // rounding as FMA, without software FMA on WebAssembly targets.
             if p.w == 1. {
@@ -72,6 +73,35 @@ mod tests {
     use super::*;
     use crate::KnotVector;
     use nalgebra_glm::DVec4;
+
+    #[test]
+    fn translated_rational_jets_preserve_small_displacements_and_derivatives() {
+        // S(u,v) = (1e9 + 2u/(1+u), v², 3.5). Unequal weights distinguish
+        // homogeneous translation from subtracting Cartesian coordinates.
+        let surface = NURBSSurface::new(true, true,
+            KnotVector::from_multiplicities(1, &[0., 1.], &[2, 2]),
+            KnotVector::from_multiplicities(2, &[0., 1.], &[3, 3]),
+            [0., 1.].iter().map(|&u| [0., 0., 1.].iter().map(|&y| {
+                let w = 1. + u;
+                DVec4::new(1e9 * w + 2. * u, y * w, 3.5 * w, w)
+            }).collect()).collect());
+        let reference = DVec3::new(1e9 + 0.125, 0.25, 3.75);
+        let translated = surface.translated(reference);
+        for u in [0., 0.23, 1.] {
+            for v in [0., 0.61, 1.] {
+                let uv = DVec2::new(u, v);
+                let d = translated.derivs::<3>(uv);
+                let position = DVec3::new(2. * u / (1. + u) - 0.125, v * v - 0.25, -0.25);
+                assert!((d[0][0] - position).norm() < 1e-12);
+                assert!((translated.derivs::<1>(uv)[0][0] - position).norm() < 1e-12);
+                assert!((d[1][0] - DVec3::new(2. / (1. + u).powi(2), 0., 0.)).norm() < 1e-12);
+                assert!((d[2][0] - DVec3::new(-4. / (1. + u).powi(3), 0., 0.)).norm() < 1e-12);
+                assert!((d[0][1] - DVec3::new(0., 2. * v, 0.)).norm() < 1e-12);
+                assert!((d[0][2] - DVec3::new(0., 2., 0.)).norm() < 1e-12);
+                assert!(d[1][1].norm() < 1e-12);
+            }
+        }
+    }
 
     #[test]
     fn knot_cell_derivatives_preserve_both_sides_of_a_crease() {
