@@ -21,6 +21,9 @@ type VecF = SmallVec<[f64; 8]>;
 // the quotient. A constant Cartesian coordinate then contributes exactly zero
 // to every numerator derivative, even when weights vary.
 fn rational_difference(p: nalgebra_glm::DVec4, origin: nalgebra_glm::DVec4) -> nalgebra_glm::DVec4 {
+    if p.w == 1. && origin.w == 1. {
+        return p - origin;
+    }
     let xyz = p.xyz() - (origin.xyz() / origin.w) * p.w;
     nalgebra_glm::DVec4::new(xyz.x, xyz.y, xyz.z, p.w - origin.w)
 }

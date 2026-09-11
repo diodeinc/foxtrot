@@ -27,10 +27,18 @@ impl AbstractSurface for NURBSSurface {
     }
 
     fn derivs_in_span<const E: usize>(&self, uv: DVec2, spans: [usize; 2], reference: DVec3) -> [[DVec3; E]; E] {
-        let shift = |p: nalgebra_glm::DVec4| nalgebra_glm::DVec4::new(
-            (-reference.x).mul_add(p.w, p.x),
-            (-reference.y).mul_add(p.w, p.y),
-            (-reference.z).mul_add(p.w, p.z), p.w);
+        let shift = |p: nalgebra_glm::DVec4| {
+            // Multiplication by one is exact: subtraction has the same single
+            // rounding as FMA, without software FMA on WebAssembly targets.
+            if p.w == 1. {
+                nalgebra_glm::DVec4::new(p.x - reference.x, p.y - reference.y, p.z - reference.z, p.w)
+            } else {
+                nalgebra_glm::DVec4::new(
+                    (-reference.x).mul_add(p.w, p.x),
+                    (-reference.y).mul_add(p.w, p.y),
+                    (-reference.z).mul_add(p.w, p.z), p.w)
+            }
+        };
         let (origin, mut derivs) = self.surface_derivs_relative::<E>(uv, spans,
             |p, origin| crate::rational_difference(shift(p), shift(origin)));
         let origin = shift(origin);

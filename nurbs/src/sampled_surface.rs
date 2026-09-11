@@ -1,7 +1,7 @@
 use crate::{abstract_surface::AbstractSurface, nd_surface::{BezierPatches, NDBSplineSurface}};
 use log::error;
 use nalgebra_glm::{dot, DVec2, DVec3};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
@@ -22,6 +22,7 @@ pub struct SampledSurface<const N: usize> {
 pub struct ProjectionScratch<const N: usize> {
     patches: BezierPatches<N>,
     queue: VecDeque<(usize, DVec2, DVec2, [usize; 2])>,
+    distances: HashMap<(u64, u64), f64>,
 }
 
 const PROJECTION_TOL: f64 = 64. * f64::EPSILON;
@@ -445,9 +446,10 @@ where
     }
 
     pub fn uv_from_point_with_scratch(&self, p: DVec3, scratch: &mut ProjectionScratch<N>) -> Option<DVec2> {
-        let ProjectionScratch { patches, queue } = scratch;
+        let ProjectionScratch { patches, queue, distances } = scratch;
         patches.reset([self.surf.u_knots.degree() + 1, self.surf.v_knots.degree() + 1]);
         queue.clear();
+        distances.clear();
         assert!(!self.samples.is_empty());
         let mut best = (f64::INFINITY, u32::MAX);
         kd_nearest(&self.samples, &self.kd, 0, p, &mut best);
@@ -479,14 +481,17 @@ where
                 }
             }
         }
-        let distance = |uv| self.surf.derivs_relative_to::<1>(uv, p)[0][0].norm_squared();
+        // Sibling patches share corners. Cache exact evaluations only within
+        // this query; carrying distances across points or surfaces is invalid.
+        let mut distance = |uv: DVec2| *distances.entry((uv.x.to_bits(), uv.y.to_bits()))
+            .or_insert_with(|| self.surf.derivs_relative_to::<1>(uv, p)[0][0].norm_squared());
         let domain = [&self.surf.u_knots, &self.surf.v_knots].map(|k| 0..k.len());
         let mut result = seeds
             .iter()
             .copied()
             .filter_map(|seed| self.newtons_method_inner(p, seed, 256, domain.clone()))
             .min_by_key(|&uv| ordered_float::OrderedFloat(distance(uv)));
-        let mut error = result.map_or(f64::INFINITY, distance);
+        let mut error = result.map_or(f64::INFINITY, |uv| distance(uv));
         // A nearby sample need not lie in the basin of the nearby surface
         // sheet. Consider every knot cell whose control hull could improve
         // the current projection. Keep each search within its cell: a bound
@@ -520,10 +525,14 @@ where
         let scale = self.cells.iter().fold(DVec3::zeros(), |scale, c|
             scale.sup(&c.bounds[0].abs()).sup(&c.bounds[1].abs()));
         let roundoff = PROJECTION_TOL * (p.abs() + scale);
-        let threshold = |result: Option<DVec2>| result.map_or(f64::INFINITY, |uv|
-            (self.surf.derivs_relative_to::<1>(uv, p)[0][0].abs() - roundoff)
+        // The incumbent usually survives many subdivision patches. Reuse its
+        // residual until its UV changes instead of reevaluating the surface
+        // for both the supporting plane and stopping threshold on every patch.
+        let mut residual = result.map(|uv| self.surf.derivs_relative_to::<1>(uv, p)[0][0]);
+        let threshold = |residual: Option<DVec3>| residual.map_or(f64::INFINITY, |r|
+            (r.abs() - roundoff)
                 .sup(&DVec3::zeros()).norm());
-        if threshold(result) > 0. {
+        if threshold(residual) > 0. {
             for cell in &self.cells {
                 let lower = ((cell.bounds[0]-p).sup(&(p-cell.bounds[1])) - roundoff)
                     .sup(&DVec3::zeros()).norm();
@@ -544,8 +553,7 @@ where
             let bitangent = normal.cross(&tangent);
             let mut slab = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
             let mut bounds = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
-            let residual = result.map_or(DVec3::zeros(), |uv| self.surf.derivs_relative_to::<1>(uv, p)[0][0]);
-            let direction = residual.try_normalize(0.).unwrap_or_else(DVec3::zeros);
+            let direction = residual.unwrap_or_else(DVec3::zeros).try_normalize(0.).unwrap_or_else(DVec3::zeros);
             let mut support = f64::INFINITY;
             for q in patches[patch].iter().copied().map(crate::nd_curve::cartesian) {
                 bounds[0] = bounds[0].inf(&q); bounds[1] = bounds[1].sup(&q);
@@ -571,11 +579,12 @@ where
                 .max((slab_gap + sign * slab_roundoff).sup(&DVec3::zeros()).norm())
                 .max(support + sign * support_roundoff);
             // Definitely farther patches need no candidate evaluations.
-            if result.is_some() && bound(-1.) >= (residual.abs() + roundoff).norm() {
+            if residual.is_some_and(|r| bound(-1.) >= (r.abs() + roundoff).norm()) {
                 patches.release(patch);
                 continue;
             }
             let bound_ceiling = bound(1.);
+            let previous_result = result;
             for seed in [lo, hi, DVec2::new(lo.x, hi.y), DVec2::new(hi.x, lo.y), mid] {
                 // Every evaluated point is a feasible upper bound. Accelerate
                 // improvements with Newton, rather than repeatedly solving the
@@ -589,11 +598,14 @@ where
                     if d < error { error = d; result = Some(uv); }
                 }
             }
+            if result != previous_result {
+                residual = result.map(|uv| self.surf.derivs_relative_to::<1>(uv, p)[0][0]);
+            }
             if error == 0. { break; }
             // Subdivision cannot resolve geometry inside the original input
             // uncertainty. Evaluate this patch's candidates above, then stop
             // rather than subdividing a rounded control hull indefinitely.
-            if bound_ceiling >= threshold(result)
+            if bound_ceiling >= threshold(residual)
                 || (0..3).all(|i| bounds[1][i] - bounds[0][i] <= roundoff[i]) {
                 patches.release(patch);
                 continue;
