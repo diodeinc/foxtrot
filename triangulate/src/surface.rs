@@ -172,6 +172,10 @@ enum FaceChart {
         cut: f64,
         scale: DVec2,
     },
+    TorusPunctured {
+        cuts: DVec2,
+        scale: DVec2,
+    },
     Spline(SplineChart),
 }
 
@@ -523,6 +527,17 @@ impl Surface {
                                 periodic: usize::from(!polar_major), cut,
                                 scale: DVec2::new(*major_radius,-minor_radius),
                             })
+                    }).or_else(|| {
+                        // A torus with contractible holes has no exterior cut:
+                        // both boundary-free cuts lie in the retained face.
+                        // Chart the full parameter rectangle, with the physical
+                        // trims as holes rather than choosing their complement.
+                        let u = PreparedSurface::torus_cut(&angles, &trims, !same_sense, false)?;
+                        let v = PreparedSurface::torus_cut(&angles, &trims, !same_sense, true)?;
+                        Some(FaceChart::TorusPunctured {
+                            cuts: DVec2::new(u,v),
+                            scale: DVec2::new(*major_radius,-minor_radius),
+                        })
                     }).ok_or(Error::CouldNotLower)?
                 } else {
                     // Apple/lemon surfaces have poles and a restricted minor
@@ -573,6 +588,13 @@ impl PreparedSurface<'_> {
     fn lower_with_scratch(&self, p: DVec3, scratch: &mut ProjectionScratch<4>) -> Result<DVec2, Error> {
         let p_ = DVec4::new(p.x, p.y, p.z, 1.0);
         match (self.surface, &self.chart) {
+            (Surface::Torus { mat_i,major_radius,.. }, FaceChart::TorusPunctured { cuts,scale }) => {
+                let (u,v) = Self::torus_angles(*mat_i,p,*major_radius)?;
+                Ok(DVec2::new(
+                    Self::unwrap_from_start(u,cuts.x),
+                    Self::unwrap_from_start(v,cuts.y),
+                ).component_mul(scale))
+            }
             (Surface::Torus { mat_i,major_radius,.. }, FaceChart::TorusStrip { periodic,cut,scale }) => {
                 let (u,v) = Self::torus_angles(*mat_i,p,*major_radius)?;
                 let mut raw = DVec2::new(u,v);
@@ -1153,11 +1175,38 @@ impl PreparedSurface<'_> {
         }
     }
 
-    /// Cut a singly periodic regular patch into its native parameter strip.
-    /// Clip each trim edge into that strip, then pair odd-degree seam vertices
-    /// to close the contours. This handles winding loops without bending a
-    /// long swept parameter direction into the radius of an annulus.
+    /// Close periodic charts in the parameter plane. Punctured tori need the
+    /// full rectangle around their holes; singly periodic patches clip trims
+    /// into a strip and pair odd-degree seam vertices. Neither bends a long
+    /// swept parameter direction into the radius of an annulus.
     pub fn cut_periodic(&self, pts: &mut Vec<(f64,f64)>, edges: &mut Vec<(usize,usize)>, verts: &mut Vec<Vertex>, tolerance: f64) -> Result<bool,Error> {
+        if let FaceChart::TorusPunctured { cuts,scale } = &self.chart {
+            crate::triangulate::cancel_retraced_edges(pts,edges);
+            // Both cuts are clear of physical trims. Add the entire domain's
+            // outer boundary so CDT parity retains the torus, not its holes.
+            // Sample artificial seams on the surface, not along a 3D chord.
+            let min = DVec2::new(cuts.x*scale.x,(cuts.y+2.*PI)*scale.y);
+            let span = 2.*PI*DVec2::new(scale.x,-scale.y);
+            let counts = [scale.x-scale.y,-scale.y].map(|radius|
+                (2.*PI*(radius/(2.*tolerance)).sqrt()).ceil().max(3.) as usize);
+            let corners = [min,min+DVec2::new(span.x,0.),min+span,min+DVec2::new(0.,span.y)];
+            let start = pts.len();
+            for side in 0..4 {
+                let a = corners[side];
+                let b = corners[(side+1)%4];
+                let count = counts[side%2];
+                for i in 0..count {
+                    let uv = a+(b-a)*(i as f64/count as f64);
+                    let index = pts.len();
+                    pts.push((uv.x,uv.y));
+                    verts.push(Vertex { pos: self.raise(uv).ok_or(Error::CouldNotLower)?,
+                        norm: DVec3::zeros(),color: DVec3::zeros() });
+                    edges.push((index,index+1));
+                }
+            }
+            edges.last_mut().unwrap().1 = start;
+            return Ok(true);
+        }
         let (axis,period) = match self.mapped_periods() {
             [Some(period),None] => (0,period),
             [None,Some(period)] => (1,period),
@@ -1300,7 +1349,8 @@ impl PreparedSurface<'_> {
 
     pub fn raise(&self, uv: DVec2) -> Option<DVec3> {
         match (self.surface, &self.chart) {
-            (Surface::Torus { mat,major_radius,minor_radius,.. }, FaceChart::TorusStrip { scale,.. }) => {
+            (Surface::Torus { mat,major_radius,minor_radius,.. },
+                FaceChart::TorusStrip { scale,.. } | FaceChart::TorusPunctured { scale,.. }) => {
                 let raw = uv.component_div(scale);
                 let radius = major_radius+minor_radius*raw.y.cos();
                 Some((mat*DVec4::new(minor_radius*raw.y.sin(),radius*raw.x.sin(),radius*raw.x.cos(),1.)).xyz())
@@ -1510,7 +1560,7 @@ impl PreparedSurface<'_> {
     }
 
     pub fn add_steiner_points(&self, pts: &mut Vec<(f64, f64)>, verts: &mut Vec<Vertex>) {
-        if let FaceChart::TorusStrip { scale,.. } = &self.chart {
+        if let FaceChart::TorusStrip { scale,.. } | FaceChart::TorusPunctured { scale,.. } = &self.chart {
             let (xmin,xmax,ymin,ymax) = Self::bbox(pts);
             let min = DVec2::new(xmin,ymin);
             let span = DVec2::new(xmax-xmin,ymax-ymin);
@@ -1662,7 +1712,7 @@ impl PreparedSurface<'_> {
                     major_radius,
                     ..
                 },
-                FaceChart::Torus { .. } | FaceChart::TorusStrip { .. },
+                FaceChart::Torus { .. } | FaceChart::TorusStrip { .. } | FaceChart::TorusPunctured { .. },
             ) => {
                 let p = (*mat_i * DVec4::new(p.x, p.y, p.z, 1.0)).xyz();
                 let major_angle = p.y.atan2(p.z);
@@ -2768,6 +2818,57 @@ mod tests {
         assert!(exact_distance > 0.01);
         assert!(prepared.exceeds_tolerance(point,uv,sample,exact_distance-1e-12));
         assert!(!prepared.exceeds_tolerance(point,uv,sample,exact_distance+1e-12));
+    }
+
+    #[test]
+    fn torus_contractible_trim_selects_patch_or_punctured_domain() {
+        let surface = test_torus();
+        // An asymmetric hole crosses both natural parameter seams. Its
+        // opposite orientations select the small patch and almost-full torus.
+        let corners = [DVec2::new(-0.35,6.),DVec2::new(0.15,6.),
+            DVec2::new(0.15,6.8),DVec2::new(-0.35,6.8)];
+        for reverse in [false,true] {
+            for same_sense in [false,true] {
+                let mut vertices = Vec::new();
+                let mut edges = Vec::new();
+                for side in 0..4 {
+                    for i in 0..16 {
+                        let uv = corners[side]+(corners[(side+1)%4]-corners[side])*(i as f64/16.);
+                        vertices.push(Vertex { pos: torus_point(uv.x,uv.y),
+                            norm: DVec3::zeros(),color: DVec3::zeros() });
+                        let (a,b) = (side*16+i,(side*16+i+1)%64);
+                        edges.push(if reverse { (b,a) } else { (a,b) });
+                    }
+                }
+                // Opposite seam uses cover a full major period, but must not
+                // change which part of the torus is inside the physical trim.
+                let start = vertices.len();
+                for i in 0..32 {
+                    vertices.push(Vertex { pos: torus_point(2.*PI*i as f64/32.,0.7),
+                        norm: DVec3::zeros(),color: DVec3::zeros() });
+                    let (a,b) = (start+i,start+(i+1)%32);
+                    edges.extend([(a,b),(b,a)]);
+                }
+                let prepared = surface.prepare(&vertices,&edges,same_sense,0.,true).unwrap();
+                let mut points = prepared.lower_verts(&vertices).unwrap();
+                prepared.cut_periodic(&mut points,&mut edges,&mut vertices,0.001).unwrap();
+                crate::triangulate::cancel_retraced_edges(&points,&mut edges);
+                for &(a,b) in &edges {
+                    let middle = DVec2::new((points[a].0+points[b].0)*0.5,(points[a].1+points[b].1)*0.5);
+                    let pos = prepared.raise(middle).unwrap();
+                    assert!((pos-(vertices[a].pos+vertices[b].pos)*0.5).norm() < 0.001);
+                    assert!(prepared.normal(pos,middle).norm() > 0.99);
+                }
+                let mut triangulation = cdt::Triangulation::new_with_edges(&points,&edges).unwrap();
+                triangulation.run().unwrap();
+                let area: f64 = triangulation.triangles().map(|(a,b,c)| {
+                    let [a,b,c] = [a,b,c].map(|i|DVec2::new(points[i].0,points[i].1));
+                    ((b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x))*0.5
+                }).sum();
+                let expected = if reverse != same_sense { 4.*PI*PI-0.5*0.8 } else { 0.5*0.8 } * 4.9*0.1;
+                assert!((area-expected).abs() < 1e-10, "area {}, expected {}", area, expected);
+            }
+        }
     }
 
     #[test]
