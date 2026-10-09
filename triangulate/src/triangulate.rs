@@ -62,7 +62,7 @@ fn collect_shape_instances<'a>(
     s: &'a StepFile,
     rep_instances: &HashMap<Representation<'a>, Vec<DMat4>>,
     shape_rep_relationship: &HashMap<Representation<'a>, Vec<Representation<'a>>>,
-) -> HashMap<RepresentationItem<'a>, ShapeGeometry> {
+) -> Vec<(RepresentationItem<'a>, ShapeGeometry)> {
     let mut todo: Vec<_> = rep_instances
         .iter()
         .flat_map(|(rep, mats)| mats.iter().copied().map(move |mat| (*rep, mat)))
@@ -126,6 +126,15 @@ fn collect_shape_instances<'a>(
             });
     }
 
+    // The maps above are visited in a random order. Mesh shapes, and their
+    // copies, in a fixed one so the output does not change from run to run.
+    let mut to_mesh: Vec<_> = to_mesh.into_iter().collect();
+    to_mesh.sort_unstable_by_key(|(id, _)| id.0);
+    for (_, shape) in &mut to_mesh {
+        shape.instances.sort_unstable_by(|a, b| {
+            a.iter().map(|v| v.to_bits()).cmp(b.iter().map(|v| v.to_bits()))
+        });
+    }
     to_mesh
 }
 
@@ -839,13 +848,12 @@ fn shell(
     };
     let v_start = mesh.verts.len();
     let t_start = mesh.triangles.len();
-    let mut scratch = Mesh::default();
-    let mut edge_samples = HashMap::new();
-    for face in faces {
-        scratch.verts.clear();
-        scratch.triangles.clear();
-        stats.num_faces += 1;
-        match advanced_face(
+    // Sample every edge once up front, so faces sharing an edge share its
+    // points exactly and the faces can then be meshed independently.
+    let edge_samples = sample_edges(s, faces, tolerance);
+    let mesh_face = |face: &Face| {
+        let mut scratch = Mesh::default();
+        let result = advanced_face(
             s,
             *face,
             &mut scratch,
@@ -853,8 +861,19 @@ fn shell(
             default_color,
             uncertainty,
             tolerance,
-            &mut edge_samples,
-        ) {
+            &edge_samples,
+        );
+        (result, scratch)
+    };
+    #[cfg(feature = "rayon")]
+    let meshed: Vec<_> = faces.par_iter().with_max_len(1).map(mesh_face).collect();
+    #[cfg(not(feature = "rayon"))]
+    let meshed: Vec<_> = faces.iter().map(mesh_face).collect();
+    // Results are merged in face order, so output does not depend on
+    // scheduling.
+    for (face, (result, mut scratch)) in faces.iter().zip(meshed) {
+        stats.num_faces += 1;
+        match result {
             Ok(()) => mesh.append(&mut scratch),
             Err(err) => {
                 let surface_id = match &s[*face] {
@@ -906,7 +925,7 @@ fn advanced_face(
     default_color: DVec3,
     uncertainty: f64,
     tolerance: f64,
-    edge_samples: &mut HashMap<usize, Vec<DVec3>>,
+    edge_samples: &HashMap<usize, Vec<DVec3>>,
 ) -> Result<(), Error> {
     // Closed shells may legally reference either ADVANCED_FACE or the more
     // general FACE_SURFACE; OCCT/KiCad translate both through FaceSurface.
@@ -1605,7 +1624,7 @@ fn face_bound(
     b: FaceBound,
     edge_uses: &mut HashMap<usize, (usize, usize)>,
     tolerance: f64,
-    edge_samples: &mut HashMap<usize, Vec<DVec3>>,
+    edge_samples: &HashMap<usize, Vec<DVec3>>,
 ) -> Result<(Vec<DVec3>, usize), Error> {
     let (bound, orientation) = match &s[b] {
         Entity::FaceBound(b) => (b.bound, b.orientation),
@@ -1636,8 +1655,46 @@ fn face_bound(
     }
 }
 
+/// The 3D samples of every edge bounding `faces`, by edge curve id. A shell
+/// has one STEP file and tolerance, so an edge's samples are the same for
+/// every face that uses it; traversal and surface charts remain
+/// face-specific. Edges that cannot be sampled are left out.
+fn sample_edges(s: &StepFile, faces: &[Face], tolerance: f64) -> HashMap<usize, Vec<DVec3>> {
+    let mut edges: Vec<usize> = faces
+        .iter()
+        .filter_map(|f| match &s[*f] {
+            Entity::AdvancedFace(face) => Some(&face.bounds[..]),
+            Entity::FaceSurface(face) => Some(&face.bounds[..]),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|b| match &s[*b] {
+            Entity::FaceBound(b) => Some(b.bound),
+            Entity::FaceOuterBound(b) => Some(b.bound),
+            _ => None,
+        })
+        .filter_map(|bound| match &s[bound] {
+            Entity::EdgeLoop(e) => Some(&e.edge_list[..]),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|e| s.entity(*e).map(|edge| edge.edge_element.0))
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let sample = |&id: &usize| {
+        edge_curve(s, EdgeCurve::new(id), true, tolerance)
+            .ok()
+            .map(|points| (id, points))
+    };
+    #[cfg(feature = "rayon")]
+    return edges.par_iter().filter_map(sample).collect();
+    #[cfg(not(feature = "rayon"))]
+    return edges.iter().filter_map(sample).collect();
+}
+
 fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge], tolerance: f64,
-    edge_samples: &mut HashMap<usize, Vec<DVec3>>,
+    edge_samples: &HashMap<usize, Vec<DVec3>>,
 ) -> Result<Vec<DVec3>, Error> {
     let mut out = Vec::new();
     for (i, e) in edge_list.iter().enumerate() {
@@ -1649,12 +1706,15 @@ fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge], tolerance: f64,
         let edge = s
             .entity(*e)
             .ok_or(Error::InvalidStepEntity("OrientedEdge"))?;
-        // A shell has one STEP file and tolerance. Cache only edge-owned 3D
-        // samples; traversal and surface charts remain face-specific.
-        let points = match edge_samples.entry(edge.edge_element.0) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) =>
-                entry.insert(edge_curve(s, edge.edge_element.cast(), true, tolerance)?),
+        // Edges that could not be sampled up front fail here, for each face
+        // that uses them.
+        let sampled;
+        let points = match edge_samples.get(&edge.edge_element.0) {
+            Some(points) => points,
+            None => {
+                sampled = edge_curve(s, edge.edge_element.cast(), true, tolerance)?;
+                &sampled
+            }
         };
         if edge.orientation {
             out.extend_from_slice(points);
@@ -2089,7 +2149,7 @@ mod tests {
         let step = StepFile::parse(&flat).unwrap();
         let mut mesh = Mesh::default();
         let color = DVec3::new(0.2, 0.4, 0.6);
-        advanced_face(&step, Id::new(72), &mut mesh, &HashMap::new(), color, 0., 0.01, &mut HashMap::new()).unwrap();
+        advanced_face(&step, Id::new(72), &mut mesh, &HashMap::new(), color, 0., 0.01, &HashMap::new()).unwrap();
         assert!(mesh.verts.iter().any(|v| v.pos == DVec3::new(1., 1., 0.)));
         assert!(mesh
             .verts
@@ -2419,7 +2479,7 @@ mod tests {
         let mut previous = 0;
         for tolerance in [0.04,0.01] {
             let mut mesh = Mesh::default();
-            advanced_face(&step, Id::new(13), &mut mesh, &HashMap::new(), DVec3::zeros(), 0., tolerance, &mut HashMap::new()).unwrap();
+            advanced_face(&step, Id::new(13), &mut mesh, &HashMap::new(), DVec3::zeros(), 0., tolerance, &HashMap::new()).unwrap();
             assert!(mesh.triangles.len() > previous);
             previous = mesh.triangles.len();
             for t in &mesh.triangles {
@@ -2488,12 +2548,14 @@ mod tests {
                 let mut backward = edge_curve(&step, Id::new(id), false, 0.01).unwrap();
                 backward.reverse();
                 assert_eq!(forward, backward);
-                let mut samples = HashMap::new();
-                let mut cached_backward = edge_loop(&step, &[Id::new(backward_id)], 0.01, &mut samples).unwrap();
-                cached_backward.reverse();
-                assert_eq!(forward, cached_backward);
-                assert_eq!(forward, edge_loop(&step, &[Id::new(forward_id)], 0.01, &mut samples).unwrap());
-                assert_eq!(samples.len(), 1);
+                // Shared samples and sampling on demand agree.
+                let shared = HashMap::from([(id, forward.clone())]);
+                for samples in [&shared, &HashMap::new()] {
+                    let mut cached_backward = edge_loop(&step, &[Id::new(backward_id)], 0.01, samples).unwrap();
+                    cached_backward.reverse();
+                    assert_eq!(forward, cached_backward);
+                    assert_eq!(forward, edge_loop(&step, &[Id::new(forward_id)], 0.01, samples).unwrap());
+                }
             }
         }
     }
@@ -2528,8 +2590,44 @@ mod tests {
         .cloned()
         .collect();
         let shapes = collect_shape_instances(&step, &roots, &HashMap::new());
-        assert_eq!(shapes[&Id::new(10)].uncertainty, 2e-7);
-        assert!((shapes[&Id::new(11)].uncertainty - 2e-10).abs() < 1e-25);
+        // Shapes come in entity order.
+        assert_eq!(shapes.iter().map(|(id, _)| id.0).collect::<Vec<_>>(), [10, 11]);
+        assert_eq!(shapes[0].1.uncertainty, 2e-7);
+        assert!((shapes[1].1.uncertainty - 2e-10).abs() < 1e-25);
+    }
+
+    #[test]
+    fn shapes_and_their_copies_come_in_a_fixed_order() {
+        // Shape #10 is used by both representations, so it collects copies
+        // from each in whatever order the representation map is visited.
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #4=REPRESENTATION_CONTEXT('','');
+            #7=SHAPE_REPRESENTATION('',(#10),#4);
+            #8=SHAPE_REPRESENTATION('',(#11,#10),#4);
+            #9=CLOSED_SHELL('',());
+            #10=MANIFOLD_SOLID_BREP('',#9);
+            #11=MANIFOLD_SOLID_BREP('',#9);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let shift = |x: f64| glm::translation(&DVec3::new(x, 0., 0.));
+        let order = || {
+            // Each new map hashes with new random keys.
+            let roots = HashMap::from([
+                (Id::new(7), vec![shift(1.), shift(2.)]),
+                (Id::new(8), vec![shift(3.)]),
+            ]);
+            collect_shape_instances(&step, &roots, &HashMap::new())
+                .iter()
+                .map(|(id, shape)| (id.0, shape.instances.iter().map(|m| m[(0, 3)]).collect::<Vec<_>>()))
+                .collect::<Vec<_>>()
+        };
+        let first = order();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first.iter().map(|(_, copies)| copies.len()).sum::<usize>(), 4);
+        for _ in 0..16 {
+            assert_eq!(order(), first);
+        }
     }
 
     #[test]

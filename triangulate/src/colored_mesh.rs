@@ -124,10 +124,12 @@ pub fn group_mesh_by_color(mesh: &Mesh) -> Result<TessellatedMesh, String> {
         bucket.indices.extend([a, b, c]);
     }
 
-    let mut submeshes = buckets.into_values().collect::<Vec<_>>();
-    // Largest groups first for deterministic ordering.
-    submeshes.sort_by(|a, b| a.indices.len().cmp(&b.indices.len()).reverse());
-    Ok(TessellatedMesh { submeshes })
+    let mut submeshes = buckets.into_iter().collect::<Vec<_>>();
+    // Largest groups first. Map order is random, so colour breaks ties.
+    submeshes.sort_by_key(|(key, submesh)| (std::cmp::Reverse(submesh.indices.len()), *key));
+    Ok(TessellatedMesh {
+        submeshes: submeshes.into_iter().map(|(_, submesh)| submesh).collect(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +137,7 @@ pub fn group_mesh_by_color(mesh: &Mesh) -> Result<TessellatedMesh, String> {
 // ---------------------------------------------------------------------------
 
 /// Quantised RGBA colour key for bucketing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct ColorKey(u8, u8, u8, u8);
 
 impl ColorKey {
@@ -259,6 +261,29 @@ mod tests {
         );
         assert_eq!(green.normals, [[0.0, 0.0, 1.0]; 3]);
         assert_eq!(green.indices, [0, 1, 2]);
+    }
+
+    #[test]
+    fn orders_equal_sized_color_groups_the_same_every_time() {
+        let mut mesh = Mesh {
+            verts: (0..6)
+                .map(|i| vertex(DVec3::new(i as f64, (i % 3) as f64, 0.0), DVec3::new(0.0, 0.0, 1.0)))
+                .collect(),
+            triangles: vec![
+                Triangle { verts: U32Vec3::new(0, 1, 2) },
+                Triangle { verts: U32Vec3::new(3, 4, 5) },
+            ],
+        };
+        for (i, v) in mesh.verts.iter_mut().enumerate() {
+            v.color = if i < 3 { DVec3::x() } else { DVec3::y() };
+        }
+        // Each call buckets colours in a new map, with new random keys.
+        let colors = || group_mesh_by_color(&mesh).unwrap().submeshes.iter().map(|s| s.color).collect::<Vec<_>>();
+        let first = colors();
+        assert_eq!(first.len(), 2);
+        for _ in 0..16 {
+            assert_eq!(colors(), first);
+        }
     }
 
     #[test]
