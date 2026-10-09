@@ -328,6 +328,9 @@ impl Surface {
     /// Tessellate a compact surface with no physical trim. Identify seam
     /// vertices by wrapped grid indices instead of cutting a planar polygon.
     pub fn untrimmed_mesh(&self, color: DVec3, same_sense: bool, tolerance: f64) -> Option<Mesh> {
+        if let Self::Sphere { location, radius } = self {
+            return Self::sphere_mesh(*location, *radius, color, same_sense, tolerance);
+        }
         let Self::Torus {
             mat,
             major_radius,
@@ -372,6 +375,57 @@ impl Surface {
                     });
                 }
             }
+        }
+        Some(mesh)
+    }
+
+    /// A whole sphere, as a face bounded only by a vertex loop at a pole is:
+    /// rings of latitude between two pole vertices.
+    fn sphere_mesh(
+        center: DVec3,
+        radius: f64,
+        color: DVec3,
+        same_sense: bool,
+        tolerance: f64,
+    ) -> Option<Mesh> {
+        if !(radius > 0.) {
+            return None;
+        }
+        // As for the torus: a chord of angle a sags r*a²/8 off the sphere;
+        // allocate half the error budget to each angular direction.
+        let nu = (2. * PI * (radius / (2. * tolerance)).sqrt()).ceil().max(6.) as u32;
+        let nv = (nu / 2).max(3);
+        nu.checked_mul(nv)?;
+        let sense = if same_sense { 1. } else { -1. };
+        // The south pole, nv - 1 rings of nu vertices each, the north pole.
+        let mut normals = vec![DVec3::new(0., 0., -1.)];
+        for v in 1..nv {
+            let (sv, cv) = (PI * v as f64 / nv as f64).sin_cos();
+            normals.extend((0..nu).map(|u| {
+                let (su, cu) = (2. * PI * u as f64 / nu as f64).sin_cos();
+                DVec3::new(sv * cu, sv * su, -cv)
+            }));
+        }
+        normals.push(DVec3::new(0., 0., 1.));
+        let mut mesh = Mesh::default();
+        mesh.verts = normals
+            .iter()
+            .map(|&n| Vertex { pos: center + n * radius, norm: n * sense, color })
+            .collect();
+        let (south, north) = (0, mesh.verts.len() as u32 - 1);
+        let ring = |v: u32, u: u32| 1 + (v - 1) * nu + u % nu;
+        // Counter-clockwise seen from outside.
+        let mut push = |a: u32, b: u32, c: u32| {
+            let verts = if same_sense { [a, b, c] } else { [a, c, b] };
+            mesh.triangles.push(Triangle { verts: verts.into() });
+        };
+        for u in 0..nu {
+            push(south, ring(1, u + 1), ring(1, u));
+            for v in 1..nv - 1 {
+                push(ring(v, u), ring(v, u + 1), ring(v + 1, u + 1));
+                push(ring(v, u), ring(v + 1, u + 1), ring(v + 1, u));
+            }
+            push(north, ring(nv - 1, u), ring(nv - 1, u + 1));
         }
         Some(mesh)
     }

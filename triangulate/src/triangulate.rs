@@ -2458,6 +2458,54 @@ mod tests {
     }
 
     #[test]
+    fn whole_sphere_bounded_by_a_pole_is_meshed() {
+        // A BGA solder ball: the whole sphere, bounded only by a vertex
+        // loop at the pole where it meets the package.
+        for (sense, outward) in [(".T.", 1.), (".F.", -1.)] {
+            let text = format!("ISO-10303-21;HEADER;ENDSEC;DATA;
+                #1=CARTESIAN_POINT('',(1.,2.,0.115));
+                #2=DIRECTION('',(0.,0.,1.));
+                #3=DIRECTION('',(1.,0.,0.));
+                #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+                #5=SPHERICAL_SURFACE('',#4,0.115);
+                #6=CARTESIAN_POINT('',(1.,2.,0.));
+                #7=VERTEX_POINT('',#6);
+                #8=VERTEX_LOOP('',#7);
+                #9=FACE_BOUND('',#8,.T.);
+                #10=ADVANCED_FACE('',(#9),#5,{sense});
+                ENDSEC;END-ISO-10303-21;");
+            let flat = StepFile::strip_flatten(text.as_bytes()).unwrap();
+            let step = StepFile::parse(&flat).unwrap();
+            let tolerance = 0.01;
+            let mut mesh = Mesh::default();
+            advanced_face(&step, Id::new(10), &mut mesh, &HashMap::new(), DVec3::zeros(), 0., tolerance, &HashMap::new()).unwrap();
+            let center = DVec3::new(1., 2., 0.115);
+            for v in &mesh.verts {
+                assert!(((v.pos - center).norm() - 0.115).abs() < 1e-12);
+                assert!(((v.pos - center) / 0.115 * outward - v.norm).norm() < 1e-9);
+            }
+            // Closed: every edge is used once in each direction.
+            let mut edges = HashMap::<_, i32>::new();
+            let mut area = 0.;
+            for t in &mesh.triangles {
+                let [a, b, c] = [t.verts.x, t.verts.y, t.verts.z].map(|i| mesh.verts[i as usize].pos);
+                let p = (a + b + c) / 3.;
+                assert!(0.115 - (p - center).norm() < tolerance);
+                let n = (b - a).cross(&(c - a));
+                assert!(n.dot(&(p - center)) * outward > 0.);
+                area += n.norm() / 2.;
+                for (u, v) in [(t.verts.x, t.verts.y), (t.verts.y, t.verts.z), (t.verts.z, t.verts.x)] {
+                    *edges.entry((u.min(v), u.max(v))).or_default() += if u < v { 1 } else { -1 };
+                }
+            }
+            assert_eq!(edges.len() * 2, mesh.triangles.len() * 3);
+            assert!(edges.values().all(|&d| d == 0));
+            let sphere = 4. * std::f64::consts::PI * 0.115f64.powi(2);
+            assert!((area - sphere).abs() < 0.05 * sphere, "{area} vs {sphere}");
+        }
+    }
+
+    #[test]
     fn hemisphere_refines_interior_curvature_to_the_physical_budget() {
         let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
             #1=CARTESIAN_POINT('',(0.,0.,0.));
