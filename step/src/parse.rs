@@ -119,7 +119,10 @@ impl<'a, T: Parse<'a>, const CAP: usize> Parse<'a> for ArrayVec<T, CAP> {
                 e => e?,
             };
             s = s_;
-            out.push(o);
+            // Some exporters write more items than the bound allows, such
+            // as four-component directions. Keep the first ones, as OCCT
+            // does, rather than reject the file.
+            let _ = out.try_push(o);
         }
         let (s, _) = char(')')(s)?;
         Ok((s, out))
@@ -365,6 +368,13 @@ mod tests {
         assert_eq!(<&str>::parse("'Don''t panic',next"),
                    Ok((",next", "Don''t panic")));
         assert!(<&str>::parse("'unterminated").is_err());
+    }
+
+    #[test]
+    fn bounded_lists_keep_their_first_items() {
+        // Some exporters write four-component directions.
+        let (rest, ratios) = ArrayVec::<f64, 3>::parse("(0.,0.,1.,0.),next").unwrap();
+        assert_eq!((rest, ratios.as_slice()), (",next", &[0., 0., 1.][..]));
     }
 
     #[test]

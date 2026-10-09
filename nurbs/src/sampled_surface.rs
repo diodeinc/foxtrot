@@ -26,6 +26,13 @@ pub struct ProjectionScratch<const N: usize> {
 }
 
 const PROJECTION_TOL: f64 = 64. * f64::EPSILON;
+/// Patches one projection may examine before it settles for its incumbent.
+/// Ordinary queries examine at most a few hundred, and tens of thousands on
+/// the worst surfaces seen. When the incumbent is the pole of a collapsed
+/// edge, every patch along that edge reaches it: each subdivision halves
+/// their gap to the incumbent but doubles their number, so certifying it at
+/// f64 resolution would examine millions of patches for a single point.
+const MAX_PROJECTION_PATCHES: usize = 1 << 16;
 
 #[derive(Debug, Clone)]
 struct SurfaceCell<const N: usize> {
@@ -544,7 +551,14 @@ where
                     cell.spans));
             }
         }
+        let mut examined = 0;
         while let Some((patch, lo, hi, spans)) = queue.pop_front() {
+            // The incumbent is a feasible point no farther than any patch
+            // evaluated so far; keep it rather than refine without end.
+            examined += 1;
+            if examined > MAX_PROJECTION_PATCHES {
+                break;
+            }
             let mid = (lo + hi) * 0.5;
             let d = self.surf.derivs_in_span::<2>(mid, spans, p);
             let normal = d[1][0].cross(&d[0][1]);
@@ -680,6 +694,38 @@ mod tests {
         close(uv.x, 0., 1e-10);
         close(uv.y, 0.5, 1e-10);
         close((sampled.surf.point(uv)-target).norm_squared(), 0.02, 1e-12);
+    }
+
+    #[test]
+    fn projection_near_a_collapsed_edge_terminates() {
+        // Face #62825 of a Samtec FMC connector (ASP-134486-01): the u = max
+        // row of control points collapses to one pole. Every patch along that
+        // edge reaches the pole, so certifying this projection at f64
+        // resolution examined millions of patches.
+        let rows = [
+            [(-5.589503327713219782, 3.795967870219560059, 24.88456541861770077, 1.),
+             (-5.632056464503211402, 3.715554243323587080, 24.90841966077580594, 0.8294535963452530636),
+             (-5.582626279250799683, 3.666787751982639953, 24.97187345677104986, 1.)],
+            [(-5.569374495857790208, 3.760876034061380047, 24.84803886198849909, 1.),
+             (-5.599499045440100353, 3.721231129362655210, 24.88421881863200369, 0.9379770243229920146),
+             (-5.582626266339880239, 3.666787755634880241, 24.90864600195275003, 1.)],
+            [(-5.570182848018389699, 3.711200168230984531, 24.80680506253315087, 1.),
+             (-5.574716636290549587, 3.689228228810422117, 24.82235407503383229, 1.000927775394292008),
+             (-5.582626295171389863, 3.666787741024605030, 24.83698483065439788, 1.)],
+            [(-5.582626325353579944, 3.666787764895184765, 24.76551111168974728, 1.); 3],
+        ];
+        let surf = NDBSplineSurface::new(true, true,
+            KnotVector::from_multiplicities(3, &[0.001418343725273965962, 0.1860978202366415091], &[4, 4]),
+            KnotVector::from_multiplicities(2, &[0., 0.09081581946402909888], &[3, 3]),
+            rows.iter().map(|row| row.iter().map(|&(x, y, z, w)|
+                nalgebra_glm::DVec4::new(x * w, y * w, z * w, w)).collect()).collect());
+        let sampled = SampledSurface::new(surf);
+        let target = DVec3::new(-5.58262627960619, 3.666787751487475, 24.765511111689747);
+        // The pole is the nearest point: the target lies just beyond it.
+        let uv = sampled.uv_from_point(target).unwrap();
+        let pole = rows[3][0];
+        let pole = DVec3::new(pole.0, pole.1, pole.2);
+        close((sampled.surf.point(uv) - target).norm(), (pole - target).norm(), 1e-12);
     }
 
     #[test]
