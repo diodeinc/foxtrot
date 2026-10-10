@@ -992,6 +992,12 @@ fn advanced_face(
 
     debug_assert!(mesh.verts.is_empty() && mesh.triangles.is_empty());
 
+    if let Some(&b) = bounds.first() {
+        if let Entity::PolyLoop(_) = &s[bound_loop(s, b)?.0] {
+            return poly_loop_face(s, face_geometry, same_sense, &bounds, face_color, mesh);
+        }
+    }
+
     // For each contour, project from 3D down to the surface, then
     // start collecting them as constrained edges for triangulation
     let mut edges = Vec::new();
@@ -1682,6 +1688,73 @@ fn control_points_2d(
     rows.iter().map(|row| control_points_1d(s, row)).collect()
 }
 
+fn bound_loop<'a>(s: &StepFile<'a>, b: FaceBound<'a>) -> Result<(Loop<'a>, bool), Error> {
+    match &s[b] {
+        Entity::FaceBound(b) => Ok((b.bound, b.orientation)),
+        Entity::FaceOuterBound(b) => Ok((b.bound, b.orientation)),
+        _ => Err(Error::InvalidStepEntity("FaceBound")),
+    }
+}
+
+/// A face bounded by POLY_LOOPs is already a planar polygon, so there is no
+/// surface to sample or refine. Emit a triangle as it is, and triangulate a
+/// larger polygon, with any holes, in the plane. Like other faces, winding
+/// and normals follow the plane normal and `same_sense`; the even-odd fill
+/// does not depend on the loop directions.
+fn poly_loop_face(
+    s: &StepFile,
+    face_geometry: ap214::Surface,
+    same_sense: bool,
+    bounds: &[FaceBound],
+    color: DVec3,
+    mesh: &mut Mesh,
+) -> Result<(), Error> {
+    let Entity::Plane(plane) = &s[face_geometry] else {
+        return Err(Error::UnknownSurfaceType);
+    };
+    let (_, axis, _) = axis2_placement_3d(s, plane.position)?;
+    let norm = axis
+        .try_normalize(0.0)
+        .ok_or(Error::SingularTransform("plane normal"))?
+        * if same_sense { 1. } else { -1. };
+    // As in `Surface::new_plane`, drop the dominant normal coordinate.
+    // Counterclockwise triangles in that chart face +e_dropped.
+    let dropped = axis.iamax();
+    let [x, y] = [(dropped + 1) % 3, (dropped + 2) % 3];
+    let flip = (axis[dropped] < 0.0) == same_sense;
+
+    let mut contours = Vec::with_capacity(bounds.len());
+    for &b in bounds {
+        let Entity::PolyLoop(l) = &s[bound_loop(s, b)?.0] else {
+            return Err(Error::InvalidStepEntity("FaceBound.bound"));
+        };
+        let start = mesh.verts.len();
+        for &p in &l.polygon {
+            let pos = cartesian_point(s, p)?;
+            mesh.verts.push(mesh::Vertex { pos, norm, color });
+        }
+        contours.push((start..mesh.verts.len()).chain([start]).collect::<Vec<_>>());
+    }
+    let pts: Vec<_> = mesh.verts.iter().map(|v| (v.pos[x], v.pos[y])).collect();
+    let triangles = match pts[..] {
+        [a, b, c] if contours.len() == 1 => {
+            let ccw = (b.0 - a.0) * (c.1 - a.1) >= (b.1 - a.1) * (c.0 - a.0);
+            vec![if ccw { (0, 1, 2) } else { (0, 2, 1) }]
+        }
+        _ => cdt::triangulate_contours(&pts, &contours)?,
+    };
+    for (a, b, c) in triangles {
+        let (b, c) = if flip { (c, b) } else { (b, c) };
+        mesh.triangles.push(Triangle {
+            verts: U32Vec3::new(a as u32, b as u32, c as u32),
+        });
+    }
+    if mesh.triangles.is_empty() {
+        return Err(Error::InvalidGeometry("empty face tessellation"));
+    }
+    Ok(())
+}
+
 fn face_bound(
     s: &StepFile,
     b: FaceBound,
@@ -1689,11 +1762,7 @@ fn face_bound(
     tolerance: f64,
     edge_samples: &HashMap<usize, Vec<DVec3>>,
 ) -> Result<(Vec<DVec3>, usize), Error> {
-    let (bound, orientation) = match &s[b] {
-        Entity::FaceBound(b) => (b.bound, b.orientation),
-        Entity::FaceOuterBound(b) => (b.bound, b.orientation),
-        _ => return Err(Error::InvalidStepEntity("FaceBound")),
-    };
+    let (bound, orientation) = bound_loop(s, b)?;
     match &s[bound] {
         Entity::EdgeLoop(e) => {
             for id in &e.edge_list {
@@ -3315,5 +3384,60 @@ END-ISO-10303-21;
         assert_eq!(stats.num_panics(), 0);
         assert_eq!(mesh.triangles.len(), 2);
         assert_eq!(mesh.verts.len(), 4);
+    }
+
+    #[test]
+    fn poly_loop_faces_are_emitted_in_their_plane() {
+        // Faceted exporters write each facet as a plane bounded by a POLY_LOOP.
+        // The square's plane faces -z, so `.F.` makes its face normal +z.
+        let data = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+#1=CARTESIAN_POINT('',(1.,0.,0.));
+#2=CARTESIAN_POINT('',(0.,1.,0.));
+#3=CARTESIAN_POINT('',(0.,0.,1.));
+#4=POLY_LOOP('',(#1,#2,#3));
+#5=FACE_OUTER_BOUND('',#4,.T.);
+#6=DIRECTION('',(-1.,-1.,-1.));
+#7=AXIS2_PLACEMENT_3D('',#1,#6,$);
+#8=PLANE('',#7);
+#9=FACE_SURFACE('',(#5),#8,.F.);
+#10=CARTESIAN_POINT('',(0.,0.,0.));
+#11=CARTESIAN_POINT('',(2.,0.,0.));
+#12=CARTESIAN_POINT('',(2.,2.,0.));
+#13=CARTESIAN_POINT('',(0.,2.,0.));
+#14=POLY_LOOP('',(#10,#11,#12,#13));
+#15=FACE_OUTER_BOUND('',#14,.T.);
+#16=CARTESIAN_POINT('',(0.5,0.5,0.));
+#17=CARTESIAN_POINT('',(0.5,1.5,0.));
+#18=CARTESIAN_POINT('',(1.5,1.5,0.));
+#19=CARTESIAN_POINT('',(1.5,0.5,0.));
+#20=POLY_LOOP('',(#16,#17,#18,#19));
+#21=FACE_BOUND('',#20,.T.);
+#22=DIRECTION('',(0.,0.,-1.));
+#23=AXIS2_PLACEMENT_3D('',#10,#22,$);
+#24=PLANE('',#23);
+#25=FACE_SURFACE('',(#15,#21),#24,.F.);
+#26=OPEN_SHELL('',(#9,#25));
+#27=SHELL_BASED_SURFACE_MODEL('',(#26));
+ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(data).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let (mesh, stats) = triangulate(&step);
+
+        assert_eq!(stats.num_faces, 2);
+        assert!(stats.is_complete(), "{:?}", stats.failures);
+        let normals = [DVec3::repeat(1.0).normalize(), DVec3::z()];
+        let mut area = [0.0; 2];
+        for t in &mesh.triangles {
+            let [a, b, c] = [t.verts.x, t.verts.y, t.verts.z].map(|i| &mesh.verts[i as usize]);
+            let face = normals.iter().position(|n| (a.norm - n).norm() < 1e-12).unwrap();
+            // Winding and every vertex normal face the same way.
+            let cross = (b.pos - a.pos).cross(&(c.pos - a.pos));
+            assert!(cross.normalize().dot(&normals[face]) > 1.0 - 1e-12);
+            assert!([b, c].iter().all(|v| v.norm == a.norm));
+            area[face] += cross.norm() / 2.0;
+        }
+        // The hole is cut out of the square.
+        assert!((area[0] - 3f64.sqrt() / 2.0).abs() < 1e-12, "{:?}", area);
+        assert!((area[1] - 3.0).abs() < 1e-12, "{:?}", area);
     }
 }
