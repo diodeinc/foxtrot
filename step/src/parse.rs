@@ -1,4 +1,3 @@
-use std::collections::{HashSet, HashMap};
 use nom::{
     branch::{alt},
     bytes::complete::tag,
@@ -153,14 +152,19 @@ impl<'a> Parse<'a> for bool {
     }
 }
 impl<'a, T> Parse<'a> for Id<T> {
+    // References are the most common parameter, so this avoids nom's
+    // combinator overhead; it accepts the same `#digits` and `$` forms.
     fn parse(s: &str) -> IResult<Self> {
-        alt((
-            map_res(
-                preceded(char('#'), digit1),
-                |s: &str| s.parse().map(|i| Id::new(i))),
+        if let Some(rest) = s.strip_prefix('#') {
+            let n = rest.bytes().take_while(u8::is_ascii_digit).count();
+            if let Ok(i) = rest[..n].parse() {
+                return Ok((&rest[n..], Id::new(i)));
+            }
+        } else if let Some(rest) = s.strip_prefix('$') {
             // NUL id deserializes to 0
-            map(char('$'), |_| Id::empty())))
-            (s)
+            return Ok((rest, Id::empty()));
+        }
+        nom_alt_err(s)
     }
 }
 
@@ -228,36 +232,35 @@ pub(crate) fn parse_enum_tag(s: &str) -> IResult<&str> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-pub(crate) fn parse_entity_decl(s: &[u8]) -> IResult<(usize, Entity)> {
-    let s = match std::str::from_utf8(s) {
-        Ok(s) => s,
-        Err(_) => return nom_err("", ErrorKind::Escaped), // TODO correct code?
-    };
+/// Returns the text before the first `(`, like nom's `take_until("(")`
+/// without building a substring searcher for every entity.
+pub(crate) fn take_until_paren(s: &str) -> IResult<'_, &str> {
+    match memchr(b'(', s.as_bytes()) {
+        Some(i) => Ok((&s[i..], &s[..i])),
+        None => nom_err(s, ErrorKind::TakeUntil),
+    }
+}
+
+pub(crate) fn parse_entity_decl(s: &str) -> IResult<'_, (usize, Entity<'_>)> {
     map(tuple((Id::<()>::parse, char('='), Entity::parse)),
         |(i, _, e)| (i.0, e))(s)
 }
 
-pub(crate) fn parse_entity_fallback(s: &[u8]) -> IResult<(usize, Entity)> {
-    let s = match std::str::from_utf8(s) {
-        Ok(s) => s,
-        Err(_) => return nom_err("", ErrorKind::Escaped),
-    };
+pub(crate) fn parse_entity_fallback(s: &str) -> IResult<'_, (usize, Entity<'_>)> {
     map(Id::<()>::parse, |i| (i.0, Entity::_FailedToParse))(s)
 }
 
 pub(crate) fn parse_complex_mapping(s: &str) -> IResult<Entity> {
-    // We'll maintain a map from sub-entity name to its argument string, then
-    // use this map to figure out the tree and construct it.
-    let mut subentities: HashMap<&str, &str> = HashMap::new();
-
-    // Map from sub-entity name to the str slice which contains the name plus
-    // the open parens, used for parsing slices
-    let mut name_tags: HashMap<&str, &str> = HashMap::new();
+    // Sub-entities as (name, name plus open parens, argument string), used
+    // to figure out the tree and construct it. A repeated name keeps its last
+    // occurrence. There are only a few parts, so lookups are linear scans.
+    let mut parts: Vec<(&str, &str, &str)> = Vec::new();
     let bstr = s.as_bytes();
     let mut depth = 0;
     let mut index = 0;
     let mut args_start = 0;
     let mut name: &str = "";
+    let mut name_tag: &str = "";
     loop {
         let next = match memchr3(b'(', b')', b'\'', &bstr[index..]) {
             Some(i) => i,
@@ -266,24 +269,20 @@ pub(crate) fn parse_complex_mapping(s: &str) -> IResult<Entity> {
         match bstr[index + next] {
             b'(' => {
                 if depth == 1 {
-                    let name_slice = &bstr[index..(index + next)];
-                    name = std::str::from_utf8(name_slice)
-                        .expect("Could not convert back to name");
+                    name = &s[index..index + next];
+                    name_tag = &s[index..index + next + 1];
                     args_start = index + next + 1;
-                    let name_tag_slice = &bstr[index..(index + next + 1)];
-                    let name_tag = std::str::from_utf8(name_tag_slice)
-                        .expect("Could not convert tag back to name");
-                    name_tags.insert(name, name_tag);
                 }
                 depth += 1;
             },
             b')' => {
                 depth -= 1;
                 if depth == 1 {
-                    let arg_slice = &bstr[args_start..(index + next)];
-                    let args = std::str::from_utf8(arg_slice)
-                        .expect("Could not convert args");
-                    subentities.insert(name, args);
+                    let args = &s[args_start..index + next];
+                    match parts.iter_mut().find(|p| p.0 == name) {
+                        Some(p) => *p = (name, name_tag, args),
+                        None => parts.push((name, name_tag, args)),
+                    }
                 } else if depth == 0 {
                     break;
                 }
@@ -302,28 +301,24 @@ pub(crate) fn parse_complex_mapping(s: &str) -> IResult<Entity> {
     }
     // Filter out the list of subclasses to those which aren't a parent of
     // another item in the set; these are our potential leafs.
-    let mut potential_leafs: HashSet<&str> = subentities.keys()
-        .map(|i| *i)
+    let supers: Vec<&[&str]> = parts.iter().map(|p| superclasses_of(p.0)).collect();
+    let mut potential_leafs: Vec<(&str, &str)> = parts.iter()
+        .filter(|p| !supers.iter().any(|s| s.contains(&p.0)))
+        // Eliminate any leaf with no arguments, since they're just addding
+        // bonus constraints (which we don't handle anyways)
+        .filter(|p| p.2 != "")
+        .map(|p| (p.0, p.1))
         .collect();
-    for k in subentities.keys() {
-        for sup in superclasses_of(k) {
-            potential_leafs.remove(sup);
-        }
-    }
-    // Eliminate any leaf with no arguments, since they're just addding
-    // bonus constraints (which we don't handle anyways)
-    potential_leafs.retain(|k| subentities[k] != "");
 
     // Sort potential leafs so that ComplexEntity is deterministic and we can
     // match against it later
-    let mut potential_leafs: Vec<&str> = potential_leafs.into_iter().collect();
     potential_leafs.sort();
 
     // At this point, we'll build up argument strings by splicing together bits
     // of arguments from the existing string (to make lifetimes happy), then
     // parse into leaf entities.
     let mut leaf_entities = Vec::with_capacity(potential_leafs.len());
-    for leaf in potential_leafs.into_iter() {
+    for (leaf, leaf_tag) in potential_leafs.into_iter() {
         let mut chain = vec![leaf];
         loop {
             let sup = superclasses_of(chain.last().unwrap());
@@ -333,10 +328,16 @@ pub(crate) fn parse_complex_mapping(s: &str) -> IResult<Entity> {
                 _ => return nom_err(s, ErrorKind::LengthValue), // TODO: error
             }
         }
-        let mut new_decl: Vec<&str> = vec![name_tags.get(leaf).unwrap()];
+        let mut new_decl: Vec<&str> = vec![leaf_tag];
         for c in chain.iter().rev() {
-            if !subentities[c].is_empty() {
-                new_decl.push(subentities[c]);
+            // Records are parsed in parallel, so a missing supertype must be
+            // an error rather than a panic that masks an earlier error.
+            let args = match parts.iter().find(|p| p.0 == *c) {
+                Some(p) => p.2,
+                None => return nom_err(s, ErrorKind::Verify),
+            };
+            if !args.is_empty() {
+                new_decl.push(args);
                 new_decl.push(if *c == leaf { &")" } else { &"," });
             }
         }
@@ -379,9 +380,9 @@ mod tests {
 
     #[test]
     fn test_parse_entity_decl() {
-        parse_entity_decl(b"#3=SHAPE_DEFINITION_REPRESENTATION(#4,#10);").unwrap();
-        parse_entity_decl(b"#38463=ADVANCED_FACE('',(#38464),#38475,.F.);").unwrap();
-        parse_entity_decl(b"#395359=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-007),#395356,'distance_accuracy_value','confusion accuracy');").unwrap();
-        parse_entity_decl(b"#1632=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));").unwrap();
+        parse_entity_decl("#3=SHAPE_DEFINITION_REPRESENTATION(#4,#10);").unwrap();
+        parse_entity_decl("#38463=ADVANCED_FACE('',(#38464),#38475,.F.);").unwrap();
+        parse_entity_decl("#395359=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-007),#395356,'distance_accuracy_value','confusion accuracy');").unwrap();
+        parse_entity_decl("#1632=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));").unwrap();
     }
 }
