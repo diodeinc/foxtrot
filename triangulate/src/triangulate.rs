@@ -869,7 +869,7 @@ fn shell(
         let mut scratch = Mesh::default();
         let result = advanced_face(
             s,
-            *face,
+            std::slice::from_ref(face),
             &mut scratch,
             styled_item_colors,
             default_color,
@@ -880,9 +880,36 @@ fn shell(
         (result, scratch)
     };
     #[cfg(feature = "rayon")]
-    let meshed: Vec<_> = faces.par_iter().with_max_len(1).map(mesh_face).collect();
+    let mut meshed: Vec<_> = faces.par_iter().with_max_len(1).map(mesh_face).collect();
     #[cfg(not(feature = "rayon"))]
-    let meshed: Vec<_> = faces.iter().map(mesh_face).collect();
+    let mut meshed: Vec<_> = faces.iter().map(mesh_face).collect();
+    // Exporters can split one face's loops between faces on copies of the
+    // same cylinder, so each part alone extends to infinity. Mesh them as one.
+    let split_key = |i: usize| {
+        if !matches!(meshed[i].0, Err(Error::InvalidGeometry(UNBOUNDED_FACE))) {
+            return None;
+        }
+        let Entity::AdvancedFace(face) = &s[faces[i]] else { return None; };
+        let Entity::CylindricalSurface(c) = &s[face.face_geometry] else { return None; };
+        let (location, axis, ref_direction) = axis2_placement_3d(s, c.position).ok()?;
+        Some((face.same_sense, location, axis, ref_direction, c.radius.0 .0 .0))
+    };
+    let keys: Vec<_> = (0..faces.len()).map(split_key).collect();
+    for i in 0..faces.len() {
+        let Some(key) = keys[i] else { continue; };
+        let group: Vec<_> = (i..faces.len()).filter(|&j| keys[j] == Some(key) && meshed[j].0.is_err()).collect();
+        if group.len() < 2 {
+            continue;
+        }
+        let parts: Vec<_> = group.iter().map(|&j| faces[j]).collect();
+        let mut scratch = Mesh::default();
+        if advanced_face(s, &parts, &mut scratch, styled_item_colors, default_color, uncertainty, tolerance, &edge_samples).is_ok() {
+            meshed[i] = (Ok(()), scratch);
+            for &j in &group[1..] {
+                meshed[j] = (Ok(()), Mesh::default());
+            }
+        }
+    }
     // Results are merged in face order, so output does not depend on
     // scheduling.
     for (face, (result, mut scratch)) in faces.iter().zip(meshed) {
@@ -931,9 +958,11 @@ fn shell(
     stats.num_shells += 1;
 }
 
+const UNBOUNDED_FACE: &str = "face boundary does not enclose a finite region";
+
 fn advanced_face(
     s: &StepFile,
-    f: Face,
+    faces: &[Face],
     mesh: &mut Mesh,
     styled_item_colors: &HashMap<usize, DVec3>,
     default_color: DVec3,
@@ -943,11 +972,18 @@ fn advanced_face(
 ) -> Result<(), Error> {
     // Closed shells may legally reference either ADVANCED_FACE or the more
     // general FACE_SURFACE; OCCT/KiCad translate both through FaceSurface.
-    let (bounds, face_geometry, same_sense) = match &s[f] {
-        Entity::AdvancedFace(face) => (&face.bounds[..], face.face_geometry, face.same_sense),
-        Entity::FaceSurface(face) => (&face.bounds[..], face.face_geometry, face.same_sense),
-        _ => return Err(Error::InvalidStepEntity("FaceSurface")),
+    // Faces meshed together use the bounds of all and the first one's surface.
+    let face_data = |f: Face| match &s[f] {
+        Entity::AdvancedFace(face) => Ok((&face.bounds[..], face.face_geometry, face.same_sense)),
+        Entity::FaceSurface(face) => Ok((&face.bounds[..], face.face_geometry, face.same_sense)),
+        _ => Err(Error::InvalidStepEntity("FaceSurface")),
     };
+    let f = faces[0];
+    let (_, face_geometry, same_sense) = face_data(f)?;
+    let mut bounds = Vec::new();
+    for &face in faces {
+        bounds.extend_from_slice(face_data(face)?.0);
+    }
     let face_color = styled_item_colors
         .get(&f.0)
         .copied()
@@ -963,7 +999,7 @@ fn advanced_face(
     let mut boundary_points = Vec::new();
     let mut edge_uses = HashMap::new();
     let mut num_pts = 0;
-    for b in bounds {
+    for b in &bounds {
         let (bound_contours, edge_loop_len) =
             crate::timing::time("face:face_bound", || face_bound(s, *b, &mut edge_uses, tolerance, edge_samples))?;
         boundary_points.extend_from_slice(&bound_contours);
@@ -971,6 +1007,10 @@ fn advanced_face(
         match bound_contours.len() {
             // We should always have non-zero items in the contour
             0 => return Err(Error::InvalidGeometry("face bound produced empty contour")),
+
+            // An edge loop of zero length, such as a line edge from a vertex
+            // back to itself, bounds no area.
+            1 if edge_loop_len > 0 => {}
 
             // Special case for a single-vertex point, which shows up in
             // cones: we push it as a Steiner point, but without any
@@ -1018,6 +1058,10 @@ fn advanced_face(
                 }
             }
         }
+    }
+
+    if !bounds.is_empty() && num_pts == 0 {
+        return Ok(());
     }
 
     // Swept surfaces use the actual trims to choose a finite NURBS domain.
@@ -1068,7 +1112,7 @@ fn advanced_face(
     // A face bounded by one loop around a cylinder extends to infinity along
     // the axis. Refinement towards that point would never converge.
     if prepared.encloses_infinity(&pts, constraints.iter().map(|&(a, b, _)| (a, b))) {
-        return Err(Error::InvalidGeometry("face boundary does not enclose a finite region"));
+        return Err(Error::InvalidGeometry(UNBOUNDED_FACE));
     }
     let face_id = face_geometry.0;
     let n_steiner = pts.len() - bonus_points;
@@ -2168,7 +2212,7 @@ mod tests {
         let step = StepFile::parse(&flat).unwrap();
         let mut mesh = Mesh::default();
         let color = DVec3::new(0.2, 0.4, 0.6);
-        advanced_face(&step, Id::new(72), &mut mesh, &HashMap::new(), color, 0., 0.01, &HashMap::new()).unwrap();
+        advanced_face(&step, &[Id::new(72)], &mut mesh, &HashMap::new(), color, 0., 0.01, &HashMap::new()).unwrap();
         assert!(mesh.verts.iter().any(|v| v.pos == DVec3::new(1., 1., 0.)));
         assert!(mesh
             .verts
@@ -2291,7 +2335,7 @@ mod tests {
             let mut mesh = Mesh::default();
             advanced_face(
                 &step,
-                Id::new(19),
+                &[Id::new(19)],
                 &mut mesh,
                 &HashMap::new(),
                 DVec3::zeros(),
@@ -2497,7 +2541,7 @@ mod tests {
             let step = StepFile::parse(&flat).unwrap();
             let tolerance = 0.01;
             let mut mesh = Mesh::default();
-            advanced_face(&step, Id::new(10), &mut mesh, &HashMap::new(), DVec3::zeros(), 0., tolerance, &HashMap::new()).unwrap();
+            advanced_face(&step, &[Id::new(10)], &mut mesh, &HashMap::new(), DVec3::zeros(), 0., tolerance, &HashMap::new()).unwrap();
             let center = DVec3::new(1., 2., 0.115);
             for v in &mesh.verts {
                 assert!(((v.pos - center).norm() - 0.115).abs() < 1e-12);
@@ -2546,7 +2590,7 @@ mod tests {
         let mut previous = 0;
         for tolerance in [0.04,0.01] {
             let mut mesh = Mesh::default();
-            advanced_face(&step, Id::new(13), &mut mesh, &HashMap::new(), DVec3::zeros(), 0., tolerance, &HashMap::new()).unwrap();
+            advanced_face(&step, &[Id::new(13)], &mut mesh, &HashMap::new(), DVec3::zeros(), 0., tolerance, &HashMap::new()).unwrap();
             assert!(mesh.triangles.len() > previous);
             previous = mesh.triangles.len();
             for t in &mesh.triangles {
@@ -2700,8 +2744,87 @@ mod tests {
         let flat = StepFile::strip_flatten(text).unwrap();
         let step = StepFile::parse(&flat).unwrap();
         let mut mesh = Mesh::default();
-        let result = advanced_face(&step, Id::new(33), &mut mesh, &HashMap::new(), DVec3::zeros(), 0., 0.01, &HashMap::new());
+        let result = advanced_face(&step, &[Id::new(33)], &mut mesh, &HashMap::new(), DVec3::zeros(), 0., 0.01, &HashMap::new());
         assert!(matches!(result, Err(Error::InvalidGeometry("face boundary does not enclose a finite region"))), "{:?}", result);
+    }
+
+    #[test]
+    fn face_bounded_by_a_closed_line_edge_is_empty() {
+        // ASP-184330-01 face #305624: a plane bounded only by a line edge
+        // from an off-plane vertex back to itself. It bounds no area.
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(0.,0.,0.));
+            #2=DIRECTION('',(1.,0.,0.));
+            #3=DIRECTION('',(0.,0.,1.));
+            #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+            #5=PLANE('',#4);
+            #6=CARTESIAN_POINT('',(1.4,4.9,0.2));
+            #7=VERTEX_POINT('',#6);
+            #8=DIRECTION('',(0.,1.,0.));
+            #9=VECTOR('',#8,1.);
+            #10=LINE('',#1,#9);
+            #11=EDGE_CURVE('',#7,#7,#10,.T.);
+            #12=ORIENTED_EDGE('',*,*,#11,.F.);
+            #13=EDGE_LOOP('',(#12));
+            #14=FACE_BOUND('',#13,.T.);
+            #15=ADVANCED_FACE('',(#14),#5,.F.);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let mut mesh = Mesh::default();
+        advanced_face(&step, &[Id::new(15)], &mut mesh, &HashMap::new(), DVec3::zeros(), 0., 0.01, &HashMap::new()).unwrap();
+        assert!(mesh.triangles.is_empty());
+    }
+
+    #[test]
+    fn face_loops_split_between_copies_of_a_cylinder_are_meshed_together() {
+        // PAG7936 faces #11363 and #11516: one band's two loops written as
+        // two faces on identical cylinders. Each alone extends to infinity.
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(0.,0.,0.));
+            #2=DIRECTION('',(0.,0.,1.));
+            #3=DIRECTION('',(1.,0.,0.));
+            #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+            #5=CYLINDRICAL_SURFACE('',#4,1.);
+            #6=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+            #7=CYLINDRICAL_SURFACE('',#6,1.);
+            #8=CARTESIAN_POINT('',(0.,0.,1.));
+            #9=AXIS2_PLACEMENT_3D('',#8,#2,#3);
+            #10=CIRCLE('',#4,1.);
+            #11=CIRCLE('',#9,1.);
+            #12=CARTESIAN_POINT('',(1.,0.,0.));
+            #13=CARTESIAN_POINT('',(1.,0.,1.));
+            #14=VERTEX_POINT('',#12);
+            #15=VERTEX_POINT('',#13);
+            #16=EDGE_CURVE('',#14,#14,#10,.T.);
+            #17=EDGE_CURVE('',#15,#15,#11,.T.);
+            #18=ORIENTED_EDGE('',*,*,#16,.T.);
+            #19=ORIENTED_EDGE('',*,*,#17,.F.);
+            #20=EDGE_LOOP('',(#18));
+            #21=EDGE_LOOP('',(#19));
+            #22=FACE_BOUND('',#20,.T.);
+            #23=FACE_BOUND('',#21,.T.);
+            #24=ADVANCED_FACE('',(#22),#5,.T.);
+            #25=ADVANCED_FACE('',(#23),#7,.T.);
+            #26=OPEN_SHELL('',(#24,#25));
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let mut mesh = Mesh::default();
+        let mut stats = Stats::default();
+        shell(&step, Id::new(26), &mut mesh, &mut stats, &HashMap::new(), DVec3::zeros(), 0., 0.01);
+        assert_eq!((stats.num_faces, stats.failures.len()), (2, 0), "{:?}", stats.failures);
+        let mut area = 0.;
+        for t in &mesh.triangles {
+            let [a, b, c] = [t.verts.x, t.verts.y, t.verts.z].map(|i| mesh.verts[i as usize].pos);
+            area += (b - a).cross(&(c - a)).norm() / 2.;
+        }
+        for v in &mesh.verts {
+            assert!((v.pos.xy().norm() - 1.).abs() <= 0.01 && (0. ..=1.).contains(&v.pos.z), "{:?}", v.pos);
+        }
+        // The whole band, 2 pi r h, less the inscribed polygon's deficit.
+        let band = 2. * std::f64::consts::PI;
+        assert!(0.97 * band < area && area <= band, "{} vs {}", area, band);
     }
 
     #[test]
@@ -2762,7 +2885,7 @@ mod tests {
         let step = StepFile::parse(&flat).unwrap();
         let tolerance = 0.01;
         let mut mesh = Mesh::default();
-        advanced_face(&step, Id::new(47), &mut mesh, &HashMap::new(), DVec3::zeros(), 1e-5, tolerance, &HashMap::new()).unwrap();
+        advanced_face(&step, &[Id::new(47)], &mut mesh, &HashMap::new(), DVec3::zeros(), 1e-5, tolerance, &HashMap::new()).unwrap();
         let center = DVec3::new(-0.755426777461874, -0.28, 0.355426777461874);
         let corners = [
             DVec3::new(-0.755426777461874, -0.3, 0.355426777461874),
