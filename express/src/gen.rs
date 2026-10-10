@@ -96,32 +96,101 @@ impl <'a> TypeMap<'a> {
     }
 }
 
-impl<'a> Type<'a> {
-    fn boxed_entity(&self) -> bool {
-        // Large schema records must not inflate every slot in the entity table.
-        // Keep the common point, placement and topology records inline.
-        matches!(self, Type::Entity { attrs, .. } if attrs.len() > 8)
+/// Entities with larger estimated payloads are boxed, so that every slot in
+/// the entity table is 64 bytes: the payload plus the enum tag.
+const MAX_INLINE_ENTITY: usize = 56;
+
+/// Estimated layout of a generated Rust type.
+#[derive(Clone, Copy)]
+struct Layout {
+    size: usize,
+    align: usize,
+    /// Whether a spare bit pattern can represent `None`
+    niche: bool,
+}
+const ID_LAYOUT: Layout = Layout { size: 8, align: 8, niche: false };
+
+fn round_up(n: usize, align: usize) -> usize {
+    (n + align - 1) / align * align
+}
+
+impl<'a> TypeMap<'a> {
+    /// Estimates the layout of generated type `t`. `named` maps camel-case
+    /// type names back to schema names.
+    fn layout(&self, t: &str, named: &HashMap<String, &str>) -> Layout {
+        if let Some(inner) = t.strip_prefix("Option<").and_then(|t| t.strip_suffix('>')) {
+            let l = self.layout(inner, named);
+            let size = if l.niche { l.size } else { round_up(l.size + 1, l.align) };
+            return Layout { size, align: l.align, niche: false };
+        }
+        if let Some(inner) = t.strip_prefix("ArrayVec::<").and_then(|t| t.strip_suffix('>')) {
+            let (item, cap) = inner.rsplit_once(", ").unwrap();
+            let l = self.layout(item, named);
+            let align = l.align.max(4);
+            let size = round_up(l.size * cap.parse::<usize>().unwrap() + 4, align);
+            return Layout { size, align, niche: false };
+        }
+        if t.starts_with("Vec<") {
+            return Layout { size: 24, align: 8, niche: true };
+        }
+        match t {
+            "&'a str" => return Layout { size: 16, align: 8, niche: true },
+            "bool" | "Logical" => return Layout { size: 1, align: 1, niche: true },
+            "f64" | "i64" | "usize" => return Layout { size: 8, align: 8, niche: false },
+            _ => (),
+        }
+        let name = named[t.trim_end_matches("<'a>")];
+        match &self.0[name] {
+            Type::Entity { .. } => ID_LAYOUT,
+            Type::Select(_) if self.is_entity(name) => ID_LAYOUT,
+            Type::Select(variants) => {
+                let ls: Vec<Layout> = variants.iter()
+                    .map(|v| self.layout(&self.to_rtype(v), named))
+                    .collect();
+                let size = ls.iter().map(|l| l.size).max().unwrap();
+                let align = ls.iter().map(|l| l.align).max().unwrap();
+                // With one data variant, the unused variant fits in a niche.
+                let size = if ls.len() == 1 && ls[0].niche { size } else { round_up(size + 1, align) };
+                Layout { size, align, niche: true }
+            }
+            Type::Enum(_) => Layout { size: 1, align: 1, niche: true },
+            Type::Redeclared(c) => self.layout(&self.to_rtype(c), named),
+            Type::RedeclaredPrimitive(c) | Type::Primitive(c) => self.layout(c, named),
+            Type::Aggregation { .. } => self.layout(&self.to_rtype(name), named),
+        }
     }
 
-    fn write_enum_variant<W>(&self, name: &str, buf: &mut W) -> std::fmt::Result
+    /// Whether entity `name` is boxed in the `Entity` enum
+    fn boxed_entity(&self, name: &str, named: &HashMap<String, &str>) -> bool {
+        let Type::Entity { attrs, .. } = &self.0[name] else { return false };
+        let fields: Vec<Layout> = attrs.iter().filter(|a| !a.derived).map(|a| self.layout(
+            &if a.optional { format!("Option<{}>", a.type_) } else { a.type_.clone() },
+            named)).collect();
+        let align = fields.iter().map(|l| l.align).max().unwrap_or(1);
+        round_up(fields.iter().map(|l| l.size).sum(), align) > MAX_INLINE_ENTITY
+    }
+}
+
+impl<'a> Type<'a> {
+    fn write_enum_variant<W>(&self, name: &str, boxed: bool, buf: &mut W) -> std::fmt::Result
         where W: std::fmt::Write
     {
         match self {
             Type::Entity{..} => {
                 let payload = format!("{}_<'a>", to_camel(name));
                 writeln!(buf, "    {}({}),", to_camel(name),
-                    if self.boxed_entity() { format!("Box<{}>", payload) } else { payload })
+                    if boxed { format!("Box<{}>", payload) } else { payload })
             },
             _ => Ok(()),
         }
     }
-    fn write_enum_match<W>(&self, name: &str, buf: &mut W) -> std::fmt::Result
+    fn write_enum_match<W>(&self, name: &str, boxed: bool, buf: &mut W) -> std::fmt::Result
         where W: std::fmt::Write
     {
         match self {
             Type::Entity{..} => writeln!(buf,
                 r#"            "{0}" => {1}_::parse_chunks(strs).map(|(s, v)| (s, Entity::{1}({2}))),"#,
-                capitalize(name), to_camel(name), if self.boxed_entity() { "Box::new(v)" } else { "v" }),
+                capitalize(name), to_camel(name), if boxed { "Box::new(v)" } else { "v" }),
             _ => Ok(()),
         }
     }
@@ -499,21 +568,27 @@ use arrayvec::ArrayVec;")?;
     for k in &keys {
         type_map.0[k].write_type(k, &mut buf, &type_map)?;
     }
+    let named: HashMap<String, &str> = keys.iter().map(|k| (to_camel(k), *k)).collect();
+    let boxed: HashSet<&str> = keys.iter().copied()
+        .filter(|k| type_map.boxed_entity(k, &named))
+        .collect();
     writeln!(&mut buf, "#[derive(Debug)]
 pub enum Entity<'a> {{")?;
     for k in &keys {
-        type_map.0[k].write_enum_variant(k, &mut buf)?;
+        type_map.0[k].write_enum_variant(k, boxed.contains(k), &mut buf)?;
     }
     writeln!(&mut buf, r#"    ComplexEntity(Vec<Entity<'a>>),
     _FailedToParse,
     _EmptySlot,
 }}
+// Keep entity table slots small; see MAX_INLINE_ENTITY in the generator.
+const _: () = assert!(std::mem::size_of::<Entity>() <= 64);
 impl<'a> ParseFromChunks<'a> for Entity<'a> {{
     fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {{
         let (_, r) = take_until_paren(strs[0])?;
         match r {{"#)?;
     for k in &keys {
-        type_map.0[k].write_enum_match(k, &mut buf)?;
+        type_map.0[k].write_enum_match(k, boxed.contains(k), &mut buf)?;
     }
     writeln!(&mut buf, r#"            "" => parse_complex_mapping(strs[0]),
             _ => nom_alt_err(r),

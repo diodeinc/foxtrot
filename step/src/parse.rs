@@ -269,22 +269,16 @@ pub(crate) fn parse_complex_mapping(s: &str) -> IResult<Entity> {
         match bstr[index + next] {
             b'(' => {
                 if depth == 1 {
-                    let name_slice = &bstr[index..(index + next)];
-                    name = std::str::from_utf8(name_slice)
-                        .expect("Could not convert back to name");
+                    name = &s[index..index + next];
+                    name_tag = &s[index..index + next + 1];
                     args_start = index + next + 1;
-                    let name_tag_slice = &bstr[index..(index + next + 1)];
-                    name_tag = std::str::from_utf8(name_tag_slice)
-                        .expect("Could not convert tag back to name");
                 }
                 depth += 1;
             },
             b')' => {
                 depth -= 1;
                 if depth == 1 {
-                    let arg_slice = &bstr[args_start..(index + next)];
-                    let args = std::str::from_utf8(arg_slice)
-                        .expect("Could not convert args");
+                    let args = &s[args_start..index + next];
                     match parts.iter_mut().find(|p| p.0 == name) {
                         Some(p) => *p = (name, name_tag, args),
                         None => parts.push((name, name_tag, args)),

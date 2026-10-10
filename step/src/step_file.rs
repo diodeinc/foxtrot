@@ -1,5 +1,5 @@
 use log::warn;
-use std::{fmt, ops::Range, sync::atomic::{AtomicBool, Ordering}};
+use std::{fmt, ops::Range};
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
@@ -33,116 +33,72 @@ impl fmt::Display for StepParseError {
 impl std::error::Error for StepParseError {}
 
 impl<'a> StepFile<'a> {
-    /// Parses a STEP file from a raw array of bytes
-    /// `data` must be preprocessed by [`strip_flatten`] first
-    pub fn parse(data: &'a [u8]) -> Result<Self, StepParseError> {
+    /// Parses a STEP file preprocessed by [`strip_flatten`]
+    pub fn parse(data: &'a str) -> Result<Self, StepParseError> {
         Self::parse_in_chunks(data, BYTES_PER_CHUNK, RECORDS_PER_CHUNK)
     }
 
     /// Parses with the given work sizes, which must not change the result.
-    fn parse_in_chunks(data: &'a [u8], bytes_per_chunk: usize, records_per_chunk: usize)
+    fn parse_in_chunks(data: &'a str, bytes_per_chunk: usize, records_per_chunk: usize)
         -> Result<Self, StepParseError>
     {
-        let blocks = Self::into_blocks(data, bytes_per_chunk)?;
-        let is = |i: usize, text: &[u8]| &data[blocks[i].clone()] == text;
-        if blocks.is_empty() || !is(0, b"ISO-10303-21;") {
+        let blocks = Self::into_blocks(data.as_bytes(), bytes_per_chunk)?;
+        let is = |i: usize, text: &str| &data[blocks[i].clone()] == text;
+        if blocks.is_empty() || !is(0, "ISO-10303-21;") {
             return Err(StepParseError::new("missing ISO-10303-21 start marker"));
         }
-        let header_start = (0..blocks.len()).position(|i| is(i, b"HEADER;"))
+        let header_start = (0..blocks.len()).position(|i| is(i, "HEADER;"))
             .ok_or_else(|| StepParseError::new("missing HEADER section"))?;
         let data_start = (0..blocks.len())
-            .position(|i| is(i, b"DATA;"))
+            .position(|i| is(i, "DATA;"))
             .ok_or_else(|| StepParseError::new("missing DATA section"))? + 1;
         if header_start >= data_start - 1 || !(header_start + 1..data_start - 1)
-            .any(|i| is(i, b"ENDSEC;"))
+            .any(|i| is(i, "ENDSEC;"))
         {
             return Err(StepParseError::new("HEADER section missing ENDSEC"));
         }
         let data_end = (data_start..blocks.len())
-            .find(|&i| is(i, b"ENDSEC;"))
+            .find(|&i| is(i, "ENDSEC;"))
             .ok_or_else(|| StepParseError::new("DATA section missing ENDSEC"))?;
-        if !(data_end + 1..blocks.len()).any(|i| is(i, b"END-ISO-10303-21;")) {
+        if !(data_end + 1..blocks.len()).any(|i| is(i, "END-ISO-10303-21;")) {
             return Err(StepParseError::new("missing END-ISO-10303-21 marker"));
         }
 
-        let records = &blocks[data_start..data_end];
-        let chunks: Vec<_> = records.chunks(records_per_chunk).collect();
-        // Records are adjacent, so one UTF-8 check usually covers a chunk.
-        let texts = map_in_order(chunks.len(), 1, |c| {
-            let c = chunks[c];
-            std::str::from_utf8(&data[c[0].start..c[c.len() - 1].end]).ok()
-        });
-        let parse_nth = |r: usize| {
-            let (c, range) = (r / records_per_chunk, &records[r]);
-            let text = match texts[c] {
-                Some(text) => {
-                    let base = chunks[c][0].start;
-                    Some(&text[range.start - base..range.end - base])
-                }
-                None => std::str::from_utf8(&data[range.clone()]).ok(),
-            };
-            text.and_then(|s| parse_record(s).ok()).map(|(_, (_, entity))| entity)
-        };
-
-        // Size the ID table from record headers and map each ID to its last
-        // record, which a sequential parse would have kept. A header that
-        // does not parse belongs to an invalid record, reported below.
-        let ids: Vec<Option<usize>> = map_in_order(chunks.len(), 1, |c| {
-            chunks[c].iter().map(|r| record_id(&data[r.clone()])).collect::<Vec<_>>()
-        }).into_iter().flatten().collect();
-        let max_id = ids.iter().flatten().copied().max().unwrap_or(0);
-        let mut record_of = vec![NO_RECORD; max_id + 1];
-        for (r, id) in ids.iter().enumerate() {
-            if let Some(id) = *id {
-                record_of[id] = r;
+        // Records are parsed in parallel chunks and applied in file order, so
+        // a repeated ID keeps its last record and the first invalid record is
+        // the one reported.
+        let chunks: Vec<_> = blocks[data_start..data_end].chunks(records_per_chunk).collect();
+        let parsed = map_in_order(chunks.len(), 1, |c| {
+            let mut entities = Vec::with_capacity(chunks[c].len());
+            for r in chunks[c] {
+                entities.push(parse_record(&data[r.clone()])?);
             }
-        }
-
-        // Parse each ID's record straight into its slot, in parallel. Records
-        // shadowed by a later duplicate are parsed only to detect errors.
-        let failed = AtomicBool::new(false);
-        let out: Vec<Entity> = map_in_order(max_id + 1, records_per_chunk, |id| match record_of[id] {
-            NO_RECORD => Entity::_EmptySlot,
-            r => parse_nth(r).unwrap_or_else(|| {
-                failed.store(true, Ordering::Relaxed);
-                Entity::_EmptySlot
-            }),
-        });
-        if failed.into_inner() || ids.iter().enumerate().any(|(r, id)| match *id {
-            Some(id) => record_of[id] != r && parse_nth(r).is_none(),
-            None => true,
-        }) {
-            let first = map_in_order(chunks.len(), 1, |c| {
-                let start = c * records_per_chunk;
-                (start..start + chunks[c].len()).find(|&r| parse_nth(r).is_none())
-            });
-            let r = first.into_iter().flatten().next().expect("an invalid record");
-            return Err(StepParseError::new(format!(
-                "invalid DATA record: {}",
-                String::from_utf8_lossy(&data[records[r].clone()]))));
-        }
-
+            Ok(entities)
+        }).into_iter().collect::<Result<Vec<_>, StepParseError>>()?;
+        let max_id = map_in_order(parsed.len(), 1, |c| parsed[c].iter().map(|(id, _)| *id).max())
+            .into_iter().flatten().max().unwrap_or(0);
+        let mut out = map_in_order(max_id + 1, records_per_chunk, |_| Entity::_EmptySlot);
         // One bit per ID keeps reference lookups in cache.
         let mut defined = vec![0u64; max_id / 64 + 1];
-        for id in (0..=max_id).filter(|&id| record_of[id] != NO_RECORD) {
+        for (id, entity) in parsed.into_iter().flatten() {
+            out[id] = entity;
             defined[id / 64] |= 1 << (id % 64);
         }
         let errors = map_in_order(chunks.len(), 1, |c| chunks[c].iter()
             .find_map(|r| check_references(&data[r.clone()], &defined)));
-        if let Some(e) = errors.into_iter().flatten().next() {
-            return Err(e);
+        match errors.into_iter().flatten().next() {
+            Some(e) => Err(e),
+            None => Ok(Self(out)),
         }
-
-        Ok(Self(out))
     }
 
     /// Flattens a STEP file, removing comments and whitespace
-    pub fn strip_flatten(data: &[u8]) -> Result<Vec<u8>, StepParseError> {
+    pub fn strip_flatten(data: &[u8]) -> Result<String, StepParseError> {
         Self::flatten_in_chunks(data, BYTES_PER_CHUNK)
     }
 
     /// Flattens with the given work size, which must not change the result.
-    fn flatten_in_chunks(data: &[u8], bytes_per_chunk: usize) -> Result<Vec<u8>, StepParseError> {
+    fn flatten_in_chunks(data: &[u8], bytes_per_chunk: usize) -> Result<String, StepParseError> {
         // Chunks end after a newline, so no `/*` or `*/` spans two chunks.
         // Each chunk is flattened as if it starts in code; a chunk that
         // actually starts inside a literal or comment is flattened again.
@@ -166,10 +122,10 @@ impl<'a> StepFile<'a> {
             }
             state = chunk.1;
         }
-        match state {
-            Lexical::Comment => Err(StepParseError::new("unterminated comment")),
-            Lexical::Literal => Err(StepParseError::new("unterminated string literal")),
-            Lexical::Code if flat.len() <= 1 => Ok(flat.pop().map(|(f, _)| f).unwrap_or_default()),
+        let out = match state {
+            Lexical::Comment => return Err(StepParseError::new("unterminated comment")),
+            Lexical::Literal => return Err(StepParseError::new("unterminated string literal")),
+            Lexical::Code if flat.len() <= 1 => flat.pop().map(|(f, _)| f).unwrap_or_default(),
             Lexical::Code => {
                 let mut out = vec![0; flat.iter().map(|(f, _)| f.len()).sum()];
                 let mut dst = Vec::with_capacity(flat.len());
@@ -183,9 +139,13 @@ impl<'a> StepFile<'a> {
                 dst.into_par_iter().zip(&flat).for_each(|(d, (f, _))| d.copy_from_slice(f));
                 #[cfg(not(feature = "rayon"))]
                 dst.into_iter().zip(&flat).for_each(|(d, (f, _))| d.copy_from_slice(f));
-                Ok(out)
+                out
             }
-        }
+        };
+        debug_assert!(out.is_ascii());
+        // SAFETY: `flatten_chunk` writes only ASCII: input bytes below 0x80,
+        // or `?` in place of other bytes.
+        Ok(unsafe { String::from_utf8_unchecked(out) })
     }
 
     /// Splits a STEP file into individual blocks, returned as byte ranges.
@@ -240,9 +200,6 @@ impl<'a> StepFile<'a> {
 const BYTES_PER_CHUNK: usize = if cfg!(feature = "rayon") { 1 << 20 } else { usize::MAX };
 /// DATA records per parallel parsing or validation task.
 const RECORDS_PER_CHUNK: usize = if cfg!(feature = "rayon") { 4096 } else { usize::MAX };
-
-/// Marks an ID that no DATA record declares.
-const NO_RECORD: usize = usize::MAX;
 
 /// Returns `[f(0), f(1), ..., f(n - 1)]`. With the `rayon` feature, tasks of
 /// at least `min_len` items run in parallel; smaller inputs stay on the
@@ -368,7 +325,7 @@ fn flatten_chunk(data: &[u8], mut state: Lexical) -> (Vec<u8>, Lexical) {
     (out, state)
 }
 
-fn parse_record(s: &str) -> crate::parse::IResult<'_, (usize, Entity<'_>)> {
+fn parse_record(s: &str) -> Result<(usize, Entity<'_>), StepParseError> {
     parse_entity_decl(s)
         .and_then(|(remaining, value)| {
             // Complex entity parsing consumes the full declaration;
@@ -391,19 +348,15 @@ fn parse_record(s: &str) -> crate::parse::IResult<'_, (usize, Entity<'_>)> {
                 }
             })
         })
-}
-
-/// Reads the ID from a record's `#ID=` header.
-fn record_id(b: &[u8]) -> Option<usize> {
-    let b = b.strip_prefix(b"#")?;
-    let end = b.iter().position(|c| *c == b'=')?;
-    std::str::from_utf8(&b[..end]).ok()?.parse::<usize>().ok()
+        .map(|(_, value)| value)
+        .map_err(|_| StepParseError::new(format!("invalid DATA record: {}", s)))
 }
 
 /// Checks explicit entity references in an original record.  This is kept
 /// separate from `Entity::upstream`, because `$` is represented internally as
 /// ID 0 and fallback entities do not expose their parameters there.
-fn check_references(block: &[u8], defined: &[u64]) -> Option<StepParseError> {
+fn check_references(record: &str, defined: &[u64]) -> Option<StepParseError> {
+    let block = record.as_bytes();
     let equals = block.iter().position(|c| *c == b'=').expect("parsed DATA declaration");
     let mut in_string = false;
     for offset in memchr::memchr2_iter(b'\'', b'#', &block[equals + 1..]) {
@@ -417,12 +370,12 @@ fn check_references(block: &[u8], defined: &[u64]) -> Option<StepParseError> {
                 end += 1;
             }
             if end > start {
-                let target_text = std::str::from_utf8(&block[start..end]).unwrap();
+                let target_text = &record[start..end];
                 let target = target_text.parse::<usize>().ok();
                 if !target.map_or(false, |t| defined.get(t / 64).map_or(false, |w| w >> (t % 64) & 1 == 1)) {
                     return Some(StepParseError::new(format!(
                         "entity {} references undefined entity #{}",
-                        String::from_utf8_lossy(&block[..equals]), target_text
+                        &record[..equals], target_text
                     )));
                 }
             }
@@ -461,15 +414,15 @@ mod tests {
             "ISO-10303-21;HEADER;ENDSEC;DATA;{}ENDSEC;END-ISO-10303-21;",
             records
         );
-        StepFile::parse(data.as_bytes()).map(|_| ())
+        StepFile::parse(&data).map(|_| ())
     }
 
     #[test]
     fn flatten_respects_literals_and_comments() {
         let flat = StepFile::strip_flatten(b" A /* remove; ' */ 'two words; /* keep */ it''s' ").unwrap();
-        assert_eq!(flat, b"A'two words; /* keep */ it''s'");
+        assert_eq!(flat, "A'two words; /* keep */ it''s'");
         let flat = StepFile::strip_flatten(b"A/\xff /*'*/'two\xfe words''/*keep*/'\tB").unwrap();
-        assert_eq!(flat, b"A/?'two? words''/*keep*/'B");
+        assert_eq!(flat, "A/?'two? words''/*keep*/'B");
     }
 
     #[test]
@@ -481,9 +434,9 @@ mod tests {
 
     #[test]
     fn malformed_and_non_step_inputs_are_errors() {
-        assert!(StepFile::parse(b"**PARASOLID !").unwrap_err().to_string()
+        assert!(StepFile::parse("**PARASOLID !").unwrap_err().to_string()
             .contains("unterminated record"));
-        assert!(StepFile::parse(b"ISO-10303-21;HEADER;ENDSEC;").unwrap_err().to_string()
+        assert!(StepFile::parse("ISO-10303-21;HEADER;ENDSEC;").unwrap_err().to_string()
             .contains("missing DATA"));
         assert!(StepFile::strip_flatten(b"/* never closed").unwrap_err().to_string()
             .contains("unterminated comment"));
@@ -500,7 +453,7 @@ mod tests {
 
     #[test]
     fn sparse_out_of_order_records_keep_their_ids() {
-        let file = StepFile::parse(b"ISO-10303-21;HEADER;ENDSEC;DATA;\
+        let file = StepFile::parse("ISO-10303-21;HEADER;ENDSEC;DATA;\
             #19=CARTESIAN_POINT('',(3.,7.,11.));\
             #2=VERTEX_POINT('',#19);ENDSEC;END-ISO-10303-21;").unwrap();
         assert_eq!(file.0.len(), 20);
@@ -534,10 +487,9 @@ mod tests {
             #3=CARTESIAN_POINT('caf\xc3\xa9',(1.,2.,3.));\n\
             #9=NOT_IN_AP214('x');\nENDSEC;\nEND-ISO-10303-21;\n";
         let flat = StepFile::flatten_in_chunks(text, usize::MAX).unwrap();
-        let flat_text = std::str::from_utf8(&flat).unwrap();
-        assert!(flat_text.starts_with("ISO-10303-21;HEADER;ENDSEC;DATA;#3="));
-        assert!(flat_text.contains("#2=VERTEX_POINT('it''s; /* not a\ncomment */',#3);"));
-        assert!(flat_text.contains("#3=CARTESIAN_POINT('caf??',(1.,2.,3.));"));
+        assert!(flat.starts_with("ISO-10303-21;HEADER;ENDSEC;DATA;#3="));
+        assert!(flat.contains("#2=VERTEX_POINT('it''s; /* not a\ncomment */',#3);"));
+        assert!(flat.contains("#3=CARTESIAN_POINT('caf??',(1.,2.,3.));"));
         let step = StepFile::parse_in_chunks(&flat, usize::MAX, usize::MAX).unwrap();
         let point = step.entity::<crate::ap214::CartesianPoint_>(Id::new(3)).unwrap();
         assert_eq!(point.coordinates.iter().map(|c| c.0).collect::<Vec<_>>(), [1., 2., 3.]);
@@ -555,10 +507,10 @@ mod tests {
 
     #[test]
     fn chunked_parsing_reports_the_first_error_in_file_order() {
-        // Both invalid records are shadowed by later duplicate IDs.
-        let invalid = b"ISO-10303-21;HEADER;ENDSEC;DATA;#1=lowercase(1);#2=NOT_IN_AP214(#1);\
+        // Later duplicate IDs replace both invalid records.
+        let invalid = "ISO-10303-21;HEADER;ENDSEC;DATA;#1=lowercase(1);#2=NOT_IN_AP214(#1);\
             #1=NOT_IN_AP214(1);#3=lowercase(3);#3=NOT_IN_AP214(3);ENDSEC;END-ISO-10303-21;";
-        let undefined = b"ISO-10303-21;HEADER;ENDSEC;DATA;#1=NOT_IN_AP214(1);\
+        let undefined = "ISO-10303-21;HEADER;ENDSEC;DATA;#1=NOT_IN_AP214(1);\
             #2=NOT_IN_AP214(#8);#3=NOT_IN_AP214(#9);ENDSEC;END-ISO-10303-21;";
         for bytes in 1..=invalid.len() {
             for records in 1..=4 {
