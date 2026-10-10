@@ -1190,7 +1190,16 @@ fn advanced_face(
                 let samples = [a,b,c].map(|i| (DVec2::new(pts[i].0,pts[i].1),1./3.));
                 let Some((uv,pos)) = prepared.sample(&samples) else { return false; };
                 let center = (surface_positions[a] + surface_positions[b] + surface_positions[c]) / 3.;
-                prepared.exceeds_tolerance(center, uv, pos, tolerance)
+                if prepared.exceeds_tolerance(center, uv, pos, tolerance) { return true; }
+                // A thin triangle deviates most at the middle of its long
+                // edge, not at its centroid.
+                [(a,b),(b,c),(c,a)].iter().any(|&(a,b)| {
+                    if boundary.contains(&edge_key(a,b)) { return false; }
+                    let samples = [a,b].map(|i| (DVec2::new(pts[i].0,pts[i].1),0.5));
+                    let Some((uv,pos)) = prepared.sample(&samples) else { return false; };
+                    let middle = (surface_positions[a] + surface_positions[b]) * 0.5;
+                    prepared.exceeds_tolerance(middle, uv, pos, tolerance)
+                })
             });
             marked.push(balance || inaccurate);
         }
@@ -2662,9 +2671,18 @@ mod tests {
             advanced_face(&step, &[Id::new(13)], &mut mesh, &HashMap::new(), DVec3::zeros(), 0., tolerance, &HashMap::new()).unwrap();
             assert!(mesh.triangles.len() > previous);
             previous = mesh.triangles.len();
+            // Boundary refinement keeps vertices on edge chords, off the
+            // sphere. Centroid and edge midpoint tests bound the rest of a
+            // triangle's quadratic deviation by 16/15 of the budget.
             for t in &mesh.triangles {
-                let p = t.verts.iter().map(|&i| mesh.verts[i as usize].pos).sum::<DVec3>() / 3.;
-                assert!(5.-p.norm() < 2.*tolerance);
+                let v = [0, 1, 2].map(|i| mesh.verts[t.verts[i] as usize].pos);
+                let offset = v.iter().map(|p| (5.-p.norm()).abs()).fold(0., f64::max);
+                for i in 0..=8 {
+                    for j in 0..=8-i {
+                        let p = (v[0]*i as f64 + v[1]*j as f64 + v[2]*(8-i-j) as f64) / 8.;
+                        assert!((5.-p.norm()).abs() - offset <= tolerance * 16. / 15.);
+                    }
+                }
             }
         }
     }
