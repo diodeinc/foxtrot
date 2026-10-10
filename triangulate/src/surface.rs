@@ -1651,66 +1651,49 @@ impl PreparedSurface<'_> {
     }
 
     pub fn add_steiner_points(&self, pts: &mut Vec<(f64, f64)>, verts: &mut Vec<Vertex>, tolerance: f64) {
-        if let FaceChart::TorusStrip { scale,.. } | FaceChart::TorusPunctured { scale,.. } = &self.chart {
-            let (xmin,xmax,ymin,ymax) = Self::bbox(pts);
-            let min = DVec2::new(xmin,ymin);
-            let span = DVec2::new(xmax-xmin,ymax-ymin);
-            // Chart axes are the major and minor angles, scaled by their radii.
-            let radii = [scale.x.abs()+scale.y.abs(), scale.y.abs()];
-            let counts = [0,1].map(|axis| (span[axis]/scale[axis].abs()/chord_angle(radii[axis], tolerance)).ceil() as usize);
-            for i in 1..counts[0] {
-                for j in 1..counts[1] {
-                    let uv = min+span.component_mul(&DVec2::new(i as f64/counts[0] as f64,j as f64/counts[1] as f64));
-                    let pos = self.raise(uv).unwrap();
-                    pts.push((uv.x,uv.y));
-                    verts.push(Vertex { pos,norm: DVec3::zeros(),color: DVec3::zeros() });
-                }
-            }
-            return;
-        }
-        if let (
-            Surface::Torus {
-                major_radius,
-                minor_radius,
-                ..
-            },
-            FaceChart::Torus { polar_major, .. },
-        ) = (self.surface, &self.chart)
-        {
-            let (major, minor) = (major_radius.abs(), minor_radius.abs());
-            // Major-angle circles have radii up to major + minor.
-            let (radial_scale, radii) = if *polar_major {
-                (minor, [major + minor, minor])
-            } else {
-                (major, [minor, major + minor])
-            };
-            self.add_torus_steiner_points(pts, verts, radial_scale, radii, tolerance);
-            return;
-        }
-
         match (self.surface, &self.chart) {
-            (Surface::NURBS { surf, .. }, FaceChart::Spline(chart)) => {
-                return self.add_spline_steiner_points(pts, verts, surf, chart, tolerance);
+            (Surface::NURBS { surf }, FaceChart::Spline(chart)) => {
+                self.add_spline_steiner_points(pts, verts, surf, chart, tolerance);
+            }
+            (Surface::Torus { major_radius, minor_radius, .. }, FaceChart::Torus { polar_major, .. }) => {
+                let (major, minor) = (major_radius.abs(), minor_radius.abs());
+                // Major-angle circles have radii up to major + minor.
+                let (radial_scale, radii) = if *polar_major {
+                    (minor, [major + minor, minor])
+                } else {
+                    (major, [minor, major + minor])
+                };
+                self.add_torus_steiner_points(pts, verts, radial_scale, radii, tolerance);
+            }
+            (_, FaceChart::TorusStrip { scale, .. } | FaceChart::TorusPunctured { scale, .. }) => {
+                // Chart axes are the major and minor angles, scaled by their radii.
+                let radii = [scale.x.abs() + scale.y.abs(), scale.y.abs()];
+                self.add_grid_steiner_points(pts, verts, |axis, span|
+                    span / scale[axis].abs() / chord_angle(radii[axis], tolerance));
+            }
+            // The sphere chart measures angles, so the chord budget is a spacing.
+            (Surface::Sphere { radius, .. }, _) => {
+                self.add_grid_steiner_points(pts, verts, |_, span| span / chord_angle(radius.abs(), tolerance));
             }
             _ => (),
         }
+    }
 
-        // The sphere chart measures angles, so the chord budget is a spacing.
-        let Surface::Sphere { radius, .. } = self.surface else { return; };
+    /// Seeds the interior of a grid over the chart bounds, with
+    /// `segments(axis, span)` cells along each axis.
+    fn add_grid_steiner_points(&self, pts: &mut Vec<(f64, f64)>, verts: &mut Vec<Vertex>,
+        segments: impl Fn(usize, f64) -> f64,
+    ) {
         let (xmin, xmax, ymin, ymax) = Self::bbox(pts);
-        let step = chord_angle(radius.abs(), tolerance);
-        let counts = [xmax - xmin, ymax - ymin].map(|span| (span / step).ceil() as usize);
+        let min = DVec2::new(xmin, ymin);
+        let span = DVec2::new(xmax - xmin, ymax - ymin);
+        let counts = [0, 1].map(|axis| segments(axis, span[axis]).ceil() as usize);
         for i in 1..counts[0] {
-            let u = xmin + (xmax - xmin) * (i as f64 / counts[0] as f64);
             for j in 1..counts[1] {
-                let v = ymin + (ymax - ymin) * (j as f64 / counts[1] as f64);
-                if let Some(pos) = self.raise(DVec2::new(u, v)) {
-                    pts.push((u, v));
-                    verts.push(Vertex {
-                        pos,
-                        norm: DVec3::zeros(),
-                        color: DVec3::zeros(),
-                    });
+                let uv = min + span.component_mul(&DVec2::new(i as f64 / counts[0] as f64, j as f64 / counts[1] as f64));
+                if let Some(pos) = self.raise(uv) {
+                    pts.push((uv.x, uv.y));
+                    verts.push(Vertex { pos, norm: DVec3::zeros(), color: DVec3::zeros() });
                 }
             }
         }

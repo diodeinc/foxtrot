@@ -189,47 +189,26 @@ impl<const D: usize> NDBSplineSurface<D> {
         }
         let n = starts.len();
         let value = |k: usize| if k < n { starts[k].1 } else { knots.max_t() };
-        let lanes: Vec<Vec<TVec<f64, D>>> = if axis == 0 {
-            (0..self.control_points[0].len())
-                .map(|j| self.control_points.iter().map(|row| row[j]).collect())
-                .collect()
-        } else {
-            self.control_points.clone()
-        };
-        // Cartesian Bezier controls of each lane over each sample interval.
-        let stride = lanes.len() * (p+1);
-        let mut controls = Vec::with_capacity(n * stride);
-        for (k, &(span, a)) in starts.iter().enumerate() {
-            for lane in &lanes {
-                for c in crate::nd_curve::bezier_controls(knots, lane, span, a, value(k+1)) {
-                    if D == 4 && c[3] <= 0. { return (0..=n).map(value).collect(); }
-                    controls.push(crate::nd_curve::cartesian(c));
-                }
-            }
-        }
-        let flat = |lo: usize, hi: usize| (0..lanes.len()).all(|lane| {
-            let at = |k: usize, i: usize| controls[k*stride + lane*(p+1) + i];
-            let (a, b) = (at(lo, 0), at(hi-1, p));
-            let edge = b-a;
-            let length2 = edge.norm_squared();
-            (lo..hi).flat_map(|k| (0..=p).map(move |i| at(k, i))).map(|q| {
-                let t = if length2 == 0. { 0. } else { ((q-a).dot(&edge)/length2).clamp(0.,1.) };
-                (q-a-t*edge).norm()
-            }).fold(0., f64::max) <= tolerance
-        });
-        let mut keep = vec![false; n+1];
-        let mut runs = vec![(0, n)];
-        while let Some((lo, hi)) = runs.pop() {
-            if hi - lo <= 1 || flat(lo, hi) {
-                keep[lo] = true;
-                keep[hi] = true;
+        // Bezier controls of each control curve along the axis over each
+        // sample interval, one curve after another.
+        let lanes = if axis == 0 { self.control_points[0].len() } else { self.control_points.len() };
+        let mut controls = Vec::with_capacity(lanes * n * (p+1));
+        for lane in 0..lanes {
+            let column: Vec<_>;
+            let points = if axis == 0 {
+                column = self.control_points.iter().map(|row| row[lane]).collect();
+                &column
             } else {
-                let mid = (lo+hi)/2;
-                runs.push((mid, hi));
-                runs.push((lo, mid));
+                &self.control_points[lane]
+            };
+            for (k, &(span, a)) in starts.iter().enumerate() {
+                controls.extend(crate::nd_curve::bezier_controls(knots, points, span, a, value(k+1)));
             }
         }
-        (0..=n).filter(|&k| keep[k]).map(value).collect()
+        let cells = |lane: usize, lo: usize, hi: usize| &controls[(lane*n + lo)*(p+1)..(lane*n + hi)*(p+1)];
+        crate::nd_curve::flat_runs(n, 1, |lo, hi|
+            (0..lanes).all(|lane| crate::nd_curve::chord_bounds(cells(lane, lo, hi), tolerance)))
+            .into_iter().map(|(lo, _)| lo).chain([n]).map(value).collect()
     }
 
     pub(crate) fn bezier_cell(&self, spans: [usize; 2]) -> Vec<TVec<f64, D>> {

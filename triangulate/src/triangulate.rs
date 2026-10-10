@@ -1186,21 +1186,17 @@ fn advanced_face(
                 splits.get(&edge_key(a,b)).is_some_and(|&mid|
                     splits.contains_key(&edge_key(a,mid)) || splits.contains_key(&edge_key(mid,b)))
             });
-            let inaccurate = children([a,b,c], &splits).any(|[a,b,c]| {
-                let samples = [a,b,c].map(|i| (DVec2::new(pts[i].0,pts[i].1),1./3.));
-                let Some((uv,pos)) = prepared.sample(&samples) else { return false; };
-                let center = (surface_positions[a] + surface_positions[b] + surface_positions[c]) / 3.;
-                if prepared.exceeds_tolerance(center, uv, pos, tolerance) { return true; }
-                // A thin triangle deviates most at the middle of its long
-                // edge, not at its centroid.
-                [(a,b),(b,c),(c,a)].iter().any(|&(a,b)| {
-                    if boundary.contains(&edge_key(a,b)) { return false; }
-                    let samples = [a,b].map(|i| (DVec2::new(pts[i].0,pts[i].1),0.5));
-                    let Some((uv,pos)) = prepared.sample(&samples) else { return false; };
-                    let middle = (surface_positions[a] + surface_positions[b]) * 0.5;
-                    prepared.exceeds_tolerance(middle, uv, pos, tolerance)
-                })
-            });
+            // A thin triangle deviates most at the middle of its long edge,
+            // not at its centroid, so test both.
+            let deviates = |ids: &[usize]| {
+                let w = 1. / ids.len() as f64;
+                let uv = ids.iter().map(|&i| DVec2::new(pts[i].0,pts[i].1)*w).sum();
+                let Some(pos) = prepared.raise(uv) else { return false; };
+                let center = ids.iter().map(|&i| surface_positions[i]).sum::<DVec3>() / ids.len() as f64;
+                prepared.exceeds_tolerance(center, uv, pos, tolerance)
+            };
+            let inaccurate = children([a,b,c], &splits).any(|[a,b,c]| deviates(&[a,b,c])
+                || [(a,b),(b,c),(c,a)].iter().any(|&(a,b)| !boundary.contains(&edge_key(a,b)) && deviates(&[a,b])));
             marked.push(balance || inaccurate);
         }
         if !marked.iter().any(|&m| m) {
