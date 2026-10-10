@@ -1109,7 +1109,7 @@ fn advanced_face(
     let mut constraints: Vec<_> = edges.iter().map(|&(a, b)| (a, b, true)).collect();
     let bonus_points = pts.len();
     crate::timing::time("face:add_steiner_points", || {
-        prepared.add_steiner_points(&mut pts, &mut mesh.verts);
+        prepared.add_steiner_points(&mut pts, &mut mesh.verts, tolerance);
         retain_interior_samples(&mut pts, &mut mesh.verts, &edges, bonus_points);
     });
     crate::timing::time("face:resolve_crossing_edges", || {
@@ -1186,12 +1186,17 @@ fn advanced_face(
                 splits.get(&edge_key(a,b)).is_some_and(|&mid|
                     splits.contains_key(&edge_key(a,mid)) || splits.contains_key(&edge_key(mid,b)))
             });
-            let inaccurate = children([a,b,c], &splits).any(|[a,b,c]| {
-                let samples = [a,b,c].map(|i| (DVec2::new(pts[i].0,pts[i].1),1./3.));
-                let Some((uv,pos)) = prepared.sample(&samples) else { return false; };
-                let center = (surface_positions[a] + surface_positions[b] + surface_positions[c]) / 3.;
+            // A thin triangle deviates most at the middle of its long edge,
+            // not at its centroid, so test both.
+            let deviates = |ids: &[usize]| {
+                let w = 1. / ids.len() as f64;
+                let uv = ids.iter().map(|&i| DVec2::new(pts[i].0,pts[i].1)*w).sum();
+                let Some(pos) = prepared.raise(uv) else { return false; };
+                let center = ids.iter().map(|&i| surface_positions[i]).sum::<DVec3>() / ids.len() as f64;
                 prepared.exceeds_tolerance(center, uv, pos, tolerance)
-            });
+            };
+            let inaccurate = children([a,b,c], &splits).any(|[a,b,c]| deviates(&[a,b,c])
+                || [(a,b),(b,c),(c,a)].iter().any(|&(a,b)| !boundary.contains(&edge_key(a,b)) && deviates(&[a,b])));
             marked.push(balance || inaccurate);
         }
         if !marked.iter().any(|&m| m) {
@@ -2231,7 +2236,7 @@ mod tests {
             let mut verts = boundary.clone();
             let prepared = surface.prepare(&verts, &edges, true, 0., false).unwrap();
             let mut pts = prepared.lower_verts(&verts).unwrap();
-            prepared.add_steiner_points(&mut pts, &mut verts);
+            prepared.add_steiner_points(&mut pts, &mut verts, 0.01);
             if filtered { retain_interior_samples(&mut pts, &mut verts, &edges, boundary.len()); }
             let t = cdt::Triangulation::build_with_edges(&pts, &edges).unwrap();
             let mut side = Vec::new();
@@ -2662,9 +2667,18 @@ mod tests {
             advanced_face(&step, &[Id::new(13)], &mut mesh, &HashMap::new(), DVec3::zeros(), 0., tolerance, &HashMap::new()).unwrap();
             assert!(mesh.triangles.len() > previous);
             previous = mesh.triangles.len();
+            // Boundary refinement keeps vertices on edge chords, off the
+            // sphere. Centroid and edge midpoint tests bound the rest of a
+            // triangle's quadratic deviation by 16/15 of the budget.
             for t in &mesh.triangles {
-                let p = t.verts.iter().map(|&i| mesh.verts[i as usize].pos).sum::<DVec3>() / 3.;
-                assert!(5.-p.norm() < 2.*tolerance);
+                let v = [0, 1, 2].map(|i| mesh.verts[t.verts[i] as usize].pos);
+                let offset = v.iter().map(|p| (5.-p.norm()).abs()).fold(0., f64::max);
+                for i in 0..=8 {
+                    for j in 0..=8-i {
+                        let p = (v[0]*i as f64 + v[1]*j as f64 + v[2]*(8-i-j) as f64) / 8.;
+                        assert!((5.-p.norm()).abs() - offset <= tolerance * 16. / 15.);
+                    }
+                }
             }
         }
     }

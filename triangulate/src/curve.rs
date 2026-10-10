@@ -260,7 +260,7 @@ impl Curve {
                 // For this ellipse max|C''| is its larger semiaxis.
                 let radius = world_from_eplane.column(0).xyz().norm()
                     .max(world_from_eplane.column(1).xyz().norm());
-                let max_angle = (8. * tolerance / radius).sqrt().min(std::f64::consts::FRAC_PI_2);
+                let max_angle = crate::surface::chord_angle(radius, tolerance);
                 let count = (((u_ang-v_ang).abs()/max_angle).ceil() as usize + 1).max(3);
 
                 let mut out_world = vec![u];
@@ -302,6 +302,25 @@ mod tests {
         let points = curve.polyline_with_tolerance(&[(0.,1.)], tolerance).unwrap();
         for i in 0..=1000 {
             let p = curve.point(i as f64/1000.);
+            let distance = points.windows(2).map(|e| {
+                let d = e[1]-e[0];
+                (p-e[0]-d*((p-e[0]).dot(&d)/d.norm_squared()).clamp(0.,1.)).norm()
+            }).fold(f64::INFINITY, f64::min);
+            assert!(distance <= tolerance);
+        }
+        // A quarter circle of radius 10 approximated with 300 knot spans
+        // needs about 18 chords, not degree samples per span.
+        let spans = 300;
+        let angle = |i: usize| std::f64::consts::FRAC_PI_2 * i as f64 / (spans + 2) as f64;
+        let curve = NDBSplineCurve::new(true,
+            nurbs::KnotVector::from_multiplicities(3,
+                &(0..=spans).map(|i| i as f64).collect::<Vec<_>>(),
+                &(0..=spans).map(|i| if i == 0 || i == spans { 4 } else { 1 }).collect::<Vec<_>>()),
+            (0..spans + 3).map(|i| DVec3::new(angle(i).cos(), angle(i).sin(), 0.) * 10.).collect());
+        let points = curve.polyline_with_tolerance(&[(0., spans as f64)], tolerance).unwrap();
+        assert!(points.len() <= 2 * 18 + 1, "{} samples", points.len());
+        for i in 0..=10 * spans {
+            let p = curve.point(i as f64 / 10.);
             let distance = points.windows(2).map(|e| {
                 let d = e[1]-e[0];
                 (p-e[0]-d*((p-e[0]).dot(&d)/d.norm_squared()).clamp(0.,1.)).norm()

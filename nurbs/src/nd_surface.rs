@@ -171,6 +171,46 @@ impl<const D: usize> NDBSplineSurface<D> {
         self.v_knots.max_t()
     }
 
+    /// Parameters along `axis` (0 for u) at which to seed a tessellation:
+    /// degree + 1 per knot span, which resolves every polynomial piece,
+    /// except within runs where every control curve along the axis stays
+    /// within `tolerance` of its chord. The surface's iso-curves there are
+    /// as flat as the tolerance requires, however many knots they cross.
+    pub fn seed_parameters(&self, axis: usize, tolerance: f64) -> Vec<f64> {
+        let knots = if axis == 0 { &self.u_knots } else { &self.v_knots };
+        let p = knots.degree();
+        let mut starts = Vec::new();
+        for span in p..knots.len()-p-1 {
+            let (a, b) = (knots[span], knots[span+1]);
+            if a == b { continue; }
+            for i in 0..=p {
+                starts.push((span, a + (b-a)*(i as f64/(p+1) as f64)));
+            }
+        }
+        let n = starts.len();
+        let value = |k: usize| if k < n { starts[k].1 } else { knots.max_t() };
+        // Bezier controls of each control curve along the axis over each
+        // sample interval, one curve after another.
+        let lanes = if axis == 0 { self.control_points[0].len() } else { self.control_points.len() };
+        let mut controls = Vec::with_capacity(lanes * n * (p+1));
+        for lane in 0..lanes {
+            let column: Vec<_>;
+            let points = if axis == 0 {
+                column = self.control_points.iter().map(|row| row[lane]).collect();
+                &column
+            } else {
+                &self.control_points[lane]
+            };
+            for (k, &(span, a)) in starts.iter().enumerate() {
+                controls.extend(crate::nd_curve::bezier_controls(knots, points, span, a, value(k+1)));
+            }
+        }
+        let cells = |lane: usize, lo: usize, hi: usize| &controls[(lane*n + lo)*(p+1)..(lane*n + hi)*(p+1)];
+        crate::nd_curve::flat_runs(n, 1, |lo, hi|
+            (0..lanes).all(|lane| crate::nd_curve::chord_bounds(cells(lane, lo, hi), tolerance)))
+            .into_iter().map(|(lo, _)| lo).chain([n]).map(value).collect()
+    }
+
     pub(crate) fn bezier_cell(&self, spans: [usize; 2]) -> Vec<TVec<f64, D>> {
         let [u, v] = spans;
         let rows: Vec<_> = self.control_points.iter().map(|row|

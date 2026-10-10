@@ -38,6 +38,37 @@ pub(crate) fn cartesian<const D: usize>(p: TVec<f64, D>) -> nalgebra_glm::DVec3 
     nalgebra_glm::DVec3::new(p[0], p[1], p[2]) / if D == 4 { p[3] } else { 1. }
 }
 
+/// Whether the chord from the first to the last control bounds the curve
+/// within `tolerance`. A Bezier piece lies in the hull of its positive-weight
+/// controls, so the controls of consecutive pieces bound their union.
+pub(crate) fn chord_bounds<const D: usize>(controls: &[TVec<f64, D>], tolerance: f64) -> bool {
+    let a = cartesian(controls[0]);
+    let edge = cartesian(*controls.last().unwrap()) - a;
+    let length2 = edge.norm_squared();
+    controls.iter().map(|&p| {
+        let p = cartesian(p);
+        let t = if length2 == 0. { 0. } else { ((p-a).dot(&edge)/length2).clamp(0.,1.) };
+        (p-a-t*edge).norm()
+    }).fold(0., f64::max) <= tolerance
+}
+
+/// Bisects `parts` equal runs of `n` cells until each is one cell or `flat`,
+/// returning the runs in order.
+pub(crate) fn flat_runs(n: usize, parts: usize, flat: impl Fn(usize, usize) -> bool) -> Vec<(usize, usize)> {
+    let mut runs: Vec<_> = (0..parts).rev().map(|k| (k*n/parts, (k+1)*n/parts)).collect();
+    let mut result = Vec::new();
+    while let Some((lo, hi)) = runs.pop() {
+        if hi - lo > 1 && !flat(lo, hi) {
+            let mid = (lo+hi)/2;
+            runs.push((mid, hi));
+            runs.push((lo, mid));
+        } else {
+            result.push((lo, hi));
+        }
+    }
+    result
+}
+
 #[derive(Debug, Clone)]
 pub struct NDBSplineCurve<const D: usize> {
     pub open: bool,
@@ -69,39 +100,41 @@ impl<const D: usize> NDBSplineCurve<D> {
     /// Bound chord deviation by the restricted positive-weight control hull,
     /// rather than probing a few parameter values which can alias curvature.
     pub fn polyline_with_tolerance(&self, ranges: &[(f64, f64)], tolerance: f64) -> Option<Vec<nalgebra_glm::DVec3>> {
+        let p = self.knots.degree();
         let mut result = Vec::new();
         for &(start, end) in ranges {
-            let mut cells = Vec::new();
-            for span in self.knots.degree()..self.knots.len()-self.knots.degree()-1 {
+            // Bezier controls of p cells per knot span, in traversal order.
+            let mut controls = Vec::new();
+            for span in p..self.knots.len()-p-1 {
                 let a = self.knots[span].max(start.min(end));
                 let b = self.knots[span+1].min(start.max(end));
-                // Degree + 1 samples preserve nonlinearity even when the whole
-                // feature is below the chord budget. Otherwise two distinct
-                // trim curves can become the same segment and erase a face.
                 if a < b {
-                    for i in 0..self.knots.degree() {
-                        let at = |j| a + (b-a)*(j as f64/self.knots.degree() as f64);
-                        cells.push((span, at(i), at(i+1)));
+                    for i in 0..p {
+                        let at = |j| a + (b-a)*(j as f64/p as f64);
+                        controls.extend(bezier_controls(&self.knots, &self.control_points, span, at(i), at(i+1)));
                     }
                 }
             }
-            if start > end { cells.reverse(); }
-            for (span,a,b) in cells {
-                let mut controls = bezier_controls(&self.knots, &self.control_points, span, a, b);
-                if start > end { controls.reverse(); }
-                if result.is_empty() { result.push(cartesian(controls[0])); }
-                let mut queue = vec![controls];
+            if start > end { controls.reverse(); }
+            if D == 4 && controls.iter().any(|c| c[3] <= 0.) { return None; }
+            let Some(&first) = controls.first() else { continue; };
+            if result.is_empty() { result.push(cartesian(first)); }
+            let cells = |lo: usize, hi: usize| &controls[lo*(p+1)..hi*(p+1)];
+            // Contiguous cells, across knots, share a chord if it bounds them
+            // all, so the count follows the tolerance, not the knot count.
+            // The range keeps at least degree + 1 samples, which preserves
+            // nonlinearity even when the whole feature is below the chord
+            // budget. Otherwise two distinct trim curves can become the same
+            // segment and erase a face.
+            let n = controls.len()/(p+1);
+            for (lo, hi) in flat_runs(n, p, |lo, hi| chord_bounds(cells(lo, hi), tolerance)) {
+                if hi - lo > 1 {
+                    result.push(cartesian(controls[hi*(p+1)-1]));
+                    continue;
+                }
+                let mut queue = vec![cells(lo, hi).to_vec()];
                 while let Some(controls) = queue.pop() {
-                    if D == 4 && controls.iter().any(|p| p[3] <= 0.) { return None; }
-                    let a = cartesian(controls[0]);
-                    let b = cartesian(*controls.last().unwrap());
-                    let edge = b-a;
-                    let length2 = edge.norm_squared();
-                    let error = controls.iter().copied().map(cartesian).map(|p| {
-                        let t = if length2 == 0. { 0. } else { ((p-a).dot(&edge)/length2).clamp(0.,1.) };
-                        (p-a-t*edge).norm()
-                    }).fold(0., f64::max);
-                    if error <= tolerance { result.push(b); }
+                    if chord_bounds(&controls, tolerance) { result.push(cartesian(*controls.last().unwrap())); }
                     else {
                         let [left,right] = split_bezier(&controls);
                         queue.push(right); queue.push(left);
