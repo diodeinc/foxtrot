@@ -800,7 +800,6 @@ fn axis2_placement_3d(
         .entity(t)
         .ok_or(Error::InvalidStepEntity("Axis2Placement3d"))?;
     let location = cartesian_point(s, a.location)?;
-    // TODO: this doesn't necessarily match the behavior of `build_axes`
     let axis = direction(
         s,
         a.axis
@@ -810,6 +809,21 @@ fn axis2_placement_3d(
         None => DVec3::new(1.0, 0.0, 0.0),
         Some(r) => direction(s, r)?,
     };
+    // Directions are only ratios. As in `build_axes`, the placement's axes
+    // are the unit axis and the unit part of ref_direction orthogonal to it.
+    // Most files store that to print precision; renormalizing those would
+    // only perturb every mesh, so keep them as written.
+    let printed = 1e-6;
+    if (axis.norm_squared() - 1.0).abs() <= printed
+        && (ref_direction.norm_squared() - 1.0).abs() <= printed
+        && axis.dot(&ref_direction).abs() <= printed
+    {
+        return Ok((location, axis, ref_direction));
+    }
+    let axis = axis.try_normalize(0.0).unwrap_or(axis);
+    let ref_direction = (ref_direction - axis * ref_direction.dot(&axis))
+        .try_normalize(0.0)
+        .unwrap_or(ref_direction);
     Ok((location, axis, ref_direction))
 }
 
@@ -2563,6 +2577,33 @@ mod tests {
         assert_eq!(a[3], b[3]);
         assert!(a[1..3].iter().all(|p| p.y == -0.005));
         assert!(b[1..3].iter().all(|p| p.y == 0.005));
+    }
+
+    #[test]
+    fn placement_directions_are_only_ratios() {
+        // A RedPitaya circle placement with a ref_direction of length 0.1:
+        // the circle was sampled at a tenth of its radius, off its cylinder.
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(0.,0.,0.));
+            #2=DIRECTION('',(0.,0.,2.));
+            #3=DIRECTION('',(0.1,0.1,0.05));
+            #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+            #5=CIRCLE('',#4,1.);
+            #6=CARTESIAN_POINT('',(0.7071067811865476,0.7071067811865476,0.));
+            #7=CARTESIAN_POINT('',(-0.7071067811865476,0.7071067811865476,0.));
+            #8=VERTEX_POINT('',#6);
+            #9=VERTEX_POINT('',#7);
+            #10=EDGE_CURVE('',#8,#9,#5,.T.);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let points = edge_curve(&step, Id::new(10), true, 0.01).unwrap();
+        assert!(points.len() > 2);
+        for p in &points {
+            assert!((p.norm() - 1.).abs() < 1e-12 && p.z == 0., "{:?} is not on the unit circle", p);
+            // The quarter arc counterclockwise about the axis.
+            assert!(p.y > 0.7);
+        }
     }
 
     #[test]
