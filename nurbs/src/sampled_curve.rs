@@ -89,6 +89,10 @@ impl<const N: usize> SampledCurve<N>
         None
     }
 
+    pub fn point(&self, u: f64) -> DVec3 {
+        self.curve.point(u)
+    }
+
     pub fn min_u(&self) -> f64 {
         self.curve.min_u()
     }

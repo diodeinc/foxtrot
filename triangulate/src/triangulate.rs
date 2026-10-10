@@ -2607,6 +2607,33 @@ mod tests {
     }
 
     #[test]
+    fn open_curve_whose_ends_meet_follows_the_edge_sense_across_them() {
+        // A RedPitaya B-spline is flagged open but its ends meet. The edge
+        // runs from its start against its sense, so it is the short arc
+        // across the ends (x = 0), not the rest of the curve.
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(0.,0.,0.));
+            #2=CARTESIAN_POINT('',(1.,0.,0.));
+            #3=CARTESIAN_POINT('',(1.,1.,0.));
+            #4=CARTESIAN_POINT('',(0.,1.,0.));
+            #5=CARTESIAN_POINT('',(0.,0.002,0.));
+            #6=B_SPLINE_CURVE_WITH_KNOTS('',1,(#1,#2,#3,#4,#5),.UNSPECIFIED.,.F.,.U.,(2,1,1,1,2),(0.,1.,2.,3.,4.),.UNSPECIFIED.);
+            #7=VERTEX_POINT('',#1);
+            #8=VERTEX_POINT('',#4);
+            #9=EDGE_CURVE('',#7,#8,#6,.F.);
+            #10=EDGE_CURVE('',#7,#8,#6,.T.);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let points = edge_curve(&step, Id::new(9), true, 0.01).unwrap();
+        assert_eq!((points[0], *points.last().unwrap()), (DVec3::zeros(), DVec3::new(0., 1., 0.)));
+        assert!(points.iter().all(|p| p.x == 0.), "{:?}", points);
+        // With the curve's sense, the edge is the rest of the curve.
+        let points = edge_curve(&step, Id::new(10), true, 0.01).unwrap();
+        assert!(points.contains(&DVec3::new(1., 1., 0.)), "{:?}", points);
+    }
+
+    #[test]
     fn oriented_edges_share_exactly_the_same_curve_discretization() {
         let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
             #1=CARTESIAN_POINT('',(0.4,1.E-15,0.4));
