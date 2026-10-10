@@ -800,7 +800,6 @@ fn axis2_placement_3d(
         .entity(t)
         .ok_or(Error::InvalidStepEntity("Axis2Placement3d"))?;
     let location = cartesian_point(s, a.location)?;
-    // TODO: this doesn't necessarily match the behavior of `build_axes`
     let axis = direction(
         s,
         a.axis
@@ -810,6 +809,21 @@ fn axis2_placement_3d(
         None => DVec3::new(1.0, 0.0, 0.0),
         Some(r) => direction(s, r)?,
     };
+    // Directions are only ratios. As in `build_axes`, the placement's axes
+    // are the unit axis and the unit part of ref_direction orthogonal to it.
+    // Most files store that to print precision; renormalizing those would
+    // only perturb every mesh, so keep them as written.
+    let printed = 1e-6;
+    if (axis.norm_squared() - 1.0).abs() <= printed
+        && (ref_direction.norm_squared() - 1.0).abs() <= printed
+        && axis.dot(&ref_direction).abs() <= printed
+    {
+        return Ok((location, axis, ref_direction));
+    }
+    let axis = axis.try_normalize(0.0).unwrap_or(axis);
+    let ref_direction = (ref_direction - axis * ref_direction.dot(&axis))
+        .try_normalize(0.0)
+        .unwrap_or(ref_direction);
     Ok((location, axis, ref_direction))
 }
 
@@ -1051,6 +1065,11 @@ fn advanced_face(
     crate::timing::time("face:resolve_crossing_edges", || {
         resolve_crossing_edges(&mut pts, &mut constraints, &mut mesh.verts)
     });
+    // A face bounded by one loop around a cylinder extends to infinity along
+    // the axis. Refinement towards that point would never converge.
+    if prepared.encloses_infinity(&pts, constraints.iter().map(|&(a, b, _)| (a, b))) {
+        return Err(Error::InvalidGeometry("face boundary does not enclose a finite region"));
+    }
     let face_id = face_geometry.0;
     let n_steiner = pts.len() - bonus_points;
     info!(
@@ -2563,6 +2582,211 @@ mod tests {
         assert_eq!(a[3], b[3]);
         assert!(a[1..3].iter().all(|p| p.y == -0.005));
         assert!(b[1..3].iter().all(|p| p.y == 0.005));
+    }
+
+    #[test]
+    fn placement_directions_are_only_ratios() {
+        // A RedPitaya circle placement with a ref_direction of length 0.1:
+        // the circle was sampled at a tenth of its radius, off its cylinder.
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(0.,0.,0.));
+            #2=DIRECTION('',(0.,0.,2.));
+            #3=DIRECTION('',(0.1,0.1,0.05));
+            #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+            #5=CIRCLE('',#4,1.);
+            #6=CARTESIAN_POINT('',(0.7071067811865476,0.7071067811865476,0.));
+            #7=CARTESIAN_POINT('',(-0.7071067811865476,0.7071067811865476,0.));
+            #8=VERTEX_POINT('',#6);
+            #9=VERTEX_POINT('',#7);
+            #10=EDGE_CURVE('',#8,#9,#5,.T.);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let points = edge_curve(&step, Id::new(10), true, 0.01).unwrap();
+        assert!(points.len() > 2);
+        for p in &points {
+            assert!((p.norm() - 1.).abs() < 1e-12 && p.z == 0., "{:?} is not on the unit circle", p);
+            // The quarter arc counterclockwise about the axis.
+            assert!(p.y > 0.7);
+        }
+    }
+
+    #[test]
+    fn edge_with_both_vertices_projecting_to_one_curve_point_is_a_chord() {
+        // ASP-184330-01 edge #1051488: its end vertex is 1.2 mm behind the
+        // start of its curve, so both vertices project to the curve start.
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(0.,0.,0.));
+            #2=CARTESIAN_POINT('',(0.,0.,0.1));
+            #3=CARTESIAN_POINT('',(-0.8,-0.9,-0.1));
+            #4=B_SPLINE_CURVE_WITH_KNOTS('',1,(#1,#2),.UNSPECIFIED.,.F.,.F.,(2,2),(0.,1.),.UNSPECIFIED.);
+            #5=VERTEX_POINT('',#1);
+            #6=VERTEX_POINT('',#3);
+            #7=EDGE_CURVE('',#5,#6,#4,.T.);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let points = edge_curve(&step, Id::new(7), true, 0.01).unwrap();
+        assert_eq!(points, vec![DVec3::zeros(), DVec3::new(-0.8, -0.9, -0.1)]);
+    }
+
+    #[test]
+    fn open_curve_whose_ends_meet_follows_the_edge_sense_across_them() {
+        // A RedPitaya B-spline is flagged open but its ends meet. The edge
+        // runs from its start against its sense, so it is the short arc
+        // across the ends (x = 0), not the rest of the curve.
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(0.,0.,0.));
+            #2=CARTESIAN_POINT('',(1.,0.,0.));
+            #3=CARTESIAN_POINT('',(1.,1.,0.));
+            #4=CARTESIAN_POINT('',(0.,1.,0.));
+            #5=CARTESIAN_POINT('',(0.,0.002,0.));
+            #6=B_SPLINE_CURVE_WITH_KNOTS('',1,(#1,#2,#3,#4,#5),.UNSPECIFIED.,.F.,.U.,(2,1,1,1,2),(0.,1.,2.,3.,4.),.UNSPECIFIED.);
+            #7=VERTEX_POINT('',#1);
+            #8=VERTEX_POINT('',#4);
+            #9=EDGE_CURVE('',#7,#8,#6,.F.);
+            #10=EDGE_CURVE('',#7,#8,#6,.T.);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let points = edge_curve(&step, Id::new(9), true, 0.01).unwrap();
+        assert_eq!((points[0], *points.last().unwrap()), (DVec3::zeros(), DVec3::new(0., 1., 0.)));
+        assert!(points.iter().all(|p| p.x == 0.), "{:?}", points);
+        // With the curve's sense, the edge is the rest of the curve.
+        let points = edge_curve(&step, Id::new(10), true, 0.01).unwrap();
+        assert!(points.contains(&DVec3::new(1., 1., 0.)), "{:?}", points);
+    }
+
+    #[test]
+    fn single_loop_around_a_cylinder_fails_without_refining_to_infinity() {
+        // PAG7936 face #11363: one loop winds once around the cylinder, so
+        // the face is unbounded along the axis. Refining towards infinity
+        // took 30 s before failing.
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(0.,0.,0.));
+            #2=DIRECTION('',(0.,0.,1.));
+            #3=DIRECTION('',(1.,0.,0.));
+            #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+            #5=CYLINDRICAL_SURFACE('',#4,1.);
+            #6=CARTESIAN_POINT('',(0.,0.,1.));
+            #7=AXIS2_PLACEMENT_3D('',#6,#2,#3);
+            #8=CIRCLE('',#4,1.);
+            #9=CIRCLE('',#7,1.);
+            #10=CARTESIAN_POINT('',(1.,0.,0.));
+            #11=CARTESIAN_POINT('',(-1.,0.,0.3));
+            #12=CARTESIAN_POINT('',(1.,0.,1.));
+            #13=VERTEX_POINT('',#10);
+            #14=VERTEX_POINT('',#11);
+            #15=VERTEX_POINT('',#12);
+            #16=B_SPLINE_CURVE_WITH_KNOTS('',2,(#10,#17,#18,#19,#11),.UNSPECIFIED.,.F.,.F.,(3,2,3),(0.,1.,2.),.UNSPECIFIED.);
+            #17=CARTESIAN_POINT('',(1.,1.,0.05));
+            #18=CARTESIAN_POINT('',(0.,1.,0.15));
+            #19=CARTESIAN_POINT('',(-1.,1.,0.25));
+            #20=EDGE_CURVE('',#13,#14,#16,.T.);
+            #21=B_SPLINE_CURVE_WITH_KNOTS('',1,(#11,#22,#12),.UNSPECIFIED.,.F.,.F.,(2,1,2),(0.,1.,2.),.UNSPECIFIED.);
+            #22=CARTESIAN_POINT('',(-0.70710678118654757,-0.70710678118654757,0.6));
+            #23=EDGE_CURVE('',#14,#15,#21,.T.);
+            #24=DIRECTION('',(0.,0.,-1.));
+            #25=VECTOR('',#24,1.);
+            #26=LINE('',#12,#25);
+            #27=EDGE_CURVE('',#15,#13,#26,.T.);
+            #28=ORIENTED_EDGE('',*,*,#20,.T.);
+            #29=ORIENTED_EDGE('',*,*,#23,.T.);
+            #30=ORIENTED_EDGE('',*,*,#27,.T.);
+            #31=EDGE_LOOP('',(#28,#29,#30));
+            #32=FACE_OUTER_BOUND('',#31,.T.);
+            #33=ADVANCED_FACE('',(#32),#5,.T.);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let mut mesh = Mesh::default();
+        let result = advanced_face(&step, Id::new(33), &mut mesh, &HashMap::new(), DVec3::zeros(), 0., 0.01, &HashMap::new());
+        assert!(matches!(result, Err(Error::InvalidGeometry("face boundary does not enclose a finite region"))), "{:?}", result);
+    }
+
+    #[test]
+    fn spline_pole_takes_its_periodic_coordinate_from_the_boundary() {
+        // BSS138BKT-TP face #148: a spherical triangle with a corner at the
+        // pole of a closed rational spline sphere. The pole projected half a
+        // period from the face, leaving an unpaired periodic trim.
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(-0.775350671423709,-0.281743114854953,0.355426777461874));
+            #2=CARTESIAN_POINT('',(-0.755426777461874,-0.281743114854953,0.375350671423709));
+            #3=CARTESIAN_POINT('',(-0.775200468028237,-0.283459947521252,0.375200468028237));
+            #4=CARTESIAN_POINT('',(-0.755426777461874,-0.3,0.355426777461874));
+            #5=CARTESIAN_POINT('',(-0.773753400942223,-0.3,0.355426777461874));
+            #6=CARTESIAN_POINT('',(-0.755426777461874,-0.3,0.373753400942223));
+            #7=CARTESIAN_POINT('',(-0.735426777461874,-0.3,0.355426777461874));
+            #8=CARTESIAN_POINT('',(-0.735426777461874,-0.28,0.355426777461874));
+            #9=CARTESIAN_POINT('',(-0.735426777461874,-0.26,0.355426777461874));
+            #10=CARTESIAN_POINT('',(-0.755426777461874,-0.26,0.355426777461874));
+            #11=CARTESIAN_POINT('',(-0.735426777461874,-0.3,0.335426777461874));
+            #12=CARTESIAN_POINT('',(-0.735426777461874,-0.28,0.335426777461874));
+            #13=CARTESIAN_POINT('',(-0.735426777461874,-0.26,0.335426777461874));
+            #14=CARTESIAN_POINT('',(-0.755426777461874,-0.3,0.335426777461874));
+            #15=CARTESIAN_POINT('',(-0.755426777461874,-0.28,0.335426777461874));
+            #16=CARTESIAN_POINT('',(-0.755426777461874,-0.26,0.335426777461874));
+            #17=CARTESIAN_POINT('',(-0.775426777461874,-0.3,0.335426777461874));
+            #18=CARTESIAN_POINT('',(-0.775426777461874,-0.28,0.335426777461874));
+            #19=CARTESIAN_POINT('',(-0.775426777461874,-0.26,0.335426777461874));
+            #20=CARTESIAN_POINT('',(-0.775426777461874,-0.3,0.355426777461874));
+            #21=CARTESIAN_POINT('',(-0.775426777461874,-0.28,0.355426777461874));
+            #22=CARTESIAN_POINT('',(-0.775426777461874,-0.26,0.355426777461874));
+            #23=CARTESIAN_POINT('',(-0.775426777461874,-0.3,0.375426777461874));
+            #24=CARTESIAN_POINT('',(-0.775426777461874,-0.28,0.375426777461874));
+            #25=CARTESIAN_POINT('',(-0.775426777461874,-0.26,0.375426777461874));
+            #26=CARTESIAN_POINT('',(-0.755426777461874,-0.3,0.375426777461874));
+            #27=CARTESIAN_POINT('',(-0.755426777461874,-0.28,0.375426777461874));
+            #28=CARTESIAN_POINT('',(-0.755426777461874,-0.26,0.375426777461874));
+            #29=CARTESIAN_POINT('',(-0.735426777461874,-0.3,0.375426777461874));
+            #30=CARTESIAN_POINT('',(-0.735426777461874,-0.28,0.375426777461874));
+            #31=CARTESIAN_POINT('',(-0.735426777461874,-0.26,0.375426777461874));
+            #32=VERTEX_POINT('',#1);
+            #33=VERTEX_POINT('',#2);
+            #34=(BOUNDED_CURVE() B_SPLINE_CURVE(2,(#1,#3,#2),.UNSPECIFIED.,.F.,.F.) B_SPLINE_CURVE_WITH_KNOTS((3,3),(0.,0.0312640026049667),.UNSPECIFIED.) CURVE() GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_CURVE((1.,0.709787335578027,1.)) REPRESENTATION_ITEM(''));
+            #35=EDGE_CURVE('',#32,#33,#34,.T.);
+            #36=ORIENTED_EDGE('',*,*,#35,.F.);
+            #37=VERTEX_POINT('',#4);
+            #38=(BOUNDED_CURVE() B_SPLINE_CURVE(2,(#4,#5,#1),.UNSPECIFIED.,.F.,.F.) B_SPLINE_CURVE_WITH_KNOTS((3,3),(0.,0.0296705972839037),.UNSPECIFIED.) CURVE() GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_CURVE((1.,0.737277336810127,1.)) REPRESENTATION_ITEM(''));
+            #39=EDGE_CURVE('',#37,#32,#38,.T.);
+            #40=ORIENTED_EDGE('',*,*,#39,.F.);
+            #41=(BOUNDED_CURVE() B_SPLINE_CURVE(2,(#4,#6,#2),.UNSPECIFIED.,.F.,.F.) B_SPLINE_CURVE_WITH_KNOTS((3,3),(0.,0.0296705972839036),.UNSPECIFIED.) CURVE() GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_CURVE((1.,0.737277336810124,1.)) REPRESENTATION_ITEM(''));
+            #42=EDGE_CURVE('',#37,#33,#41,.T.);
+            #43=ORIENTED_EDGE('',*,*,#42,.T.);
+            #44=EDGE_LOOP('',(#36,#40,#43));
+            #45=FACE_OUTER_BOUND('',#44,.T.);
+            #46=(BOUNDED_SURFACE() B_SPLINE_SURFACE(2,2,((#4,#7,#8,#9,#10),(#4,#11,#12, #13,#10),(#4,#14,#15,#16,#10),(#4,#17,#18,#19,#10), (#4,#20,#21,#22,#10),(#4,#23,#24,#25,#10),(#4, #26,#27,#28,#10),(#4,#29,#30,#31,#10),(#4,#7,#8, #9,#10)),.UNSPECIFIED.,.T.,.F.,.F.) B_SPLINE_SURFACE_WITH_KNOTS((3,2,2,2,3),(3,2,3),(0.,0.031415926535898,0.0628318530717959, 0.0942477796076939,0.125663706143592),(0.,0.0314159265358979,0.0628318530717959), .UNSPECIFIED.) GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_SURFACE(((1.,0.707106781186548,1.,0.707106781186548,1.), (0.707106781186548,0.5,0.707106781186548,0.5,0.707106781186548),(1.,0.707106781186548, 1.,0.707106781186548,1.),(0.707106781186548,0.5,0.707106781186548,0.5,0.707106781186548), (1.,0.707106781186548,1.,0.707106781186548,1.),(0.707106781186548,0.5,0.707106781186548, 0.5,0.707106781186548),(1.,0.707106781186548,1.,0.707106781186548,1.),(0.707106781186548, 0.5,0.707106781186548,0.5,0.707106781186548),(1.,0.707106781186548,1.,0.707106781186548, 1.))) REPRESENTATION_ITEM('') SURFACE() );
+            #47=ADVANCED_FACE('',(#45),#46,.T.);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let tolerance = 0.01;
+        let mut mesh = Mesh::default();
+        advanced_face(&step, Id::new(47), &mut mesh, &HashMap::new(), DVec3::zeros(), 1e-5, tolerance, &HashMap::new()).unwrap();
+        let center = DVec3::new(-0.755426777461874, -0.28, 0.355426777461874);
+        let corners = [
+            DVec3::new(-0.755426777461874, -0.3, 0.355426777461874),
+            DVec3::new(-0.775350671423709, -0.281743114854953, 0.355426777461874),
+            DVec3::new(-0.755426777461874, -0.281743114854953, 0.375350671423709),
+        ].map(|p| p - center);
+        // Every edge is a great circle arc: bound the face by their planes.
+        let sides = [0, 1, 2].map(|i| {
+            let n = corners[(i + 1) % 3].cross(&corners[(i + 2) % 3]);
+            n * n.dot(&corners[i]).signum()
+        });
+        for v in &mesh.verts {
+            let p = v.pos - center;
+            assert!((p.norm() - 0.02).abs() < 1e-9);
+            assert!(sides.iter().all(|n| n.dot(&p) > -1e-12), "{:?} is outside the face", p);
+        }
+        let area: f64 = mesh.triangles.iter().map(|t| {
+            let [a, b, c] = [t.verts.x, t.verts.y, t.verts.z].map(|i| mesh.verts[i as usize].pos);
+            (b - a).cross(&(c - a)).norm() / 2.
+        }).sum();
+        let [a, b, c] = corners.map(|p| p.normalize());
+        let excess = 2. * a.dot(&b.cross(&c)).abs().atan2(1. + a.dot(&b) + b.dot(&c) + c.dot(&a));
+        let flat = (corners[1] - corners[0]).cross(&(corners[2] - corners[0])).norm() / 2.;
+        assert!(flat * (1. - 1e-9) <= area && area <= 0.02f64.powi(2) * excess, "{} {}", flat, area);
     }
 
     #[test]

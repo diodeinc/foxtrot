@@ -128,9 +128,12 @@ impl Curve {
         };
         // A closed curve has two arcs between its endpoints. EDGE_CURVE's
         // same_sense selects the directed arc, including traversal of the cut.
-        // Full loops start at the actual vertex, not the first knot.
-        let wraps = is_loop || (curve.is_closed()
-            && if dir { t_end < t_start } else { t_end > t_start });
+        // Full loops start at the actual vertex, not the first knot. An open
+        // curve cannot run against the sense, so if its ends meet within the
+        // chord budget, the sense selects the arc across them too.
+        let reversed = if dir { t_end < t_start } else { t_end > t_start };
+        let wraps = is_loop || (reversed && (curve.is_closed()
+            || (curve.point(curve.min_u()) - curve.point(curve.max_u())).norm() <= tolerance));
         let mut ranges = if wraps {
             let (exit, entry) = if dir { (curve.max_u(), curve.min_u()) }
                                 else { (curve.min_u(), curve.max_u()) };
@@ -141,10 +144,12 @@ impl Curve {
         if wraps {
             ranges.retain(|&(a, b)| a != b);
         }
-        let c = curve.polyline_with_tolerance(&ranges, tolerance)
+        let mut c = curve.polyline_with_tolerance(&ranges, tolerance)
             .ok_or(Error::InvalidGeometry("nonpositive rational curve weight"))?;
+        // Both vertices project to one curve point when at least one is off
+        // the curve. Join them with a chord, like any other vertex offset.
         if c.is_empty() {
-            return Err(Error::InvalidGeometry("curve polyline is empty"));
+            c.push(u);
         }
         Ok(Self::attach_endpoints(c, u, v))
     }
