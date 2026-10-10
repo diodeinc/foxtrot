@@ -2612,6 +2612,25 @@ mod tests {
     }
 
     #[test]
+    fn edge_with_both_vertices_projecting_to_one_curve_point_is_a_chord() {
+        // ASP-184330-01 edge #1051488: its end vertex is 1.2 mm behind the
+        // start of its curve, so both vertices project to the curve start.
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(0.,0.,0.));
+            #2=CARTESIAN_POINT('',(0.,0.,0.1));
+            #3=CARTESIAN_POINT('',(-0.8,-0.9,-0.1));
+            #4=B_SPLINE_CURVE_WITH_KNOTS('',1,(#1,#2),.UNSPECIFIED.,.F.,.F.,(2,2),(0.,1.),.UNSPECIFIED.);
+            #5=VERTEX_POINT('',#1);
+            #6=VERTEX_POINT('',#3);
+            #7=EDGE_CURVE('',#5,#6,#4,.T.);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let points = edge_curve(&step, Id::new(7), true, 0.01).unwrap();
+        assert_eq!(points, vec![DVec3::zeros(), DVec3::new(-0.8, -0.9, -0.1)]);
+    }
+
+    #[test]
     fn open_curve_whose_ends_meet_follows_the_edge_sense_across_them() {
         // A RedPitaya B-spline is flagged open but its ends meet. The edge
         // runs from its start against its sense, so it is the short arc

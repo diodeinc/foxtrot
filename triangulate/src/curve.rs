@@ -144,10 +144,12 @@ impl Curve {
         if wraps {
             ranges.retain(|&(a, b)| a != b);
         }
-        let c = curve.polyline_with_tolerance(&ranges, tolerance)
+        let mut c = curve.polyline_with_tolerance(&ranges, tolerance)
             .ok_or(Error::InvalidGeometry("nonpositive rational curve weight"))?;
+        // Both vertices project to one curve point when at least one is off
+        // the curve. Join them with a chord, like any other vertex offset.
         if c.is_empty() {
-            return Err(Error::InvalidGeometry("curve polyline is empty"));
+            c.push(u);
         }
         Ok(Self::attach_endpoints(c, u, v))
     }
