@@ -1279,6 +1279,32 @@ impl PreparedSurface<'_> {
             [None,Some(period)] => (1,period),
             _ => return Ok(false),
         };
+        // A spline pole has every periodic coordinate, so its projection is
+        // arbitrary and can lie half a period from the rest of the face. Put
+        // a pole on the boundary between its contour neighbours instead.
+        if let Surface::NURBS { surf } = self.surface {
+            let radial = 1-axis;
+            let mut poles = Vec::new();
+            for bound in [[surf.surf.min_u(),surf.surf.max_u()],[surf.surf.min_v(),surf.surf.max_v()]][radial] {
+                if surf.surf.rational_boundary_is_point(radial,bound,self.uncertainty) {
+                    let mut raw = DVec2::new(surf.surf.min_u(),surf.surf.min_v());
+                    raw[radial] = bound;
+                    poles.push(surf.surf.point(raw));
+                }
+            }
+            let mut neighbours = vec![(None,None);pts.len()];
+            for &(a,b) in edges.iter() { neighbours[a].1 = Some(b); neighbours[b].0 = Some(a); }
+            for (i,&(prev,next)) in neighbours.iter().enumerate() {
+                let (Some(prev),Some(next)) = (prev,next) else { continue; };
+                let at_pole = poles.iter().any(|pole|
+                    (verts[i].pos-pole).norm() <= self.uncertainty+64.*EPSILON*pole.norm());
+                if at_pole {
+                    let a = Self::uv_coord(pts[prev],axis);
+                    let b = Self::unwrap_near(Self::uv_coord(pts[next],axis),a,period);
+                    Self::set_uv_coord(&mut pts[i],axis,(a+b)*0.5);
+                }
+            }
+        }
         let mut angles: Vec<_> = pts.iter().map(|&p| Self::uv_coord(p,axis)*2.*PI/period).collect();
         let (start,span) = Self::smallest_circular_arc(&mut angles);
         let min = (start-(2.*PI-span)*0.5)*period/(2.*PI);

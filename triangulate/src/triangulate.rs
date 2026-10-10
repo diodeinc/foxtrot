@@ -2686,6 +2686,91 @@ mod tests {
     }
 
     #[test]
+    fn spline_pole_takes_its_periodic_coordinate_from_the_boundary() {
+        // BSS138BKT-TP face #148: a spherical triangle with a corner at the
+        // pole of a closed rational spline sphere. The pole projected half a
+        // period from the face, leaving an unpaired periodic trim.
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(-0.775350671423709,-0.281743114854953,0.355426777461874));
+            #2=CARTESIAN_POINT('',(-0.755426777461874,-0.281743114854953,0.375350671423709));
+            #3=CARTESIAN_POINT('',(-0.775200468028237,-0.283459947521252,0.375200468028237));
+            #4=CARTESIAN_POINT('',(-0.755426777461874,-0.3,0.355426777461874));
+            #5=CARTESIAN_POINT('',(-0.773753400942223,-0.3,0.355426777461874));
+            #6=CARTESIAN_POINT('',(-0.755426777461874,-0.3,0.373753400942223));
+            #7=CARTESIAN_POINT('',(-0.735426777461874,-0.3,0.355426777461874));
+            #8=CARTESIAN_POINT('',(-0.735426777461874,-0.28,0.355426777461874));
+            #9=CARTESIAN_POINT('',(-0.735426777461874,-0.26,0.355426777461874));
+            #10=CARTESIAN_POINT('',(-0.755426777461874,-0.26,0.355426777461874));
+            #11=CARTESIAN_POINT('',(-0.735426777461874,-0.3,0.335426777461874));
+            #12=CARTESIAN_POINT('',(-0.735426777461874,-0.28,0.335426777461874));
+            #13=CARTESIAN_POINT('',(-0.735426777461874,-0.26,0.335426777461874));
+            #14=CARTESIAN_POINT('',(-0.755426777461874,-0.3,0.335426777461874));
+            #15=CARTESIAN_POINT('',(-0.755426777461874,-0.28,0.335426777461874));
+            #16=CARTESIAN_POINT('',(-0.755426777461874,-0.26,0.335426777461874));
+            #17=CARTESIAN_POINT('',(-0.775426777461874,-0.3,0.335426777461874));
+            #18=CARTESIAN_POINT('',(-0.775426777461874,-0.28,0.335426777461874));
+            #19=CARTESIAN_POINT('',(-0.775426777461874,-0.26,0.335426777461874));
+            #20=CARTESIAN_POINT('',(-0.775426777461874,-0.3,0.355426777461874));
+            #21=CARTESIAN_POINT('',(-0.775426777461874,-0.28,0.355426777461874));
+            #22=CARTESIAN_POINT('',(-0.775426777461874,-0.26,0.355426777461874));
+            #23=CARTESIAN_POINT('',(-0.775426777461874,-0.3,0.375426777461874));
+            #24=CARTESIAN_POINT('',(-0.775426777461874,-0.28,0.375426777461874));
+            #25=CARTESIAN_POINT('',(-0.775426777461874,-0.26,0.375426777461874));
+            #26=CARTESIAN_POINT('',(-0.755426777461874,-0.3,0.375426777461874));
+            #27=CARTESIAN_POINT('',(-0.755426777461874,-0.28,0.375426777461874));
+            #28=CARTESIAN_POINT('',(-0.755426777461874,-0.26,0.375426777461874));
+            #29=CARTESIAN_POINT('',(-0.735426777461874,-0.3,0.375426777461874));
+            #30=CARTESIAN_POINT('',(-0.735426777461874,-0.28,0.375426777461874));
+            #31=CARTESIAN_POINT('',(-0.735426777461874,-0.26,0.375426777461874));
+            #32=VERTEX_POINT('',#1);
+            #33=VERTEX_POINT('',#2);
+            #34=(BOUNDED_CURVE() B_SPLINE_CURVE(2,(#1,#3,#2),.UNSPECIFIED.,.F.,.F.) B_SPLINE_CURVE_WITH_KNOTS((3,3),(0.,0.0312640026049667),.UNSPECIFIED.) CURVE() GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_CURVE((1.,0.709787335578027,1.)) REPRESENTATION_ITEM(''));
+            #35=EDGE_CURVE('',#32,#33,#34,.T.);
+            #36=ORIENTED_EDGE('',*,*,#35,.F.);
+            #37=VERTEX_POINT('',#4);
+            #38=(BOUNDED_CURVE() B_SPLINE_CURVE(2,(#4,#5,#1),.UNSPECIFIED.,.F.,.F.) B_SPLINE_CURVE_WITH_KNOTS((3,3),(0.,0.0296705972839037),.UNSPECIFIED.) CURVE() GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_CURVE((1.,0.737277336810127,1.)) REPRESENTATION_ITEM(''));
+            #39=EDGE_CURVE('',#37,#32,#38,.T.);
+            #40=ORIENTED_EDGE('',*,*,#39,.F.);
+            #41=(BOUNDED_CURVE() B_SPLINE_CURVE(2,(#4,#6,#2),.UNSPECIFIED.,.F.,.F.) B_SPLINE_CURVE_WITH_KNOTS((3,3),(0.,0.0296705972839036),.UNSPECIFIED.) CURVE() GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_CURVE((1.,0.737277336810124,1.)) REPRESENTATION_ITEM(''));
+            #42=EDGE_CURVE('',#37,#33,#41,.T.);
+            #43=ORIENTED_EDGE('',*,*,#42,.T.);
+            #44=EDGE_LOOP('',(#36,#40,#43));
+            #45=FACE_OUTER_BOUND('',#44,.T.);
+            #46=(BOUNDED_SURFACE() B_SPLINE_SURFACE(2,2,((#4,#7,#8,#9,#10),(#4,#11,#12, #13,#10),(#4,#14,#15,#16,#10),(#4,#17,#18,#19,#10), (#4,#20,#21,#22,#10),(#4,#23,#24,#25,#10),(#4, #26,#27,#28,#10),(#4,#29,#30,#31,#10),(#4,#7,#8, #9,#10)),.UNSPECIFIED.,.T.,.F.,.F.) B_SPLINE_SURFACE_WITH_KNOTS((3,2,2,2,3),(3,2,3),(0.,0.031415926535898,0.0628318530717959, 0.0942477796076939,0.125663706143592),(0.,0.0314159265358979,0.0628318530717959), .UNSPECIFIED.) GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_SURFACE(((1.,0.707106781186548,1.,0.707106781186548,1.), (0.707106781186548,0.5,0.707106781186548,0.5,0.707106781186548),(1.,0.707106781186548, 1.,0.707106781186548,1.),(0.707106781186548,0.5,0.707106781186548,0.5,0.707106781186548), (1.,0.707106781186548,1.,0.707106781186548,1.),(0.707106781186548,0.5,0.707106781186548, 0.5,0.707106781186548),(1.,0.707106781186548,1.,0.707106781186548,1.),(0.707106781186548, 0.5,0.707106781186548,0.5,0.707106781186548),(1.,0.707106781186548,1.,0.707106781186548, 1.))) REPRESENTATION_ITEM('') SURFACE() );
+            #47=ADVANCED_FACE('',(#45),#46,.T.);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let tolerance = 0.01;
+        let mut mesh = Mesh::default();
+        advanced_face(&step, Id::new(47), &mut mesh, &HashMap::new(), DVec3::zeros(), 1e-5, tolerance, &HashMap::new()).unwrap();
+        let center = DVec3::new(-0.755426777461874, -0.28, 0.355426777461874);
+        let corners = [
+            DVec3::new(-0.755426777461874, -0.3, 0.355426777461874),
+            DVec3::new(-0.775350671423709, -0.281743114854953, 0.355426777461874),
+            DVec3::new(-0.755426777461874, -0.281743114854953, 0.375350671423709),
+        ].map(|p| p - center);
+        // Every edge is a great circle arc: bound the face by their planes.
+        let sides = [0, 1, 2].map(|i| {
+            let n = corners[(i + 1) % 3].cross(&corners[(i + 2) % 3]);
+            n * n.dot(&corners[i]).signum()
+        });
+        for v in &mesh.verts {
+            let p = v.pos - center;
+            assert!((p.norm() - 0.02).abs() < 1e-9);
+            assert!(sides.iter().all(|n| n.dot(&p) > -1e-12), "{:?} is outside the face", p);
+        }
+        let area: f64 = mesh.triangles.iter().map(|t| {
+            let [a, b, c] = [t.verts.x, t.verts.y, t.verts.z].map(|i| mesh.verts[i as usize].pos);
+            (b - a).cross(&(c - a)).norm() / 2.
+        }).sum();
+        let [a, b, c] = corners.map(|p| p.normalize());
+        let excess = 2. * a.dot(&b.cross(&c)).abs().atan2(1. + a.dot(&b) + b.dot(&c) + c.dot(&a));
+        let flat = (corners[1] - corners[0]).cross(&(corners[2] - corners[0])).norm() / 2.;
+        assert!(flat * (1. - 1e-9) <= area && area <= 0.02f64.powi(2) * excess, "{} {}", flat, area);
+    }
+
+    #[test]
     fn oriented_edges_share_exactly_the_same_curve_discretization() {
         let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
             #1=CARTESIAN_POINT('',(0.4,1.E-15,0.4));
