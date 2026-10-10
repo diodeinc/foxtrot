@@ -170,6 +170,9 @@ impl Curve {
 
     pub fn build(&self, u: DVec3, v: DVec3, is_loop: bool, tolerance: f64) -> Result<Vec<DVec3>, Error> {
         match self {
+            // A line does not close: an edge from a vertex back to itself
+            // has zero length.
+            Self::Line { .. } if is_loop => Ok(vec![u]),
             Self::Line { origin, direction } => {
                 let project = |p: DVec3| {
                     let offset = p - origin;
