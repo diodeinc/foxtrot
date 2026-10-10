@@ -482,12 +482,13 @@ pub fn gen(s: &mut Syntax) -> Result<String, std::fmt::Error> {
 use crate::{{
     id::{{Id, HasId}},
     parse::{{IResult, Logical, Derived, Parse, ParseFromChunks, nom_alt_err,
-            parse_enum_tag, param_from_chunks, parse_complex_mapping}},
+            parse_enum_tag, param_from_chunks, parse_complex_mapping,
+            take_until_paren}},
     step_file::FromEntity,
 }};
 use nom::{{
     branch::{{alt}},
-    bytes::complete::{{tag, take_until}},
+    bytes::complete::tag,
     character::complete::char,
     combinator::map,
     multi::{{many0}},
@@ -509,7 +510,7 @@ pub enum Entity<'a> {{")?;
 }}
 impl<'a> ParseFromChunks<'a> for Entity<'a> {{
     fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {{
-        let (_, r) = take_until("(")(strs[0])?;
+        let (_, r) = take_until_paren(strs[0])?;
         match r {{"#)?;
     for k in &keys {
         type_map.0[k].write_enum_match(k, &mut buf)?;

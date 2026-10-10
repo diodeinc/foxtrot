@@ -46,7 +46,9 @@ remain visible when the camera moves.
 - `express`: Parser for EXPRESS schemas files and a matching code generation
   system
 - `step`: Auto-generated STEP file parser.  This take a _very_ long time to
-  compile, so it is isolated into this crate.
+  compile, so it is isolated into this crate. Its optional `rayon` feature
+  (enabled by `triangulate`'s `parallel` feature) flattens and parses large
+  files in parallel, with the same result as the sequential build.
 - `triangulate`: Converts a file loaded by `step` into a triangle mesh, using
   `cdt` as its core
 - `nurbs`: A handful of NURBS / B-spline algorithms used by `triangulate`

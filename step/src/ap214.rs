@@ -2,12 +2,13 @@
 use crate::{
     id::{Id, HasId},
     parse::{IResult, Logical, Derived, Parse, ParseFromChunks, nom_alt_err,
-            parse_enum_tag, param_from_chunks, parse_complex_mapping},
+            parse_enum_tag, param_from_chunks, parse_complex_mapping,
+            take_until_paren},
     step_file::FromEntity,
 };
 use nom::{
     branch::{alt},
-    bytes::complete::{tag, take_until},
+    bytes::complete::tag,
     character::complete::char,
     combinator::map,
     multi::{many0},
@@ -37043,7 +37044,7 @@ pub enum Entity<'a> {
 }
 impl<'a> ParseFromChunks<'a> for Entity<'a> {
     fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
-        let (_, r) = take_until("(")(strs[0])?;
+        let (_, r) = take_until_paren(strs[0])?;
         match r {
             "ABS_FUNCTION" => AbsFunction_::parse_chunks(strs).map(|(s, v)| (s, Entity::AbsFunction(v))),
             "ACOS_FUNCTION" => AcosFunction_::parse_chunks(strs).map(|(s, v)| (s, Entity::AcosFunction(v))),
