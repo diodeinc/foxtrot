@@ -9,6 +9,12 @@ use crate::{
 };
 use nurbs::{AbstractSurface, ProjectionScratch, SampledSurface};
 
+/// Largest angle whose chord on a circle of `radius` stays within
+/// `tolerance`: the chord deviates from the arc by about radius·angle²/8.
+pub(crate) fn chord_angle(radius: f64, tolerance: f64) -> f64 {
+    (8. * tolerance / radius).sqrt().min(std::f64::consts::FRAC_PI_2)
+}
+
 #[derive(Debug, Clone)]
 enum SplineChart {
     Cartesian {
@@ -1543,9 +1549,9 @@ impl PreparedSurface<'_> {
         pts: &mut Vec<(f64, f64)>,
         verts: &mut Vec<Vertex>,
         radial_scale: f64,
+        circle_radii: [f64; 2],
+        tolerance: f64,
     ) {
-        const ANGULAR_SAMPLES: usize = 32;
-
         let mut radii = Vec::with_capacity(pts.len());
         let mut angles = Vec::with_capacity(pts.len());
         for &(x, y) in pts.iter() {
@@ -1579,18 +1585,21 @@ impl PreparedSurface<'_> {
         }
 
         // Radius in the polar chart encodes the other intrinsic angle.
-        // Resolve both angles at the same rate, independent of length units
-        // and which torus parameter is represented radially.
+        // Resolve each angle as finely as the chord budget on its circles
+        // requires, independent of which one is represented radially.
+        let [angular_radius, radial_radius] = circle_radii;
         let radial_angle = (radial_max - radial_min) / radial_scale;
-        let radial_segments = (radial_angle * ANGULAR_SAMPLES as f64 / (2.0 * PI)).ceil() as usize;
+        let radial_segments = (radial_angle / chord_angle(radial_radius, tolerance)).ceil() as usize;
+        let angular_segments = (angular_span / chord_angle(angular_radius, tolerance)).ceil() as usize;
+        let angular_samples = if full_revolution { angular_segments } else { angular_segments.saturating_sub(1) };
         for radial_index in 1..radial_segments {
             let radial_fraction = radial_index as f64 / radial_segments as f64;
             let radius = radial_min * (1.0 - radial_fraction) + radial_max * radial_fraction;
-            for angular_index in 0..ANGULAR_SAMPLES {
+            for angular_index in 0..angular_samples {
                 let angular_fraction = if full_revolution {
-                    (angular_index as f64 + 0.5) / ANGULAR_SAMPLES as f64
+                    (angular_index as f64 + 0.5) / angular_samples as f64
                 } else {
-                    (angular_index as f64 + 1.0) / (ANGULAR_SAMPLES + 1) as f64
+                    (angular_index as f64 + 1.0) / (angular_samples + 1) as f64
                 };
                 let angle = angular_start + angular_span * angular_fraction;
                 let uv = DVec2::new(radius * angle.cos(), radius * angle.sin());
@@ -1612,23 +1621,12 @@ impl PreparedSurface<'_> {
         verts: &mut Vec<Vertex>,
         surf: &SampledSurface<4>,
         chart: &SplineChart,
+        tolerance: f64,
     ) {
         // Seed each polynomial piece in its native parameters. A chart-space
         // grid can alias an arbitrary number of knot spans or revolutions.
-        let samples = |knots: &nurbs::KnotVector| {
-            let mut out = Vec::new();
-            for span in knots.degree()..knots.len()-knots.degree()-1 {
-                let (a,b) = (knots[span],knots[span+1]);
-                if a == b { continue; }
-                for i in 0..=knots.degree() {
-                    out.push(a+(b-a)*(i as f64/(knots.degree()+1) as f64));
-                }
-            }
-            out.push(knots.max_t());
-            out
-        };
-        let us = samples(&surf.surf.u_knots);
-        let vs = samples(&surf.surf.v_knots);
+        let us = surf.surf.seed_parameters(0, tolerance);
+        let vs = surf.surf.seed_parameters(1, tolerance);
         let (xmin, xmax, ymin, ymax) = Self::bbox(pts);
         for &u in &us {
             for &v in &vs {
@@ -1652,12 +1650,14 @@ impl PreparedSurface<'_> {
         }
     }
 
-    pub fn add_steiner_points(&self, pts: &mut Vec<(f64, f64)>, verts: &mut Vec<Vertex>) {
+    pub fn add_steiner_points(&self, pts: &mut Vec<(f64, f64)>, verts: &mut Vec<Vertex>, tolerance: f64) {
         if let FaceChart::TorusStrip { scale,.. } | FaceChart::TorusPunctured { scale,.. } = &self.chart {
             let (xmin,xmax,ymin,ymax) = Self::bbox(pts);
             let min = DVec2::new(xmin,ymin);
             let span = DVec2::new(xmax-xmin,ymax-ymin);
-            let counts = [0,1].map(|axis| (span[axis]/scale[axis].abs()*32./(2.*PI)).ceil() as usize);
+            // Chart axes are the major and minor angles, scaled by their radii.
+            let radii = [scale.x.abs()+scale.y.abs(), scale.y.abs()];
+            let counts = [0,1].map(|axis| (span[axis]/scale[axis].abs()/chord_angle(radii[axis], tolerance)).ceil() as usize);
             for i in 1..counts[0] {
                 for j in 1..counts[1] {
                     let uv = min+span.component_mul(&DVec2::new(i as f64/counts[0] as f64,j as f64/counts[1] as f64));
@@ -1677,37 +1677,34 @@ impl PreparedSurface<'_> {
             FaceChart::Torus { polar_major, .. },
         ) = (self.surface, &self.chart)
         {
-            let radial_scale = if *polar_major {
-                minor_radius.abs()
+            let (major, minor) = (major_radius.abs(), minor_radius.abs());
+            // Major-angle circles have radii up to major + minor.
+            let (radial_scale, radii) = if *polar_major {
+                (minor, [major + minor, minor])
             } else {
-                major_radius.abs()
+                (major, [minor, major + minor])
             };
-            self.add_torus_steiner_points(pts, verts, radial_scale);
+            self.add_torus_steiner_points(pts, verts, radial_scale, radii, tolerance);
             return;
         }
 
         match (self.surface, &self.chart) {
             (Surface::NURBS { surf, .. }, FaceChart::Spline(chart)) => {
-                return self.add_spline_steiner_points(pts, verts, surf, chart);
+                return self.add_spline_steiner_points(pts, verts, surf, chart, tolerance);
             }
             _ => (),
         }
 
-        let (xmin, xmax, ymin, ymax) = Self::bbox(&pts);
-        let num_pts = match self.surface {
-            Surface::Sphere { .. } => 6,
-            _ => 0,
-        };
-
-        for x in 0..num_pts {
-            let x_frac = (x as f64 + 1.0) / (num_pts as f64 + 1.0);
-            let u = x_frac * xmax + (1.0 - x_frac) * xmin;
-            for y in 0..num_pts {
-                let y_frac = (y as f64 + 1.0) / (num_pts as f64 + 1.0);
-                let v = y_frac * ymax + (1.0 - y_frac) * ymin;
-
-                let uv = DVec2::new(u, v);
-                if let Some(pos) = self.raise(uv) {
+        // The sphere chart measures angles, so the chord budget is a spacing.
+        let Surface::Sphere { radius, .. } = self.surface else { return; };
+        let (xmin, xmax, ymin, ymax) = Self::bbox(pts);
+        let step = chord_angle(radius.abs(), tolerance);
+        let counts = [xmax - xmin, ymax - ymin].map(|span| (span / step).ceil() as usize);
+        for i in 1..counts[0] {
+            let u = xmin + (xmax - xmin) * (i as f64 / counts[0] as f64);
+            for j in 1..counts[1] {
+                let v = ymin + (ymax - ymin) * (j as f64 / counts[1] as f64);
+                if let Some(pos) = self.raise(DVec2::new(u, v)) {
                     pts.push((u, v));
                     verts.push(Vertex {
                         pos,
@@ -2473,7 +2470,7 @@ mod tests {
                     .map(|i| (i, (i + 1) % vertices.len()))
                     .collect();
                 let mut points = prepared.lower_verts(&vertices).unwrap();
-                prepared.add_steiner_points(&mut points, &mut vertices);
+                prepared.add_steiner_points(&mut points, &mut vertices, 0.01);
                 let mut t = cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
                 t.run().unwrap();
                 let mut area = 0.;
@@ -2582,7 +2579,7 @@ mod tests {
                 }
                 let mut points = prepared.lower_verts(&vertices).unwrap();
                 prepared.cut_periodic(&mut points, &mut edges, &mut vertices, 0.01).unwrap();
-                prepared.add_steiner_points(&mut points, &mut vertices);
+                prepared.add_steiner_points(&mut points, &mut vertices, 0.01);
                 let mut t = cdt::Triangulation::new_with_edges(&points, &edges).unwrap();
                 t.run().unwrap();
                 let mut area = 0.;
@@ -2649,7 +2646,7 @@ mod tests {
         let control_points = (0..3)
             .map(|u| {
                 (0..3)
-                    .map(|v| DVec4::new(u as f64, v as f64, (u * v) as f64 * 0.25, 1.0))
+                    .map(|v| DVec4::new(u as f64, v as f64, if u == 1 && v == 1 { 1.0 } else { 0.0 }, 1.0))
                     .collect()
             })
             .collect();
@@ -2666,16 +2663,31 @@ mod tests {
         let mut vertices = Vec::new();
 
         let prepared = surface.prepare(&[], &[], true, 0., false).unwrap();
-        prepared.add_steiner_points(&mut points, &mut vertices);
+        prepared.add_steiner_points(&mut points, &mut vertices, 0.01);
 
         assert_eq!(points.len(), 4 + vertices.len());
         assert!(vertices.iter().any(|v| v.pos.x > 0. && v.pos.x < 2.
             && v.pos.y > 0. && v.pos.y < 2.));
-        assert!(vertices.iter().all(|v| (v.pos.z - 0.25*v.pos.x*v.pos.y).abs() < 1e-12));
+        let bump = |x: f64| x * (1. - 0.5 * x);
+        assert!(vertices.iter().all(|v| (v.pos.z - bump(v.pos.x) * bump(v.pos.y)).abs() < 1e-12));
         assert!(
             vertices.iter().all(|vertex| vertex.norm == DVec3::zeros()),
             "sampling must leave final attributes to face finalization"
         );
+
+        // A flat surface needs no seeds, however many knot spans it has.
+        let spans = 50;
+        let flat = Surface::new_nurbs(SampledSurface::new(NURBSSurface::new(true, true,
+            KnotVector::from_multiplicities(2,
+                &(0..=spans).map(|i| i as f64).collect::<Vec<_>>(),
+                &(0..=spans).map(|i| if i == 0 || i == spans { 3 } else { 1 }).collect::<Vec<_>>()),
+            knots(),
+            (0..spans + 2).map(|u| (0..3).map(|v| DVec4::new(u as f64, v as f64, 0., 1.)).collect()).collect())));
+        let mut points = vec![(0.0, 0.0), (spans as f64, 0.0), (spans as f64, 1.0), (0.0, 1.0)];
+        let mut vertices = Vec::new();
+        flat.prepare(&[], &[], true, 0., false).unwrap().add_steiner_points(&mut points, &mut vertices, 0.01);
+        assert!(!vertices.iter().any(|v| v.pos.x > 0. && v.pos.x < spans as f64
+            && v.pos.y > 0. && v.pos.y < 2.));
     }
 
     #[test]
@@ -2701,7 +2713,8 @@ mod tests {
                 let width = if polar_major { 8.*PI*scale } else { 4.*PI*scale };
                 let height = if polar_major { PI*scale } else { 2.*PI*scale };
                 let mut points = vec![(0.,0.),(width,0.),(width,-height),(0.,-height)];
-                prepared.add_steiner_points(&mut points, &mut Vec::new());
+                let tolerance = 0.01 * scale;
+                prepared.add_steiner_points(&mut points, &mut Vec::new(), tolerance);
                 let mut angles: Vec<_> = points
                     .iter()
                     .map(|&(x, y)| if polar_major { -y/scale } else { x/(4.*scale) })
@@ -2711,10 +2724,12 @@ mod tests {
                     .windows(2)
                     .map(|v| v[1] - v[0])
                     .fold(0.0_f64, f64::max);
+                // Minor-angle circles have radius 1, major-angle ones up to 5.
+                let step: f64 = (8. * 0.01 / if polar_major { 1.0_f64 } else { 5. }).sqrt();
                 assert!(
-                    gap <= 2. * PI / 32. + 1e-12,
-                    "unresolved radial angle {}",
-                    gap
+                    gap <= step + 1e-12 && gap > 0.5 * step,
+                    "radial angle gap {} does not follow the chord budget {}",
+                    gap, step
                 );
             }
         }
@@ -2757,7 +2772,7 @@ mod tests {
                 (uv.x, uv.y)
             })
             .collect();
-        prepared.add_steiner_points(&mut points, &mut vertices);
+        prepared.add_steiner_points(&mut points, &mut vertices, 0.01);
         assert_eq!(
             vertices.len(),
             4,
@@ -2867,7 +2882,7 @@ mod tests {
         assert!(prepared.cut_periodic(&mut points,&mut edges,&mut vertices,0.01).unwrap());
         let boundary_len = points.len();
         let (xmin,xmax,ymin,ymax) = PreparedSurface::bbox(&points);
-        prepared.add_steiner_points(&mut points, &mut vertices);
+        prepared.add_steiner_points(&mut points, &mut vertices, 0.01);
         assert!(points.len() > boundary_len);
         assert_eq!(points.len(), vertices.len());
         assert!(points[boundary_len..].iter().all(|&(u,v)| u>xmin && u<xmax && v>ymin && v<ymax));

@@ -260,7 +260,7 @@ impl Curve {
                 // For this ellipse max|C''| is its larger semiaxis.
                 let radius = world_from_eplane.column(0).xyz().norm()
                     .max(world_from_eplane.column(1).xyz().norm());
-                let max_angle = (8. * tolerance / radius).sqrt().min(std::f64::consts::FRAC_PI_2);
+                let max_angle = crate::surface::chord_angle(radius, tolerance);
                 let count = (((u_ang-v_ang).abs()/max_angle).ceil() as usize + 1).max(3);
 
                 let mut out_world = vec![u];

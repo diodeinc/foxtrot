@@ -1109,7 +1109,7 @@ fn advanced_face(
     let mut constraints: Vec<_> = edges.iter().map(|&(a, b)| (a, b, true)).collect();
     let bonus_points = pts.len();
     crate::timing::time("face:add_steiner_points", || {
-        prepared.add_steiner_points(&mut pts, &mut mesh.verts);
+        prepared.add_steiner_points(&mut pts, &mut mesh.verts, tolerance);
         retain_interior_samples(&mut pts, &mut mesh.verts, &edges, bonus_points);
     });
     crate::timing::time("face:resolve_crossing_edges", || {
@@ -2240,7 +2240,7 @@ mod tests {
             let mut verts = boundary.clone();
             let prepared = surface.prepare(&verts, &edges, true, 0., false).unwrap();
             let mut pts = prepared.lower_verts(&verts).unwrap();
-            prepared.add_steiner_points(&mut pts, &mut verts);
+            prepared.add_steiner_points(&mut pts, &mut verts, 0.01);
             if filtered { retain_interior_samples(&mut pts, &mut verts, &edges, boundary.len()); }
             let t = cdt::Triangulation::build_with_edges(&pts, &edges).unwrap();
             let mut side = Vec::new();
