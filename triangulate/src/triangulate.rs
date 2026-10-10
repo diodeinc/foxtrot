@@ -1065,6 +1065,11 @@ fn advanced_face(
     crate::timing::time("face:resolve_crossing_edges", || {
         resolve_crossing_edges(&mut pts, &mut constraints, &mut mesh.verts)
     });
+    // A face bounded by one loop around a cylinder extends to infinity along
+    // the axis. Refinement towards that point would never converge.
+    if prepared.encloses_infinity(&pts, constraints.iter().map(|&(a, b, _)| (a, b))) {
+        return Err(Error::InvalidGeometry("face boundary does not enclose a finite region"));
+    }
     let face_id = face_geometry.0;
     let n_steiner = pts.len() - bonus_points;
     info!(
@@ -2631,6 +2636,53 @@ mod tests {
         // With the curve's sense, the edge is the rest of the curve.
         let points = edge_curve(&step, Id::new(10), true, 0.01).unwrap();
         assert!(points.contains(&DVec3::new(1., 1., 0.)), "{:?}", points);
+    }
+
+    #[test]
+    fn single_loop_around_a_cylinder_fails_without_refining_to_infinity() {
+        // PAG7936 face #11363: one loop winds once around the cylinder, so
+        // the face is unbounded along the axis. Refining towards infinity
+        // took 30 s before failing.
+        let text = b"ISO-10303-21;HEADER;ENDSEC;DATA;
+            #1=CARTESIAN_POINT('',(0.,0.,0.));
+            #2=DIRECTION('',(0.,0.,1.));
+            #3=DIRECTION('',(1.,0.,0.));
+            #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+            #5=CYLINDRICAL_SURFACE('',#4,1.);
+            #6=CARTESIAN_POINT('',(0.,0.,1.));
+            #7=AXIS2_PLACEMENT_3D('',#6,#2,#3);
+            #8=CIRCLE('',#4,1.);
+            #9=CIRCLE('',#7,1.);
+            #10=CARTESIAN_POINT('',(1.,0.,0.));
+            #11=CARTESIAN_POINT('',(-1.,0.,0.3));
+            #12=CARTESIAN_POINT('',(1.,0.,1.));
+            #13=VERTEX_POINT('',#10);
+            #14=VERTEX_POINT('',#11);
+            #15=VERTEX_POINT('',#12);
+            #16=B_SPLINE_CURVE_WITH_KNOTS('',2,(#10,#17,#18,#19,#11),.UNSPECIFIED.,.F.,.F.,(3,2,3),(0.,1.,2.),.UNSPECIFIED.);
+            #17=CARTESIAN_POINT('',(1.,1.,0.05));
+            #18=CARTESIAN_POINT('',(0.,1.,0.15));
+            #19=CARTESIAN_POINT('',(-1.,1.,0.25));
+            #20=EDGE_CURVE('',#13,#14,#16,.T.);
+            #21=B_SPLINE_CURVE_WITH_KNOTS('',1,(#11,#22,#12),.UNSPECIFIED.,.F.,.F.,(2,1,2),(0.,1.,2.),.UNSPECIFIED.);
+            #22=CARTESIAN_POINT('',(-0.70710678118654757,-0.70710678118654757,0.6));
+            #23=EDGE_CURVE('',#14,#15,#21,.T.);
+            #24=DIRECTION('',(0.,0.,-1.));
+            #25=VECTOR('',#24,1.);
+            #26=LINE('',#12,#25);
+            #27=EDGE_CURVE('',#15,#13,#26,.T.);
+            #28=ORIENTED_EDGE('',*,*,#20,.T.);
+            #29=ORIENTED_EDGE('',*,*,#23,.T.);
+            #30=ORIENTED_EDGE('',*,*,#27,.T.);
+            #31=EDGE_LOOP('',(#28,#29,#30));
+            #32=FACE_OUTER_BOUND('',#31,.T.);
+            #33=ADVANCED_FACE('',(#32),#5,.T.);
+            ENDSEC;END-ISO-10303-21;";
+        let flat = StepFile::strip_flatten(text).unwrap();
+        let step = StepFile::parse(&flat).unwrap();
+        let mut mesh = Mesh::default();
+        let result = advanced_face(&step, Id::new(33), &mut mesh, &HashMap::new(), DVec3::zeros(), 0., 0.01, &HashMap::new());
+        assert!(matches!(result, Err(Error::InvalidGeometry("face boundary does not enclose a finite region"))), "{:?}", result);
     }
 
     #[test]

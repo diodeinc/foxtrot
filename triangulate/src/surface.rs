@@ -1217,6 +1217,19 @@ impl PreparedSurface<'_> {
         true
     }
 
+    /// Whether the chart region bounded by `edges` reaches infinitely far
+    /// along the surface. The cylinder chart maps infinite height along the
+    /// axis to its origin, which the CDT's parity region contains exactly
+    /// when the boundary winds around it an odd number of times.
+    pub fn encloses_infinity(&self, pts: &[(f64,f64)], edges: impl Iterator<Item = (usize,usize)>) -> bool {
+        if !matches!(self.chart, FaceChart::Cylinder { .. }) { return false; }
+        let angle: f64 = edges.map(|(a,b)| {
+            let (p,q) = (pts[a],pts[b]);
+            (p.0*q.1-p.1*q.0).atan2(p.0*q.0+p.1*q.1)
+        }).sum();
+        (angle/(2.*PI)).round() as i64 % 2 != 0
+    }
+
     fn mapped_periods(&self) -> [Option<f64>;2] {
         match &self.chart {
             FaceChart::Spline(chart) => chart.mapped_periods(),
