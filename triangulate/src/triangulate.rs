@@ -909,7 +909,7 @@ fn shell(
     // Each face splits the boundary segments its own chart needs split. Split
     // them in every face that shares them too, so faces meet without
     // T-junctions.
-    let splits: HashSet<Segment> = meshed.iter().flatten().flat_map(|face| &face.splits).copied().collect();
+    let splits: FastSet<Segment> = meshed.iter().flatten().flat_map(|face| &face.splits).copied().collect();
     #[cfg(feature = "rayon")]
     meshed.par_iter_mut().flatten().for_each(|face| face.share_splits(&splits));
     #[cfg(not(feature = "rayon"))]
@@ -962,6 +962,34 @@ fn shell(
     stats.num_shells += 1;
 }
 
+/// Hashes keys of indices and exact float bits, which need no protection
+/// against collisions, with one multiply-rotate per word: much cheaper than
+/// SipHash in the per-edge and per-triangle maps below.
+#[derive(Default)]
+struct FastHasher(u64);
+
+impl std::hash::Hasher for FastHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for word in bytes.chunks(8) {
+            let mut padded = [0; 8];
+            padded[..word.len()].copy_from_slice(word);
+            self.write_u64(u64::from_le_bytes(padded));
+        }
+    }
+    fn write_u64(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    fn write_usize(&mut self, word: usize) {
+        self.write_u64(word as u64);
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type FastMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<FastHasher>>;
+type FastSet<K> = HashSet<K, std::hash::BuildHasherDefault<FastHasher>>;
+
 const UNBOUNDED_FACE: &str = "face boundary does not enclose a finite region";
 
 fn advanced_face(
@@ -1012,7 +1040,7 @@ impl MeshedFace {
     /// point the face that needed the split used, and fan its triangle in
     /// two. The midpoint is on the edge, so the surface does not change.
     /// This releases the chart, here in parallel rather than in the merge.
-    fn share_splits(&mut self, splits: &HashSet<Segment>) {
+    fn share_splits(&mut self, splits: &FastSet<Segment>) {
         let Some(mut boundary) = self.boundary.take() else { return; };
         let boundary = &mut boundary;
         let Mesh { verts, triangles } = &mut self.mesh;
@@ -1022,7 +1050,7 @@ impl MeshedFace {
             return;
         }
         let edge_key = |a: usize, b: usize| (a.min(b), a.max(b));
-        let mut owner: HashMap<_, _> = pending.iter().map(|&(a, b)| (edge_key(a, b), 0)).collect();
+        let mut owner: FastMap<_, _> = pending.iter().map(|&(a, b)| (edge_key(a, b), 0)).collect();
         for (t, triangle) in triangles.iter().enumerate() {
             let v = [triangle.verts.x, triangle.verts.y, triangle.verts.z].map(|i| i as usize);
             for k in 0..3 {
@@ -1246,11 +1274,11 @@ fn meshed_face(
     let boundary = crate::timing::time("face:refine_and_normals", || {
     let mut triangles: Vec<_> = t.triangles().map(|(a,b,c)| [a,b,c]).collect();
     let edge_key = |a: usize,b: usize| (a.min(b),a.max(b));
-    let mut uses = HashMap::new();
+    let mut uses = FastMap::default();
     for &[a,b,c] in &triangles {
         for (a,b) in [(a,b),(b,c),(c,a)] { *uses.entry(edge_key(a,b)).or_insert(0) += 1; }
     }
-    let boundary: HashSet<_> = uses.into_iter().filter_map(|(edge,count)| (count == 1).then_some(edge)).collect();
+    let boundary: FastSet<_> = uses.into_iter().filter_map(|(edge,count)| (count == 1).then_some(edge)).collect();
     // Refine in spatial geometry, without rerunning a chart-metric CDT that
     // repeatedly reconnects long spatial edges on highly stretched charts.
     // Shared edge midpoints and a subdivision table keep the mesh conforming.
@@ -1262,7 +1290,7 @@ fn meshed_face(
     ];
     let mut surface_positions: Vec<_> = pts.iter().zip(&mesh.verts)
         .map(|(&(u,v), vertex)| prepared.raise(DVec2::new(u,v)).unwrap_or(vertex.pos)).collect();
-    let children = |[a,b,c]: [usize;3], splits: &HashMap<(usize,usize),usize>| {
+    let children = |[a,b,c]: [usize;3], splits: &FastMap<(usize,usize),usize>| {
         let mut nodes = [a,b,c,0,0,0];
         let mut mask = 0;
         for (i,(a,b)) in [(a,b),(b,c),(c,a)].iter().copied().enumerate() {
@@ -1273,7 +1301,7 @@ fn meshed_face(
     // Keep red leaves, not their temporary green completion. Refining a
     // failing green child promotes its owner; repeated green-only splitting
     // can otherwise preserve diameter while its altitude tends to zero.
-    let mut splits = HashMap::new();
+    let mut splits = FastMap::default();
     loop {
         let mut marked = Vec::with_capacity(triangles.len());
         for &[a,b,c] in &triangles {
@@ -2203,7 +2231,7 @@ fn resolve_crossing_edges(
         let bits = |v: f64| if v == 0.0 { 0 } else { v.to_bits() };
         (bits(x), bits(y))
     };
-    let mut vertices = HashMap::new();
+    let mut vertices = FastMap::default();
     for (i, &p) in pts.iter().enumerate() {
         vertices.entry(key(p)).or_insert(i);
     }
