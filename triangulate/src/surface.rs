@@ -8,6 +8,8 @@ use crate::{
     Error,
 };
 use nurbs::{AbstractSurface, ProjectionScratch, SampledSurface};
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
 
 /// Largest angle whose chord on a circle of `radius` stays within
 /// `tolerance`: the chord deviates from the arc by about radius·angle²/8.
@@ -1046,14 +1048,20 @@ impl PreparedSurface<'_> {
     }
 
     fn lower_verts_inner(&self, verts: &[Vertex]) -> Result<Vec<(f64, f64)>, Error> {
-        let mut scratch = ProjectionScratch::default();
-        let mut pts = Vec::with_capacity(verts.len());
-        for v in verts {
-            // Project to the 2D subspace for triangulation
-            let proj = self.lower_with_scratch(v.pos, &mut scratch)?;
-            pts.push((proj.x, proj.y));
+        // Project to the 2D subspace for triangulation
+        let lower = |scratch: &mut ProjectionScratch<4>, v: &Vertex| {
+            self.lower_with_scratch(v.pos, scratch).map(|p| (p.x, p.y))
+        };
+        // Spline projections are independent, and one can take milliseconds.
+        // Lower them concurrently so that one face is not a long serial job.
+        // Collecting in vertex order reports the same first error.
+        #[cfg(feature = "rayon")]
+        if matches!(self.surface, Surface::NURBS { .. }) {
+            let pts: Vec<_> = verts.par_iter().map_init(ProjectionScratch::default, lower).collect();
+            return pts.into_iter().collect();
         }
-        Ok(pts)
+        let mut scratch = ProjectionScratch::default();
+        verts.iter().map(|v| lower(&mut scratch, v)).collect()
     }
 
     fn torus_angles(mat_i: DMat4, point: DVec3, major_radius: f64) -> Result<(f64, f64), Error> {

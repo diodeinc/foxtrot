@@ -138,18 +138,35 @@ fn collect_shape_instances<'a>(
     to_mesh
 }
 
+/// Filter and map every entity with its index, in file order. Large models
+/// hold about a million entities: serial passes for the lookup tables below
+/// add up to as long as meshing the model on every core. A small file scans
+/// faster serially than it can wake the thread pool.
+fn filter_entities<'s, 'a, T: Send>(
+    s: &'s StepFile<'a>,
+    f: impl Fn(usize, &'s Entity<'a>) -> Option<T> + Sync + Send,
+) -> Vec<T> {
+    #[cfg(feature = "rayon")]
+    {
+        const PARALLEL_SCAN: usize = 1 << 16;
+        if s.0.len() > PARALLEL_SCAN {
+            return s.0.par_iter().with_min_len(PARALLEL_SCAN / 4).enumerate()
+                .filter_map(|(i, e)| f(i, e)).collect();
+        }
+    }
+    s.0.iter().enumerate().filter_map(|(i, e)| f(i, e)).collect()
+}
+
 fn collect_product_roots(s: &StepFile) -> HashSet<usize> {
     let all_products: HashSet<_> =
-        s.0.iter()
-            .enumerate()
-            .filter(|(_i, e)| matches!(e, Entity::ProductDefinition(_)))
-            .map(|(i, _)| i)
+        filter_entities(s, |i, e| matches!(e, Entity::ProductDefinition(_)).then_some(i))
+            .into_iter()
             .collect();
-    let child_products: HashSet<_> =
-        s.0.iter()
-            .filter_map(|e| NextAssemblyUsageOccurrence_::try_from_entity(e))
-            .map(|rel| rel.related_product_definition.0)
-            .collect();
+    let child_products: HashSet<_> = filter_entities(s, |_, e| {
+        NextAssemblyUsageOccurrence_::try_from_entity(e).map(|rel| rel.related_product_definition.0)
+    })
+    .into_iter()
+    .collect();
     all_products
         .into_iter()
         .filter(|idx| !child_products.contains(idx))
@@ -160,10 +177,7 @@ fn collect_product_representations<'a>(
     s: &'a StepFile,
 ) -> HashMap<ProductDefinition<'a>, Vec<Representation<'a>>> {
     let mut reps: HashMap<ProductDefinition<'a>, Vec<Representation<'a>>> = HashMap::new();
-    for sdr in
-        s.0.iter()
-            .filter_map(|e| ShapeDefinitionRepresentation_::try_from_entity(e))
-    {
+    for sdr in filter_entities(s, |_, e| ShapeDefinitionRepresentation_::try_from_entity(e)) {
         let Some(pds) = s.entity::<ProductDefinitionShape_>(sdr.definition.cast()) else {
             continue;
         };
@@ -186,22 +200,17 @@ fn collect_occurrence_instances<'a>(
     s: &'a StepFile,
     product_reps: &HashMap<ProductDefinition<'a>, Vec<Representation<'a>>>,
 ) -> HashMap<ProductDefinition<'a>, Vec<OccurrenceInstance<'a>>> {
-    let occurrence_shape_defs: HashMap<_, _> =
-        s.0.iter()
-            .enumerate()
-            .filter_map(|(idx, e)| {
-                let pds = ProductDefinitionShape_::try_from_entity(e)?;
-                s.entity::<NextAssemblyUsageOccurrence_>(pds.definition.cast())
-                    .map(|occ| (Id::new(idx), occ))
-            })
-            .collect();
+    let occurrence_shape_defs: HashMap<_, _> = filter_entities(s, |idx, e| {
+        let pds = ProductDefinitionShape_::try_from_entity(e)?;
+        s.entity::<NextAssemblyUsageOccurrence_>(pds.definition.cast())
+            .map(|occ| (Id::new(idx), occ))
+    })
+    .into_iter()
+    .collect();
 
     let mut occurrences: HashMap<ProductDefinition<'a>, Vec<OccurrenceInstance<'a>>> =
         HashMap::new();
-    for cdsr in
-        s.0.iter()
-            .filter_map(|e| ContextDependentShapeRepresentation_::try_from_entity(e))
-    {
+    for cdsr in filter_entities(s, |_, e| ContextDependentShapeRepresentation_::try_from_entity(e)) {
         let Some(occ) = occurrence_shape_defs.get(&cdsr.represented_product_relation) else {
             continue;
         };
@@ -377,8 +386,12 @@ fn resolve_length_unit_to_mm(s: &StepFile, mut idx: usize) -> Option<f64> {
 /// convert coordinates to millimeters.  Returns 1.0 if the file already
 /// uses mm or if the unit cannot be determined.
 fn detect_length_scale_to_mm(s: &StepFile) -> f64 {
-    s.0.iter()
-        .flat_map(entity_components)
+    filter_entities(s, |_, e| {
+        let parts = entity_components(e);
+        parts.iter().any(|p| GlobalUnitAssignedContext_::try_from_entity(p).is_some()).then_some(parts)
+    })
+        .into_iter()
+        .flatten()
         .filter_map(GlobalUnitAssignedContext_::try_from_entity)
         .flat_map(|context| &context.units)
         .find_map(|unit| resolve_length_unit_to_mm(s, unit.0))
@@ -423,17 +436,12 @@ fn detect_length_scale_fallback(s: &StepFile) -> f64 {
     let mut found_milli_metre = false;
     let mut found_inch = false;
 
-    for entity in s.0.iter() {
-        let subs: &[Entity] = match entity {
-            Entity::ComplexEntity(v) => v,
-            _ => std::slice::from_ref(entity),
-        };
-        // Check if this entity group contains a LENGTH_UNIT marker
-        let has_length_unit = subs.iter().any(|e| matches!(e, Entity::LengthUnit(_)));
-        if !has_length_unit {
-            continue;
-        }
-
+    // Entity groups that contain a LENGTH_UNIT marker
+    let length_units = filter_entities(s, |_, entity| {
+        let subs = entity_components(entity);
+        subs.iter().any(|e| matches!(e, Entity::LengthUnit(_))).then_some(subs)
+    });
+    for subs in length_units {
         for sub in subs {
             match sub {
                 Entity::SiUnit(si) if matches!(si.name, SiUnitName::Metre) => match &si.prefix {
@@ -456,17 +464,15 @@ fn detect_length_scale_fallback(s: &StepFile) -> f64 {
     // corresponding LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.0254), ...)
     // may still be present.
     if !found_inch {
-        for entity in s.0.iter() {
-            if let Entity::LengthMeasureWithUnit(lmwu) = entity {
-                if let MeasureValue::LengthMeasure(lm) = &lmwu.value_component {
-                    // 0.0254 m = 1 inch
-                    if (lm.0 - 0.0254).abs() < 1e-6 {
-                        found_inch = true;
-                        break;
-                    }
-                }
-            }
-        }
+        found_inch = !filter_entities(s, |_, entity| match entity {
+            // 0.0254 m = 1 inch
+            Entity::LengthMeasureWithUnit(lmwu) => match &lmwu.value_component {
+                MeasureValue::LengthMeasure(lm) => ((lm.0 - 0.0254).abs() < 1e-6).then_some(()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .is_empty();
     }
 
     if found_inch {
@@ -488,10 +494,9 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
     // Physical mesh approximation budget in native coordinates, distinct
     // from the source's geometric uncertainty.
     let tolerance = 0.01 / scale;
-    let styled_item_colors: HashMap<usize, DVec3> = s
-        .0
-        .iter()
-        .filter_map(|e| MechanicalDesignGeometricPresentationRepresentation_::try_from_entity(e))
+    let styled_item_colors: HashMap<usize, DVec3> =
+        filter_entities(s, |_, e| MechanicalDesignGeometricPresentationRepresentation_::try_from_entity(e))
+        .into_iter()
         .flat_map(|m| m.items.iter())
         .filter_map(|item| s.entity(item.cast::<StyledItem_>()))
         .filter_map(|styled| {
@@ -531,11 +536,9 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
     };
 
     let mut shape_rep_relationship: HashMap<Id<_>, Vec<Id<_>>> = HashMap::new();
-    for (r1, r2) in
-        s.0.iter()
-            .filter_map(|e| ShapeRepresentationRelationship_::try_from_entity(e))
-            .map(|e| (e.rep_1, e.rep_2))
-    {
+    for (r1, r2) in filter_entities(s, |_, e| {
+        ShapeRepresentationRelationship_::try_from_entity(e).map(|e| (e.rep_1, e.rep_2))
+    }) {
         match (
             representation_has_mesh_items(r1),
             representation_has_mesh_items(r2),
@@ -581,48 +584,34 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                 .get(&id.0)
                 .copied()
                 .unwrap_or(DVec3::new(0.5, 0.5, 0.5));
-            crate::timing::time("shape:mesh_faces", || match &s[*id] {
-                Entity::ManifoldSolidBrep(b) => shell(
-                    s,
-                    b.outer.cast(),
-                    &mut mesh,
-                    &mut stats,
-                    &styled_item_colors,
-                    default_color,
-                    shape.uncertainty,
-                    tolerance,
-                ),
-                Entity::ShellBasedSurfaceModel(b) => {
-                    for v in &b.sbsm_boundary {
-                        shell(
-                            s,
-                            *v,
-                            &mut mesh,
-                            &mut stats,
-                            &styled_item_colors,
-                            default_color,
-                            shape.uncertainty,
-                            tolerance,
-                        );
+            crate::timing::time("shape:mesh_faces", || {
+                let shells: Vec<Shell> = match &s[*id] {
+                    Entity::ManifoldSolidBrep(b) => vec![b.outer.cast()],
+                    Entity::ShellBasedSurfaceModel(b) => b.sbsm_boundary.clone(),
+                    Entity::BrepWithVoids(b) => std::iter::once(b.outer.cast())
+                        .chain(b.voids.iter().map(|c| c.cast()))
+                        .collect(),
+                    _ => {
+                        warn!("Skipping {:?} (not a known solid)", s[*id]);
+                        Vec::new()
                     }
-                }
-                Entity::BrepWithVoids(b) => {
-                    for c in std::iter::once(b.outer.cast()).chain(b.voids.iter().map(|c| c.cast()))
-                    {
-                        shell(
-                            s,
-                            c,
-                            &mut mesh,
-                            &mut stats,
-                            &styled_item_colors,
-                            default_color,
-                            shape.uncertainty,
-                            tolerance,
-                        );
-                    }
-                }
-                _ => {
-                    warn!("Skipping {:?} (not a known solid)", s[*id]);
+                };
+                // One shape can hold hundreds of shells. Mesh them
+                // concurrently, then append in shell order so the output
+                // does not depend on scheduling.
+                let mesh_shell = |c: &Shell| {
+                    let mut part = (Mesh::default(), Stats::default());
+                    shell(s, *c, &mut part.0, &mut part.1, &styled_item_colors,
+                        default_color, shape.uncertainty, tolerance);
+                    part
+                };
+                #[cfg(feature = "rayon")]
+                let parts: Vec<_> = shells.par_iter().map(mesh_shell).collect();
+                #[cfg(not(feature = "rayon"))]
+                let parts: Vec<_> = shells.iter().map(mesh_shell).collect();
+                for (mut part, part_stats) in parts {
+                    mesh.append(&mut part);
+                    stats = Stats::combine(std::mem::take(&mut stats), part_stats);
                 }
             });
 
