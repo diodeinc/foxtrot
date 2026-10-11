@@ -563,16 +563,25 @@ where
             let d = self.surf.derivs_in_span::<2>(mid, spans, p);
             let normal = d[1][0].cross(&d[0][1]);
             let normal = if normal.norm_squared() > 0. { normal.normalize() } else { DVec3::zeros() };
-            let tangent = if d[1][0].norm_squared() > 0. { d[1][0].normalize() } else { DVec3::zeros() };
-            let bitangent = normal.cross(&tangent);
-            let mut slab = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
+            // Parameter directions need not be orthogonal. A frame built on
+            // one of them measures the other's skew as extent across it: a
+            // long, thin patch then spans its own width many times over and
+            // hides the offset of every point beside it. Bound in a frame on
+            // each direction, so the long one carries the skew.
+            let frames = [d[1][0], d[0][1]].map(|tangent| {
+                let tangent = if tangent.norm_squared() > 0. { tangent.normalize() } else { DVec3::zeros() };
+                [normal, tangent, normal.cross(&tangent)]
+            });
+            let mut slabs = [[DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)]; 2];
             let mut bounds = [DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)];
             let direction = residual.unwrap_or_else(DVec3::zeros).try_normalize(0.).unwrap_or_else(DVec3::zeros);
             let mut support = f64::INFINITY;
             for q in patches[patch].iter().copied().map(crate::nd_curve::cartesian) {
                 bounds[0] = bounds[0].inf(&q); bounds[1] = bounds[1].sup(&q);
-                let offset = DVec3::new((q-p).dot(&normal), (q-p).dot(&tangent), (q-p).dot(&bitangent));
-                slab[0] = slab[0].inf(&offset); slab[1] = slab[1].sup(&offset);
+                for (slab, frame) in slabs.iter_mut().zip(&frames) {
+                    let offset = DVec3::from_fn(|i, _| (q-p).dot(&frame[i]));
+                    slab[0] = slab[0].inf(&offset); slab[1] = slab[1].sup(&offset);
+                }
                 support = support.min((q-p).dot(&direction));
             }
             // Any supporting plane bounds the hull. The incumbent residual
@@ -580,17 +589,17 @@ where
             // lose, especially at constrained endpoint minima.
             // An orthonormal control box also bounds distance beyond a finite
             // patch edge; the normal slab alone only bounds its infinite plane.
-            let slab_roundoff = DVec3::new(normal.abs().dot(&roundoff),
-                tangent.abs().dot(&roundoff), bitangent.abs().dot(&roundoff));
+            let slab_roundoff = frames.map(|frame| DVec3::from_fn(|i, _| frame[i].abs().dot(&roundoff)));
             // Stop when distance comparisons overlap at input resolution,
             // not when an optimistic bound beats an optimistic incumbent.
             // Fixed arithmetic uncertainty cannot shrink with subdivision.
             // This is a numerical tie, not certified exact domination.
             let box_gap = (bounds[0]-p).sup(&(p-bounds[1]));
-            let slab_gap = slab[0].sup(&(-slab[1]));
+            let slab_gaps = slabs.map(|slab| slab[0].sup(&(-slab[1])));
             let support_roundoff = direction.abs().dot(&roundoff);
-            let bound = |sign: f64| (box_gap + sign * roundoff).sup(&DVec3::zeros()).norm()
-                .max((slab_gap + sign * slab_roundoff).sup(&DVec3::zeros()).norm())
+            let bound = |sign: f64| (0..2).map(|i| (slab_gaps[i] + sign * slab_roundoff[i])
+                    .sup(&DVec3::zeros()).norm())
+                .fold((box_gap + sign * roundoff).sup(&DVec3::zeros()).norm(), f64::max)
                 .max(support + sign * support_roundoff);
             // Definitely farther patches need no candidate evaluations.
             if residual.is_some_and(|r| bound(-1.) >= (r.abs() + roundoff).norm()) {
