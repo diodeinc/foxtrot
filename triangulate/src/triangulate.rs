@@ -581,48 +581,34 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                 .get(&id.0)
                 .copied()
                 .unwrap_or(DVec3::new(0.5, 0.5, 0.5));
-            crate::timing::time("shape:mesh_faces", || match &s[*id] {
-                Entity::ManifoldSolidBrep(b) => shell(
-                    s,
-                    b.outer.cast(),
-                    &mut mesh,
-                    &mut stats,
-                    &styled_item_colors,
-                    default_color,
-                    shape.uncertainty,
-                    tolerance,
-                ),
-                Entity::ShellBasedSurfaceModel(b) => {
-                    for v in &b.sbsm_boundary {
-                        shell(
-                            s,
-                            *v,
-                            &mut mesh,
-                            &mut stats,
-                            &styled_item_colors,
-                            default_color,
-                            shape.uncertainty,
-                            tolerance,
-                        );
+            crate::timing::time("shape:mesh_faces", || {
+                let shells: Vec<Shell> = match &s[*id] {
+                    Entity::ManifoldSolidBrep(b) => vec![b.outer.cast()],
+                    Entity::ShellBasedSurfaceModel(b) => b.sbsm_boundary.clone(),
+                    Entity::BrepWithVoids(b) => std::iter::once(b.outer.cast())
+                        .chain(b.voids.iter().map(|c| c.cast()))
+                        .collect(),
+                    _ => {
+                        warn!("Skipping {:?} (not a known solid)", s[*id]);
+                        Vec::new()
                     }
-                }
-                Entity::BrepWithVoids(b) => {
-                    for c in std::iter::once(b.outer.cast()).chain(b.voids.iter().map(|c| c.cast()))
-                    {
-                        shell(
-                            s,
-                            c,
-                            &mut mesh,
-                            &mut stats,
-                            &styled_item_colors,
-                            default_color,
-                            shape.uncertainty,
-                            tolerance,
-                        );
-                    }
-                }
-                _ => {
-                    warn!("Skipping {:?} (not a known solid)", s[*id]);
+                };
+                // One shape can hold hundreds of shells. Mesh them
+                // concurrently, then append in shell order so the output
+                // does not depend on scheduling.
+                let mesh_shell = |c: &Shell| {
+                    let mut part = (Mesh::default(), Stats::default());
+                    shell(s, *c, &mut part.0, &mut part.1, &styled_item_colors,
+                        default_color, shape.uncertainty, tolerance);
+                    part
+                };
+                #[cfg(feature = "rayon")]
+                let parts: Vec<_> = shells.par_iter().map(mesh_shell).collect();
+                #[cfg(not(feature = "rayon"))]
+                let parts: Vec<_> = shells.iter().map(mesh_shell).collect();
+                for (mut part, part_stats) in parts {
+                    mesh.append(&mut part);
+                    stats = Stats::combine(std::mem::take(&mut stats), part_stats);
                 }
             });
 
