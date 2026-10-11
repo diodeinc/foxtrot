@@ -194,6 +194,20 @@ pub struct PreparedSurface<'a> {
     uncertainty: f64,
 }
 
+/// A prepared surface that owns its geometry, so a face can pause meshing
+/// between stages without re-preparing its chart.
+pub struct OwnedPreparedSurface {
+    surface: Surface,
+    chart: FaceChart,
+    uncertainty: f64,
+}
+
+impl OwnedPreparedSurface {
+    pub fn prepared(&self) -> PreparedSurface<'_> {
+        PreparedSurface { surface: &self.surface, chart: self.chart.clone(), uncertainty: self.uncertainty }
+    }
+}
+
 impl Surface {
     pub fn new_nurbs(surf: SampledSurface<4>) -> Self {
         if let Some(normal) = surf.surf.bilinear_plane_normal() {
@@ -617,6 +631,13 @@ impl Surface {
             uncertainty,
         })
     }
+
+    pub fn prepare_owned(self, verts: &[Vertex], boundary_edges: &[(usize, usize)], same_sense: bool,
+        uncertainty: f64, has_seam: bool,
+    ) -> Result<OwnedPreparedSurface, Error> {
+        let PreparedSurface { chart, .. } = self.prepare(verts, boundary_edges, same_sense, uncertainty, has_seam)?;
+        Ok(OwnedPreparedSurface { surface: self, chart, uncertainty })
+    }
 }
 
 impl PreparedSurface<'_> {
@@ -980,7 +1001,7 @@ impl PreparedSurface<'_> {
     /// Interior refinement cannot fix a constraint drawn through the wrong
     /// surface region (for example, a polar diameter instead of a rim arc).
     pub fn refine_boundary(&self, pts: &mut Vec<(f64, f64)>, edges: &mut Vec<(usize, usize)>,
-        verts: &mut Vec<Vertex>, tolerance: f64,
+        verts: &mut Vec<Vertex>, tolerance: f64, splits: &mut Vec<[DVec3; 2]>,
     ) -> Result<(), Error> {
         let mut scratch = ProjectionScratch::default();
         let mut i = 0;
@@ -990,7 +1011,6 @@ impl PreparedSurface<'_> {
             let pb = DVec2::new(pts[b].0, pts[b].1);
             let va = verts[a];
             let vb = verts[b];
-            let edge = vb.pos - va.pos;
             let Some(start) = self.raise(pa) else { i += 1; continue; };
             let Some(end) = self.raise(pb) else { i += 1; continue; };
             // Measure chart distortion separately from source curve/surface
@@ -1005,7 +1025,9 @@ impl PreparedSurface<'_> {
                 })
             });
             if !needs_split { i += 1; continue; }
-            let pos = va.pos + edge*0.5;
+            // Symmetric in the endpoints, so that faces sharing the segment
+            // can split it at exactly the same point.
+            let pos = (va.pos + vb.pos)*0.5;
             if pos == va.pos || pos == vb.pos || pts.len() >= 1_000_000 {
                 return Err(Error::InvalidGeometry("boundary chart approximation did not converge"));
             }
@@ -1018,6 +1040,7 @@ impl PreparedSurface<'_> {
             verts.push(Vertex { pos, norm: DVec3::zeros(), color: va.color });
             edges[i] = (a, mid);
             edges.push((mid, b));
+            splits.push([va.pos, vb.pos]);
         }
         Ok(())
     }
@@ -2376,7 +2399,7 @@ mod tests {
             let mut edges = vec![(0,1)];
             let prepared = surface.prepare(&verts,&edges,true,0.,false).unwrap();
             let mut pts = prepared.lower_verts(&verts).unwrap();
-            prepared.refine_boundary(&mut pts,&mut edges,&mut verts,0.01).unwrap();
+            prepared.refine_boundary(&mut pts,&mut edges,&mut verts,0.01,&mut Vec::new()).unwrap();
             assert_eq!(verts.len(),2);
             assert_eq!([verts[0].pos,verts[1].pos],[a,b]);
         }
