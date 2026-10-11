@@ -13,7 +13,7 @@ use crate::{
     mesh,
     mesh::{Mesh, Triangle},
     stats::{FailureKind, Stats, TessellationFailure},
-    surface::Surface,
+    surface::{OwnedPreparedSurface, Surface},
     Error,
 };
 use nurbs::{KnotVector, NURBSSurface, SampledCurve, SampledSurface};
@@ -866,18 +866,15 @@ fn shell(
     // points exactly and the faces can then be meshed independently.
     let edge_samples = sample_edges(s, faces, tolerance);
     let mesh_face = |face: &Face| {
-        let mut scratch = Mesh::default();
-        let result = advanced_face(
+        meshed_face(
             s,
             std::slice::from_ref(face),
-            &mut scratch,
             styled_item_colors,
             default_color,
             uncertainty,
             tolerance,
             &edge_samples,
-        );
-        (result, scratch)
+        )
     };
     #[cfg(feature = "rayon")]
     let mut meshed: Vec<_> = faces.par_iter().with_max_len(1).map(mesh_face).collect();
@@ -886,7 +883,7 @@ fn shell(
     // Exporters can split one face's loops between faces on copies of the
     // same cylinder, so each part alone extends to infinity. Mesh them as one.
     let split_key = |i: usize| {
-        if !matches!(meshed[i].0, Err(Error::InvalidGeometry(UNBOUNDED_FACE))) {
+        if !matches!(meshed[i], Err(Error::InvalidGeometry(UNBOUNDED_FACE))) {
             return None;
         }
         let Entity::AdvancedFace(face) = &s[faces[i]] else { return None; };
@@ -897,25 +894,32 @@ fn shell(
     let keys: Vec<_> = (0..faces.len()).map(split_key).collect();
     for i in 0..faces.len() {
         let Some(key) = keys[i] else { continue; };
-        let group: Vec<_> = (i..faces.len()).filter(|&j| keys[j] == Some(key) && meshed[j].0.is_err()).collect();
+        let group: Vec<_> = (i..faces.len()).filter(|&j| keys[j] == Some(key) && meshed[j].is_err()).collect();
         if group.len() < 2 {
             continue;
         }
         let parts: Vec<_> = group.iter().map(|&j| faces[j]).collect();
-        let mut scratch = Mesh::default();
-        if advanced_face(s, &parts, &mut scratch, styled_item_colors, default_color, uncertainty, tolerance, &edge_samples).is_ok() {
-            meshed[i] = (Ok(()), scratch);
+        if let Ok(face) = meshed_face(s, &parts, styled_item_colors, default_color, uncertainty, tolerance, &edge_samples) {
+            meshed[i] = Ok(face);
             for &j in &group[1..] {
-                meshed[j] = (Ok(()), Mesh::default());
+                meshed[j] = Ok(MeshedFace::default());
             }
         }
     }
+    // Each face splits the boundary segments its own chart needs split. Split
+    // them in every face that shares them too, so faces meet without
+    // T-junctions.
+    let splits: HashSet<Segment> = meshed.iter().flatten().flat_map(|face| &face.splits).copied().collect();
+    #[cfg(feature = "rayon")]
+    meshed.par_iter_mut().flatten().for_each(|face| face.share_splits(&splits));
+    #[cfg(not(feature = "rayon"))]
+    meshed.iter_mut().flatten().for_each(|face| face.share_splits(&splits));
     // Results are merged in face order, so output does not depend on
     // scheduling.
-    for (face, (result, mut scratch)) in faces.iter().zip(meshed) {
+    for (face, result) in faces.iter().zip(meshed) {
         stats.num_faces += 1;
         match result {
-            Ok(()) => mesh.append(&mut scratch),
+            Ok(mut meshed) => mesh.append(&mut meshed.mesh),
             Err(err) => {
                 let surface_id = match &s[*face] {
                     Entity::AdvancedFace(f) => Some(f.face_geometry.0),
@@ -970,6 +974,99 @@ fn advanced_face(
     tolerance: f64,
     edge_samples: &HashMap<usize, Vec<DVec3>>,
 ) -> Result<(), Error> {
+    debug_assert!(mesh.verts.is_empty() && mesh.triangles.is_empty());
+    *mesh = meshed_face(s, faces, styled_item_colors, default_color, uncertainty, tolerance, edge_samples)?.mesh;
+    Ok(())
+}
+
+/// A boundary segment by its endpoints' bits, in either direction.
+type Segment = [[u64; 3]; 2];
+
+fn segment(a: DVec3, b: DVec3) -> Segment {
+    let [a, b] = [a, b].map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]);
+    if a <= b { [a, b] } else { [b, a] }
+}
+
+/// A meshed face, ready to take in the boundary splits of the faces it
+/// shares edges with.
+#[derive(Default)]
+struct MeshedFace {
+    mesh: Mesh,
+    /// The boundary segments this face's own chart needed split.
+    splits: Vec<Segment>,
+    /// Faces meshed in a chart keep it to place and orient new vertices.
+    boundary: Option<ChartBoundary>,
+}
+
+struct ChartBoundary {
+    surface: OwnedPreparedSurface,
+    same_sense: bool,
+    /// Chart coordinates of the mesh vertices.
+    uv: Vec<(f64, f64)>,
+    /// Mesh edges that border one triangle.
+    edges: Vec<(usize, usize)>,
+}
+
+impl MeshedFace {
+    /// Split each boundary edge that is in `splits` at its midpoint, the
+    /// point the face that needed the split used, and fan its triangle in
+    /// two. The midpoint is on the edge, so the surface does not change.
+    /// This releases the chart, here in parallel rather than in the merge.
+    fn share_splits(&mut self, splits: &HashSet<Segment>) {
+        let Some(mut boundary) = self.boundary.take() else { return; };
+        let boundary = &mut boundary;
+        let Mesh { verts, triangles } = &mut self.mesh;
+        let split = |verts: &[mesh::Vertex], a: usize, b: usize| splits.contains(&segment(verts[a].pos, verts[b].pos));
+        let mut pending: Vec<_> = boundary.edges.iter().copied().filter(|&(a, b)| split(verts, a, b)).collect();
+        if pending.is_empty() {
+            return;
+        }
+        let edge_key = |a: usize, b: usize| (a.min(b), a.max(b));
+        let mut owner: HashMap<_, _> = pending.iter().map(|&(a, b)| (edge_key(a, b), 0)).collect();
+        for (t, triangle) in triangles.iter().enumerate() {
+            let v = [triangle.verts.x, triangle.verts.y, triangle.verts.z].map(|i| i as usize);
+            for k in 0..3 {
+                if let Some(owner) = owner.get_mut(&edge_key(v[k], v[(k + 1) % 3])) {
+                    *owner = t;
+                }
+            }
+        }
+        let prepared = boundary.surface.prepared();
+        let sign = if boundary.same_sense { 1. } else { -1. };
+        while let Some((a, b)) = pending.pop() {
+            let t = owner[&edge_key(a, b)];
+            let v = [triangles[t].verts.x, triangles[t].verts.y, triangles[t].verts.z].map(|i| i as usize);
+            let k = (0..3).find(|&k| edge_key(v[k], v[(k + 1) % 3]) == edge_key(a, b)).expect("owner has the edge");
+            let (x, y, z) = (v[k], v[(k + 1) % 3], v[(k + 2) % 3]);
+            let m = verts.len();
+            let pos = (verts[a].pos + verts[b].pos) * 0.5;
+            let (ua, ub) = (boundary.uv[a], boundary.uv[b]);
+            let uv = ((ua.0 + ub.0) * 0.5, (ua.1 + ub.1) * 0.5);
+            let norm = prepared.normal(pos, DVec2::new(uv.0, uv.1)) * sign;
+            verts.push(mesh::Vertex { pos, norm, color: verts[a].color });
+            boundary.uv.push(uv);
+            triangles[t].verts = U32Vec3::new(x as u32, m as u32, z as u32);
+            owner.insert(edge_key(x, m), t);
+            // The new triangle takes over the edge y z.
+            for edge in [edge_key(m, y), edge_key(y, z)] {
+                owner.insert(edge, triangles.len());
+            }
+            triangles.push(Triangle { verts: U32Vec3::new(m as u32, y as u32, z as u32) });
+            pending.extend([(x, m), (m, y)].iter().copied().filter(|&(a, b)| split(verts, a, b)));
+        }
+    }
+}
+
+fn meshed_face(
+    s: &StepFile,
+    faces: &[Face],
+    styled_item_colors: &HashMap<usize, DVec3>,
+    default_color: DVec3,
+    uncertainty: f64,
+    tolerance: f64,
+    edge_samples: &HashMap<usize, Vec<DVec3>>,
+) -> Result<MeshedFace, Error> {
+    let mut mesh = Mesh::default();
     // Closed shells may legally reference either ADVANCED_FACE or the more
     // general FACE_SURFACE; OCCT/KiCad translate both through FaceSurface.
     // Faces meshed together use the bounds of all and the first one's surface.
@@ -990,11 +1087,10 @@ fn advanced_face(
         .unwrap_or(default_color);
     info!("triangulating face {} (geometry {})", f.0, face_geometry.0);
 
-    debug_assert!(mesh.verts.is_empty() && mesh.triangles.is_empty());
-
     if let Some(&b) = bounds.first() {
         if let Entity::PolyLoop(_) = &s[bound_loop(s, b)?.0] {
-            return poly_loop_face(s, face_geometry, same_sense, &bounds, face_color, mesh);
+            poly_loop_face(s, face_geometry, same_sense, &bounds, face_color, &mut mesh)?;
+            return Ok(MeshedFace { mesh, ..Default::default() });
         }
     }
 
@@ -1067,7 +1163,7 @@ fn advanced_face(
     }
 
     if !bounds.is_empty() && num_pts == 0 {
-        return Ok(());
+        return Ok(MeshedFace { mesh, ..Default::default() });
     }
 
     // Swept surfaces use the actual trims to choose a finite NURBS domain.
@@ -1085,14 +1181,14 @@ fn advanced_face(
         .all(|&(forward, reverse)| forward == reverse)
     {
         if let Some(full) = surf.untrimmed_mesh(face_color, same_sense, tolerance) {
-            *mesh = full;
-            return Ok(());
+            return Ok(MeshedFace { mesh: full, ..Default::default() });
         }
     }
 
     // Add curvature samples before constraint insertion. The CDT subdivides
     // constraints at existing vertices, including samples exactly on an edge.
-    let prepared = surf.prepare(&mesh.verts, &edges, same_sense, uncertainty, has_seam)?;
+    let surface = surf.prepare_owned(&mesh.verts, &edges, same_sense, uncertainty, has_seam)?;
+    let prepared = surface.prepared();
     let mut pts = crate::timing::time("face:lower_verts", || prepared.lower_verts(&mesh.verts))?;
     prepared.continue_trims(&mut pts,&mesh.verts,&edges,tolerance);
     if !prepared.cut_periodic(&mut pts, &mut edges, &mut mesh.verts, tolerance)? {
@@ -1105,7 +1201,8 @@ fn advanced_face(
     if had_boundary && edges.is_empty() {
         return Err(Error::InvalidGeometry("face boundary cancels completely"));
     }
-    prepared.refine_boundary(&mut pts, &mut edges, &mut mesh.verts, tolerance)?;
+    let mut splits = Vec::new();
+    prepared.refine_boundary(&mut pts, &mut edges, &mut mesh.verts, tolerance, &mut splits)?;
     let mut constraints: Vec<_> = edges.iter().map(|&(a, b)| (a, b, true)).collect();
     let bonus_points = pts.len();
     crate::timing::time("face:add_steiner_points", || {
@@ -1146,7 +1243,7 @@ fn advanced_face(
         }))
     });
     let t = result.map_err(|_| Error::TriangulationPanic)??;
-    crate::timing::time("face:refine_and_normals", || {
+    let boundary = crate::timing::time("face:refine_and_normals", || {
     let mut triangles: Vec<_> = t.triangles().map(|(a,b,c)| [a,b,c]).collect();
     let edge_key = |a: usize,b: usize| (a.min(b),a.max(b));
     let mut uses = HashMap::new();
@@ -1264,7 +1361,15 @@ fn advanced_face(
         v.norm = prepared.normal(v.pos, DVec2::new(u, w)) * if same_sense { 1. } else { -1. };
     }
     info!("face {} done", face_id);
-    Ok(())
+    Ok(boundary)
+    })?;
+    // Sorted, so that splits apply in the same order on every run.
+    let mut edges: Vec<_> = boundary.into_iter().collect();
+    edges.sort_unstable();
+    Ok(MeshedFace {
+        splits: splits.into_iter().map(|[a, b]| segment(a, b)).collect(),
+        boundary: Some(ChartBoundary { surface, same_sense, uv: pts, edges }),
+        mesh,
     })
 }
 
