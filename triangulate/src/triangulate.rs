@@ -9,6 +9,7 @@ use nalgebra_glm as glm;
 use rayon::prelude::*;
 
 use crate::{
+    colored_mesh::SurfaceMaterial,
     curve::Curve,
     mesh,
     mesh::{Mesh, Triangle},
@@ -487,6 +488,12 @@ fn detect_length_scale_fallback(s: &StepFile) -> f64 {
 }
 
 pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
+    let (mesh, stats, _) = triangulate_with_materials(s);
+    (mesh, stats)
+}
+
+// Material runs follow triangle order without expanding face properties per vertex.
+pub(crate) fn triangulate_with_materials(s: &StepFile) -> (Mesh, Stats, Vec<(usize, SurfaceMaterial)>) {
     let mut scale = detect_length_scale_to_mm(s);
     if (scale - 1.0).abs() < 1e-10 {
         scale = detect_length_scale_fallback(s);
@@ -494,19 +501,17 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
     // Physical mesh approximation budget in native coordinates, distinct
     // from the source's geometric uncertainty.
     let tolerance = 0.01 / scale;
-    let styled_item_colors: HashMap<usize, DVec3> =
+    let styles: HashMap<usize, (DVec3, SurfaceMaterial)> =
         filter_entities(s, |_, e| MechanicalDesignGeometricPresentationRepresentation_::try_from_entity(e))
         .into_iter()
         .flat_map(|m| m.items.iter())
         .filter_map(|item| s.entity(item.cast::<StyledItem_>()))
         .filter_map(|styled| {
-            if styled.styles.len() != 1 {
-                None
-            } else {
-                presentation_style_color(s, styled.styles[0]).map(|c| (styled.item.0, c))
-            }
+            styled.styles.iter().find_map(|&p| presentation_style(s, p))
+                .map(|appearance| (styled.item.0, appearance))
         })
         .collect();
+    let styled_item_colors = styles.iter().map(|(&id, &(color, _))| (id, color)).collect();
 
     // Store a map of ShapeRepresentationRelationships, which some models
     // use to map from a product-level ShapeRepresentation to the concrete
@@ -560,18 +565,18 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
     let (to_mesh_iter, empty) = {
         #[cfg(feature = "rayon")]
         {
-            (to_mesh.par_iter(), || (Mesh::default(), Stats::default()))
+            (to_mesh.par_iter(), || (Mesh::default(), Stats::default(), Vec::new()))
         }
         #[cfg(not(feature = "rayon"))]
         {
-            (to_mesh.iter(), (Mesh::default(), Stats::default()))
+            (to_mesh.iter(), (Mesh::default(), Stats::default(), Vec::new()))
         }
     };
     let mesh_fold = to_mesh_iter.fold(
         // Empty constructor
         empty,
         // Fold operation
-        |(mut mesh, mut stats), (id, shape)| {
+        |(mut mesh, mut stats, mut materials), (id, shape)| {
             let mats = &shape.instances;
             info!(
                 "processing shape entity {} ({} transforms)",
@@ -580,10 +585,11 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
             );
             let v_start = mesh.verts.len();
             let t_start = mesh.triangles.len();
-            let default_color = styled_item_colors
+            let m_start = materials.len();
+            let (default_color, default_material) = styles
                 .get(&id.0)
                 .copied()
-                .unwrap_or(DVec3::new(0.5, 0.5, 0.5));
+                .unwrap_or((DVec3::new(0.5, 0.5, 0.5), SurfaceMaterial::default()));
             crate::timing::time("shape:mesh_faces", || {
                 let shells: Vec<Shell> = match &s[*id] {
                     Entity::ManifoldSolidBrep(b) => vec![b.outer.cast()],
@@ -600,24 +606,27 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                 // concurrently, then append in shell order so the output
                 // does not depend on scheduling.
                 let mesh_shell = |c: &Shell| {
-                    let mut part = (Mesh::default(), Stats::default());
+                    let mut part = (Mesh::default(), Stats::default(), Vec::new());
                     shell(s, *c, &mut part.0, &mut part.1, &styled_item_colors,
-                        default_color, shape.uncertainty, tolerance);
+                        default_color, shape.uncertainty, tolerance,
+                        &styles, default_material, &mut part.2);
                     part
                 };
                 #[cfg(feature = "rayon")]
                 let parts: Vec<_> = shells.par_iter().map(mesh_shell).collect();
                 #[cfg(not(feature = "rayon"))]
                 let parts: Vec<_> = shells.iter().map(mesh_shell).collect();
-                for (mut part, part_stats) in parts {
+                for (mut part, part_stats, mut part_materials) in parts {
                     mesh.append(&mut part);
                     stats = Stats::combine(std::mem::take(&mut stats), part_stats);
+                    materials.append(&mut part_materials);
                 }
             });
 
             // Build copies of the mesh by copying and applying transforms
             let v_end = mesh.verts.len();
             let t_end = mesh.triangles.len();
+            let m_end = materials.len();
             crate::timing::time("shape:instance_copies", || {
                 for mat in &mats[1..] {
                     for v in v_start..v_end {
@@ -637,6 +646,7 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                         tri.verts.add_scalar_mut(offset as u32);
                         mesh.triangles.push(tri);
                     }
+                    materials.extend_from_within(m_start..m_end);
                 }
 
                 // Now that we've built all of the other copies of the mesh,
@@ -651,15 +661,16 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                     mesh.verts[v].norm = (mat * glm::vec3_to_vec4(&n)).xyz();
                 }
             });
-            (mesh, stats)
+            (mesh, stats, materials)
         },
     );
 
-    let (mesh, mut stats) = {
+    let (mesh, mut stats, materials) = {
         #[cfg(feature = "rayon")]
         {
-            mesh_fold.reduce(empty, |a, b| {
-                (Mesh::combine(a.0, b.0), Stats::combine(a.1, b.1))
+            mesh_fold.reduce(empty, |mut a, mut b| {
+                a.2.append(&mut b.2);
+                (Mesh::combine(a.0, b.0), Stats::combine(a.1, b.1), a.2)
             })
         }
         #[cfg(not(feature = "rayon"))]
@@ -691,7 +702,7 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
             stats.num_panics()
         );
     }
-    (mesh, stats)
+    (mesh, stats, materials)
 }
 
 fn item_defined_transformation(
@@ -716,41 +727,61 @@ fn item_defined_transformation(
     Ok(t2 * t1i)
 }
 
-fn presentation_style_color(s: &StepFile, p: PresentationStyleAssignment) -> Option<DVec3> {
-    // AAAAAHHHHH
-    s.entity(p)
-        .and_then(|p: &PresentationStyleAssignment_| {
-            let mut surf = p.styles.iter().filter_map(|y| {
-                // This is an ambiguous parse, so we hard-code the first
-                // Entity item in the enum
-                use PresentationStyleSelect::PreDefinedPresentationStyle;
-                if let PreDefinedPresentationStyle(u) = y {
-                    s.entity(u.cast::<SurfaceStyleUsage_>())
-                } else {
-                    None
+fn normalized(value: f64) -> Option<f32> {
+    value.is_finite().then(|| value.clamp(0.0, 1.0) as f32)
+}
+
+fn rgb(s: &StepFile, color: Colour) -> Option<DVec3> {
+    let c = s.entity(color.cast::<ColourRgb_>())?;
+    Some(DVec3::new(c.red, c.green, c.blue))
+}
+
+fn presentation_style(s: &StepFile, p: PresentationStyleAssignment) -> Option<(DVec3, SurfaceMaterial)> {
+    let p = s.entity(p)?;
+    p.styles.iter().find_map(|style| {
+        // Entity selects parse as their first ID alternative; inspect the entity.
+        let usage = match style {
+            PresentationStyleSelect::PreDefinedPresentationStyle(id) => s.entity(id.cast::<SurfaceStyleUsage_>()),
+            PresentationStyleSelect::SurfaceStyleUsage(id) => s.entity(*id),
+            _ => None,
+        }?;
+        let side = s.entity(usage.style.cast::<SurfaceSideStyle_>())?;
+        let fill_color = side.styles.iter().find_map(|id| {
+            let fill = s.entity(id.cast::<SurfaceStyleFillArea_>())?;
+            let area = s.entity(fill.fill_area)?;
+            area.fill_styles.iter().find_map(|id| {
+                let color = s.entity(id.cast::<FillAreaStyleColour_>())?;
+                rgb(s, color.fill_colour)
+            })
+        });
+        let mut material = SurfaceMaterial::default();
+        let rendering_color = side.styles.iter().find_map(|id| {
+            let (color, properties) = match &s[*id] {
+                Entity::SurfaceStyleRendering(r) => (r.surface_colour, &[][..]),
+                Entity::SurfaceStyleRenderingWithProperties(r) => (r.surface_colour, &r.properties[..]),
+                _ => return None,
+            };
+            for property in properties {
+                match &s[*property] {
+                    Entity::SurfaceStyleTransparent(t) => material.opacity = normalized(t.transparency).map(|t| 1.0 - t),
+                    Entity::SurfaceStyleReflectanceAmbientDiffuse(r) => material.diffuse_strength = normalized(r.diffuse_reflectance),
+                    Entity::SurfaceStyleReflectanceAmbientDiffuseSpecular(r) => {
+                        material.diffuse_strength = normalized(r.diffuse_reflectance);
+                        material.specular_strength = normalized(r.specular_reflectance);
+                        material.specular_color = rgb(s, r.specular_colour).and_then(|c| {
+                            Some([normalized(c.x)?, normalized(c.y)?, normalized(c.z)?])
+                        });
+                        let exponent = r.specular_exponent as f32;
+                        material.shininess = (exponent.is_finite() && exponent >= 0.0).then_some(exponent);
+                    }
+                    _ => (),
                 }
-            });
-            let out = surf.next();
-            out
-        })
-        .and_then(|surf: &SurfaceStyleUsage_| s.entity(surf.style.cast::<SurfaceSideStyle_>()))
-        .and_then(|surf: &SurfaceSideStyle_| {
-            if surf.styles.len() != 1 {
-                None
-            } else {
-                s.entity(surf.styles[0].cast::<SurfaceStyleFillArea_>())
             }
-        })
-        .and_then(|surf: &SurfaceStyleFillArea_| s.entity(surf.fill_area))
-        .and_then(|fill: &FillAreaStyle_| {
-            if fill.fill_styles.len() != 1 {
-                None
-            } else {
-                s.entity(fill.fill_styles[0].cast::<FillAreaStyleColour_>())
-            }
-        })
-        .and_then(|f: &FillAreaStyleColour_| s.entity(f.fill_colour.cast::<ColourRgb_>()))
-        .map(|c| DVec3::new(c.red, c.green, c.blue))
+            rgb(s, color)
+        });
+        // Rendering color describes the shaded surface; fill color is fallback.
+        rendering_color.or(fill_color).map(|c| (c, material))
+    })
 }
 
 fn cartesian_point(s: &StepFile, a: Id<CartesianPoint_>) -> Result<DVec3, Error> {
@@ -825,6 +856,9 @@ fn shell(
     default_color: DVec3,
     uncertainty: f64,
     tolerance: f64,
+    styles: &HashMap<usize, (DVec3, SurfaceMaterial)>,
+    default_material: SurfaceMaterial,
+    materials: &mut Vec<(usize, SurfaceMaterial)>,
 ) {
     let data = match &s[c] {
         Entity::ClosedShell(shell) => Some((&shell.cfs_faces, true)),
@@ -883,7 +917,8 @@ fn shell(
     let keys: Vec<_> = (0..faces.len()).map(split_key).collect();
     for i in 0..faces.len() {
         let Some(key) = keys[i] else { continue; };
-        let group: Vec<_> = (i..faces.len()).filter(|&j| keys[j] == Some(key) && meshed[j].is_err()).collect();
+        let group: Vec<_> = (i..faces.len()).filter(|&j| keys[j] == Some(key)
+            && styles.get(&faces[j].0) == styles.get(&faces[i].0) && meshed[j].is_err()).collect();
         if group.len() < 2 {
             continue;
         }
@@ -908,7 +943,11 @@ fn shell(
     for (face, result) in faces.iter().zip(meshed) {
         stats.num_faces += 1;
         match result {
-            Ok(mut meshed) => mesh.append(&mut meshed.mesh),
+            Ok(mut meshed) => {
+                let material = styles.get(&face.0).map(|s| s.1).unwrap_or(default_material);
+                materials.push((meshed.mesh.triangles.len(), material));
+                mesh.append(&mut meshed.mesh);
+            }
             Err(err) => {
                 let surface_id = match &s[*face] {
                     Entity::AdvancedFace(f) => Some(f.face_geometry.0),
@@ -3017,7 +3056,8 @@ mod tests {
         let step = StepFile::parse(&flat).unwrap();
         let mut mesh = Mesh::default();
         let mut stats = Stats::default();
-        shell(&step, Id::new(26), &mut mesh, &mut stats, &HashMap::new(), DVec3::zeros(), 0., 0.01);
+        shell(&step, Id::new(26), &mut mesh, &mut stats, &HashMap::new(), DVec3::zeros(), 0., 0.01,
+            &HashMap::new(), SurfaceMaterial::default(), &mut Vec::new());
         assert_eq!((stats.num_faces, stats.failures.len()), (2, 0), "{:?}", stats.failures);
         let mut area = 0.;
         for t in &mesh.triangles {

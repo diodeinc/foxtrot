@@ -1,15 +1,15 @@
 //! Color-grouped mesh output from STEP tessellation.
 //!
 //! Takes the flat `Mesh` produced by [`triangulate()`](crate::triangulate::triangulate)
-//! and re-buckets triangles by quantised vertex colour, producing a
-//! `TessellatedMesh` of per-colour `ColoredSubmesh` slices ready for
+//! and re-buckets triangles by quantised vertex colour and surface material,
+//! producing a `TessellatedMesh` of `ColoredSubmesh` slices ready for
 //! instanced GPU rendering.
 
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use crate::mesh::Mesh;
 use crate::stats::Stats;
-use crate::triangulate::triangulate;
+use crate::triangulate::triangulate_with_materials;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -21,19 +21,44 @@ pub struct TessellatedMesh {
     pub submeshes: Vec<ColoredSubmesh>,
 }
 
-/// One colour group: all triangles sharing the same quantised RGBA colour.
+/// Authored STEP rendering properties. `None` means unspecified, not zero.
+///
+/// Ambient reflectance and the shading/interpolation method have no direct
+/// material equivalent here. Apply diffuse strength after converting `color`
+/// RGB to the consumer's linear lighting space, not before that conversion.
+/// No metal classification or conversion to a PBR lighting model is performed.
+/// RGB has no source color-space metadata. Finite normalized properties are
+/// clamped to [0, 1]; invalid/nonfinite properties remain unspecified.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SurfaceMaterial {
+    /// One minus STEP transparency, in [0, 1]. Also supplies `color[3]`.
+    pub opacity: Option<f32>,
+    /// STEP diffuse reflectance in [0, 1], independent of surface RGB.
+    pub diffuse_strength: Option<f32>,
+    /// Authored RGB highlight color in [0, 1], independent of its strength.
+    pub specular_color: Option<[f32; 3]>,
+    /// STEP specular reflectance in [0, 1], not a Fresnel coefficient.
+    pub specular_strength: Option<f32>,
+    /// Raw nonnegative STEP specular exponent, not normalized to [0, 1].
+    pub shininess: Option<f32>,
+}
+
+/// All triangles sharing quantised RGB and the same supported material values.
 #[derive(Debug, Clone)]
 pub struct ColoredSubmesh {
     pub color: [f32; 4],
+    pub material: SurfaceMaterial,
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
 }
 
 impl ColoredSubmesh {
-    fn new(color: [f32; 4]) -> Self {
+    fn new(mut color: [f32; 4], material: SurfaceMaterial) -> Self {
+        color[3] = material.opacity.unwrap_or(1.0);
         Self {
             color,
+            material,
             positions: Vec::new(),
             normals: Vec::new(),
             indices: Vec::new(),
@@ -42,10 +67,10 @@ impl ColoredSubmesh {
 
     fn insert_vertex(
         &mut self,
-        key: ColorKey,
+        key: usize,
         mesh_index: usize,
         vertex: &crate::mesh::Vertex,
-        vertex_indices: &mut [Option<(ColorKey, u32)>],
+        vertex_indices: &mut [Option<(usize, u32)>],
     ) -> Result<u32, String> {
         if let Some((existing_key, existing_index)) = vertex_indices[mesh_index] {
             if existing_key == key {
@@ -80,6 +105,11 @@ impl ColoredSubmesh {
 ///
 /// This is the main entry point for downstream consumers that want
 /// colour-bucketed geometry without pulling in the `step` crate directly.
+/// A face style replaces its solid's style, including unspecified properties.
+/// The first supported surface usage wins; rendering RGB takes precedence over
+/// fill RGB. Separate front/back styles and context-dependent overrides are not
+/// represented. RGB retains the existing 8-bit quantization; other properties
+/// retain f32 precision and participate in grouping, including their absence.
 pub fn tessellate_step_bytes(
     step_bytes: &[u8],
 ) -> Result<(TessellatedMesh, Stats), String> {
@@ -87,17 +117,23 @@ pub fn tessellate_step_bytes(
         .map_err(|e| e.to_string())?;
     let step = step::step_file::StepFile::parse(&flattened)
         .map_err(|e| e.to_string())?;
-    let (mesh, stats) = triangulate(&step);
-    let tess = group_mesh_by_color(&mesh)?;
+    let (mesh, stats, materials) = triangulate_with_materials(&step);
+    let tess = group_mesh(&mesh, materials.into_iter().flat_map(|(count, material)| {
+        std::iter::repeat(material).take(count)
+    }))?;
     Ok((tess, stats))
 }
 
-/// Group an already-triangulated `Mesh` into per-colour sub-meshes.
+/// Group an already-triangulated RGB-only `Mesh` with unspecified materials.
 pub fn group_mesh_by_color(mesh: &Mesh) -> Result<TessellatedMesh, String> {
-    let mut buckets: HashMap<ColorKey, ColoredSubmesh> = HashMap::new();
+    group_mesh(mesh, std::iter::repeat(SurfaceMaterial::default()))
+}
+
+fn group_mesh(mesh: &Mesh, mut materials: impl Iterator<Item = SurfaceMaterial>) -> Result<TessellatedMesh, String> {
+    let mut buckets: HashMap<MaterialKey, (usize, ColoredSubmesh)> = HashMap::new();
     let mut vertex_indices = vec![None; mesh.verts.len()];
 
-    for tri in mesh.triangles.iter() {
+    for tri in &mesh.triangles {
         let ia = tri.verts.x as usize;
         let ib = tri.verts.y as usize;
         let ic = tri.verts.z as usize;
@@ -114,27 +150,48 @@ pub fn group_mesh_by_color(mesh: &Mesh) -> Result<TessellatedMesh, String> {
             .get(ic)
             .ok_or_else(|| format!("triangle index out of range: {ic}"))?;
 
-        let key = triangle_color_key(va, vb, vc);
-        let bucket = buckets
+        let color = triangle_color_key(va, vb, vc);
+        let material = materials.next().expect("material for each triangle");
+        let key = MaterialKey::new(color, material);
+        let next_bucket = buckets.len();
+        let (bucket_id, bucket) = buckets
             .entry(key)
-            .or_insert_with(|| ColoredSubmesh::new(key.to_rgba()));
-        let a = bucket.insert_vertex(key, ia, va, &mut vertex_indices)?;
-        let b = bucket.insert_vertex(key, ib, vb, &mut vertex_indices)?;
-        let c = bucket.insert_vertex(key, ic, vc, &mut vertex_indices)?;
+            .or_insert_with(|| (next_bucket, ColoredSubmesh::new(color.to_rgba(), material)));
+        let a = bucket.insert_vertex(*bucket_id, ia, va, &mut vertex_indices)?;
+        let b = bucket.insert_vertex(*bucket_id, ib, vb, &mut vertex_indices)?;
+        let c = bucket.insert_vertex(*bucket_id, ic, vc, &mut vertex_indices)?;
         bucket.indices.extend([a, b, c]);
     }
 
     let mut submeshes = buckets.into_iter().collect::<Vec<_>>();
-    // Largest groups first. Map order is random, so colour breaks ties.
-    submeshes.sort_by_key(|(key, submesh)| (std::cmp::Reverse(submesh.indices.len()), *key));
+    // Largest groups first. Color and material break ties deterministically.
+    submeshes.sort_by_key(|(key, (_, submesh))| (std::cmp::Reverse(submesh.indices.len()), *key));
     Ok(TessellatedMesh {
-        submeshes: submeshes.into_iter().map(|(_, submesh)| submesh).collect(),
+        submeshes: submeshes.into_iter().map(|(_, (_, submesh))| submesh).collect(),
     })
 }
 
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct MaterialKey(ColorKey, [Option<u32>; 7]);
+
+impl MaterialKey {
+    fn new(color: ColorKey, material: SurfaceMaterial) -> Self {
+        let specular = material.specular_color;
+        Self(color, [
+            material.opacity,
+            material.diffuse_strength,
+            specular.map(|c| c[0]),
+            specular.map(|c| c[1]),
+            specular.map(|c| c[2]),
+            material.specular_strength,
+            material.shininess,
+        ].map(|v| v.map(|v| if v == 0.0 { 0 } else { v.to_bits() })))
+    }
+}
 
 /// Quantised RGBA colour key for bucketing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
