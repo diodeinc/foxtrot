@@ -363,17 +363,24 @@ fn mapped_items_instance_their_representation_at_target_times_inverse_origin() {
     // (axis3 = x).
     // An axis3 printed with round-off noise off X picks the same frame as
     // exactly X, not one flipped by the sign of the noise.
-    for (axes, z, x) in [
+    // `v` is the direction the operator's x axis is taken from: the tilted
+    // axis3 keeps +Y as its reference, like exactly X does.
+    for (axes, z, v) in [
         ("#350,$,#311,$,#351", [0., 0., -1.], [1., 0., 0.]),
         ("$,$,#311,$,#350", [1., 0., 0.], [0., 1., 0.]),
-        ("$,$,#311,$,#352", [1., 0., 0.], [0., 1., 0.]),
+        ("$,$,#311,$,#352", [1., 1e-15, 0.], [0., 1., 0.]),
+        ("$,$,#311,$,#353", [1., 2e-8, 0.], [0., 1., 0.]),
     ] {
         let text = mapped_only(&format!("
             #360=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',$,{});
             #350=DIRECTION('',(1.,0.,0.));
             #351=DIRECTION('',(0.,0.,-1.));
             #352=DIRECTION('',(1.,1.E-15,0.));
+            #353=DIRECTION('',(1.,2.E-8,0.));
         ", axes)).replace("#300=MAPPED_ITEM('',#301,#310);", "#300=MAPPED_ITEM('',#301,#360);");
+        let unit = |a: [f64; 3]| a.map(|c| c / dot(a, a).sqrt());
+        let z = unit(z);
+        let x = unit(std::array::from_fn(|i| v[i] - z[i] * dot(v, z)));
         let target = frame([0., 20., 5.], z, x);
         let (mesh, stats) = triangulate_text(&text);
         assert!(stats.is_complete() && stats.num_faces == 6);
@@ -391,6 +398,23 @@ fn mapped_items_instance_their_representation_at_target_times_inverse_origin() {
     assert_eq!(mesh.verts.len(), plain.verts.len());
     assert_instance(&mesh, &plain, 0, &|p| remap(p, &identity_origin, &target, 1., true),
         &|n| remap(n, &identity_origin, &target, 1., false));
+
+    // An axis along X without a reference direction still has a frame (ISO
+    // first_proj_axis: +Y), as an origin and as a target.
+    let along_x = frame([0., 20., 5.], [1., 0., 0.], [0., 1., 0.]);
+    let x_target = mapped_only("").replace("#310=AXIS2_PLACEMENT_3D('',#311,#312,#313);",
+        "#310=AXIS2_PLACEMENT_3D('',#311,#312,$);");
+    let x_origin = mapped_only("").replace("#300=MAPPED_ITEM('',#301,#310);", "#300=MAPPED_ITEM('',#301,#302);")
+        .replace("#302=AXIS2_PLACEMENT_3D('',#303,#304,#305);", "#302=AXIS2_PLACEMENT_3D('',#311,#312,$);")
+        .replace("#301=REPRESENTATION_MAP(#302,#19);", "#301=REPRESENTATION_MAP(#302,#19);#306=AXIS2_PLACEMENT_3D('',#303,#304,#305);")
+        .replace("#300=MAPPED_ITEM('',#301,#302);", "#300=MAPPED_ITEM('',#301,#306);");
+    for (text, origin, target) in [(x_target, &origin, &along_x), (x_origin, &along_x, &origin)] {
+        let (mesh, stats) = triangulate_text(&text);
+        assert!(stats.is_complete() && stats.num_faces == 6);
+        assert_eq!(mesh.verts.len(), plain.verts.len());
+        assert_instance(&mesh, &plain, 0, &|p| remap(p, origin, target, 1., true),
+            &|n| remap(n, origin, target, 1., false));
+    }
 
     // A relationship between two of the product's own representations does
     // not instance its MAPPED_ITEMs a second time.

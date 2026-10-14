@@ -148,15 +148,19 @@ fn mapping_placement(s: &StepFile, item: RepresentationItem) -> Result<DMat4, Er
         .get(item.0)
         .ok_or(Error::InvalidStepEntity("mapped item placement"))?;
     if let Entity::Axis2Placement3d(a) = e {
-        let (location, axis, ref_direction) = if a.axis.is_some() {
-            axis2_placement_3d(s, item.cast())?
-        } else {
-            // ISO 10303-42 build_axes: the axis defaults to +Z. Mapping
-            // origins are often written as AXIS2_PLACEMENT_3D('',#p,$,$).
-            let ref_direction = a.ref_direction.map(|d| direction(s, d)).transpose()?;
-            let z = DVec3::z();
-            (cartesian_point(s, a.location)?, z, first_proj_axis(z, ref_direction)?)
+        // ISO 10303-42 build_axes. The axis defaults to +Z (mapping origins
+        // are often AXIS2_PLACEMENT_3D('',#p,$,$)), and the reference
+        // direction follows first_proj_axis, so an axis along X without one
+        // still has a frame. `axis2_placement_3d` would collapse it.
+        let axis = match a.axis {
+            Some(d) => direction(s, d)?
+                .try_normalize(0.0)
+                .ok_or(Error::InvalidGeometry("zero axis direction"))?,
+            None => DVec3::z(),
         };
+        let ref_direction = a.ref_direction.map(|d| direction(s, d)).transpose()?;
+        let ref_direction = first_proj_axis(axis, ref_direction)?;
+        let location = cartesian_point(s, a.location)?;
         Ok(Surface::make_affine_transform(
             axis,
             ref_direction,
@@ -174,12 +178,13 @@ fn mapping_placement(s: &StepFile, item: RepresentationItem) -> Result<DMat4, Er
 
 /// ISO 10303-42 `first_proj_axis`: the unit part of `arg` orthogonal to the
 /// unit `z`. Without `arg`, +X is used, or +Y when `z` is along X. The
-/// standard compares `z` with ±X exactly; here, directions printed with
-/// round-off noise (e.g. (1., 1.E-15, 0.)) count as along X too, since
-/// projecting +X onto them leaves only noise and an arbitrary result.
+/// standard compares `z` with ±X exactly, but then a tilt of any size flips
+/// the result. Directions within 1e-6 rad of ±X, which covers round-off
+/// noise from single-precision exporters (e.g. (1., 2.E-8, 0.)), count as
+/// along X too.
 fn first_proj_axis(z: DVec3, arg: Option<DVec3>) -> Result<DVec3, Error> {
     let v = arg.unwrap_or_else(|| {
-        if z.cross(&DVec3::x()).norm() <= 1e-9 { DVec3::y() } else { DVec3::x() }
+        if z.cross(&DVec3::x()).norm() <= 1e-6 { DVec3::y() } else { DVec3::x() }
     });
     (v - z * v.dot(&z))
         .try_normalize(0.0)
