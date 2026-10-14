@@ -59,21 +59,128 @@ struct ShapeGeometry {
     uncertainty: f64,
 }
 
+/// Look up an entity that may be written either on its own or as one
+/// component of a complex entity.
+fn entity_or_component<'a, T: FromEntity<'a>>(e: &'a Entity<'a>) -> Option<&'a T> {
+    T::try_from_entity(e).or_else(|| match e {
+        Entity::ComplexEntity(subs) => subs.iter().find_map(T::try_from_entity),
+        _ => None,
+    })
+}
+
+/// The representation a geometric MAPPED_ITEM instances, and the transform
+/// from that representation's coordinates into the coordinates of the
+/// representation holding the item: `target * origin^-1`.
+fn mapped_item_transform<'a>(
+    s: &'a StepFile,
+    m: &'a MappedItem_<'a>,
+) -> Result<(Representation<'a>, DMat4), Error> {
+    let map = s
+        .0
+        .get(m.mapping_source.0)
+        .and_then(entity_or_component::<RepresentationMap_>)
+        .ok_or(Error::InvalidStepEntity("MappedItem.mapping_source"))?;
+    let origin = mapping_placement(s, map.mapping_origin)?
+        .try_inverse()
+        .ok_or(Error::SingularTransform("mapped item origin"))?;
+    let target = mapping_placement(s, m.mapping_target)?;
+    Ok((map.mapped_representation, target * origin))
+}
+
+/// A MAPPED_ITEM's origin or target as a matrix.
+fn mapping_placement(s: &StepFile, item: RepresentationItem) -> Result<DMat4, Error> {
+    let e = s
+        .0
+        .get(item.0)
+        .ok_or(Error::InvalidStepEntity("mapped item placement"))?;
+    if let Entity::Axis2Placement3d(_) = e {
+        let (location, axis, ref_direction) = axis2_placement_3d(s, item.cast())?;
+        Ok(Surface::make_affine_transform(
+            axis,
+            ref_direction,
+            axis.cross(&ref_direction),
+            location,
+        ))
+    } else if let Some(op) = entity_or_component::<CartesianTransformationOperator3d_>(e) {
+        cartesian_transformation_operator_3d(s, op)
+    } else {
+        Err(Error::InvalidStepEntity(
+            "mapped item placement (expected AXIS2_PLACEMENT_3D or CARTESIAN_TRANSFORMATION_OPERATOR_3D)",
+        ))
+    }
+}
+
+/// ISO 10303-42 `cartesian_transformation_operator_3d`: the axes come from
+/// `base_axis`, so they are orthonormal (possibly left-handed), and `scale`
+/// is uniform.
+fn cartesian_transformation_operator_3d(
+    s: &StepFile,
+    op: &CartesianTransformationOperator3d_,
+) -> Result<DMat4, Error> {
+    let optional = |d: Option<Direction>| d.map(|d| direction(s, d)).transpose();
+    let invalid = || Error::InvalidGeometry("degenerate cartesian transformation operator axes");
+    let z = match optional(op.axis3)? {
+        Some(z) => z.try_normalize(0.0).ok_or_else(invalid)?,
+        None => DVec3::z(),
+    };
+    // first_proj_axis
+    let v = match optional(op.axis1)? {
+        Some(v) => v,
+        None if z.x.abs() == 1.0 && z.y == 0.0 && z.z == 0.0 => DVec3::y(),
+        None => DVec3::x(),
+    };
+    let x = (v - z * v.dot(&z)).try_normalize(0.0).ok_or_else(invalid)?;
+    // second_proj_axis
+    let v = optional(op.axis2)?.unwrap_or_else(DVec3::y);
+    let y = v - z * v.dot(&z);
+    let y = (y - x * y.dot(&x)).try_normalize(0.0).ok_or_else(invalid)?;
+    let scale = op.scale.unwrap_or(1.0);
+    if !(scale.is_finite() && scale > 0.0) {
+        return Err(Error::InvalidGeometry(
+            "cartesian transformation operator scale must be positive",
+        ));
+    }
+    let origin = cartesian_point(s, op.local_origin)?;
+    Ok(Surface::make_affine_transform(
+        z * scale,
+        x * scale,
+        y * scale,
+        origin,
+    ))
+}
+
 fn collect_shape_instances<'a>(
     s: &'a StepFile,
     rep_instances: &HashMap<Representation<'a>, Vec<DMat4>>,
     shape_rep_relationship: &HashMap<Representation<'a>, Vec<Representation<'a>>>,
 ) -> Vec<(RepresentationItem<'a>, ShapeGeometry)> {
+    // Each entry carries the representations it was reached through, so a
+    // MAPPED_ITEM that (indirectly) instances its own representation is
+    // reported instead of expanded forever.
     let mut todo: Vec<_> = rep_instances
         .iter()
-        .flat_map(|(rep, mats)| mats.iter().copied().map(move |mat| (*rep, mat)))
+        .flat_map(|(rep, mats)| mats.iter().copied().map(move |mat| (*rep, mat, Vec::new())))
         .collect();
     let mut to_mesh: HashMap<RepresentationItem<'a>, ShapeGeometry> = HashMap::new();
+    let mut found_mapped_items = false;
 
-    while let Some((id, mat)) = todo.pop() {
+    while let Some((id, mat, path)) = todo.pop() {
+        if path.contains(&id) {
+            warn!(
+                "Skipping representation #{}: it instances itself through MAPPED_ITEMs (via {:?})",
+                id.0,
+                path.iter().map(|r: &Representation| r.0).collect::<Vec<_>>()
+            );
+            continue;
+        }
+        let child_path = || {
+            let mut p = path.clone();
+            p.push(id);
+            p
+        };
         if let Some(children) = shape_rep_relationship.get(&id) {
             for child in children {
-                todo.push((*child, mat));
+                todo.push((*child, mat, child_path()));
             }
         }
         // Bind this transform to the RepresentationItem, which is
@@ -90,7 +197,8 @@ fn collect_shape_instances<'a>(
         let uncertainty = representation_uncertainty(s, context);
 
         for m in items.iter() {
-            match &s[*m] {
+            let e = &s[*m];
+            match e {
                 Entity::ManifoldSolidBrep(_)
                 | Entity::BrepWithVoids(_)
                 | Entity::ShellBasedSurfaceModel(_) => {
@@ -102,13 +210,32 @@ fn collect_shape_instances<'a>(
                     shape.uncertainty = shape.uncertainty.min(uncertainty);
                     shape.instances.push(mat);
                 }
-                Entity::Axis2Placement3d(_) | Entity::MappedItem(_) => (),
-                e => warn!("Skipping {:?}", e),
+                Entity::Axis2Placement3d(_) => (),
+                // A MAPPED_ITEM in a shape representation is geometry: an
+                // instance of another representation. MAPPED_ITEMs in
+                // presentation models (e.g. saved views) are never reached.
+                _ => match entity_or_component::<MappedItem_>(e) {
+                    Some(mapped) => {
+                        found_mapped_items = true;
+                        match mapped_item_transform(s, mapped) {
+                            Ok((rep, t)) => todo.push((rep, mat * t, child_path())),
+                            Err(err) => warn!(
+                                "Skipping MAPPED_ITEM #{} in representation #{}: {}",
+                                m.0, id.0, err
+                            ),
+                        }
+                    }
+                    None => warn!("Skipping {:?}", e),
+                },
             }
         }
     }
 
-    if to_mesh.is_empty() {
+    // Meshing every solid in place would stack mapped instances at their
+    // source coordinates, so only fall back without any mapped geometry.
+    if to_mesh.is_empty() && found_mapped_items {
+        warn!("No MAPPED_ITEM in the shape representations could be resolved to geometry");
+    } else if to_mesh.is_empty() {
         s.0.iter()
             .enumerate()
             .filter(|(_i, e)| match e {
@@ -522,35 +649,41 @@ pub(crate) fn triangulate_with_materials(s: &StepFile) -> (Mesh, Stats, Vec<(usi
     // parent→child direction in practice: e.g. Inventor/PDElib files often
     // write `SHAPE_REPRESENTATION_RELATIONSHIP(...,#advanced_brep,#shape)`.
     // Build the traversal edge from the non-mesh representation to the
-    // mesh-bearing representation, regardless of attribute order.
-    let representation_has_mesh_items = |rep: Id<_>| -> bool {
+    // mesh-bearing representation, regardless of attribute order. A
+    // representation holding only MAPPED_ITEMs is geometry too, but ranks
+    // below one holding solids, so it never captures an edge to those.
+    let representation_mesh_rank = |rep: Id<_>| -> u8 {
         let items = match &s[rep] {
             Entity::AdvancedBrepShapeRepresentation(b) => &b.items,
             Entity::ShapeRepresentation(b) => &b.items,
             Entity::ManifoldSurfaceShapeRepresentation(b) => &b.items,
-            _ => return false,
+            _ => return 0,
         };
-        items.iter().any(|m| {
+        let solids = items.iter().any(|m| {
             matches!(
                 &s[*m],
                 Entity::ManifoldSolidBrep(_)
                     | Entity::BrepWithVoids(_)
                     | Entity::ShellBasedSurfaceModel(_)
             )
-        })
+        });
+        if solids {
+            2
+        } else if items.iter().any(|m| entity_or_component::<MappedItem_>(&s[*m]).is_some()) {
+            1
+        } else {
+            0
+        }
     };
 
     let mut shape_rep_relationship: HashMap<Id<_>, Vec<Id<_>>> = HashMap::new();
     for (r1, r2) in filter_entities(s, |_, e| {
         ShapeRepresentationRelationship_::try_from_entity(e).map(|e| (e.rep_1, e.rep_2))
     }) {
-        match (
-            representation_has_mesh_items(r1),
-            representation_has_mesh_items(r2),
-        ) {
-            (true, false) => shape_rep_relationship.entry(r2).or_default().push(r1),
-            (false, true) => shape_rep_relationship.entry(r1).or_default().push(r2),
-            _ => continue,
+        match representation_mesh_rank(r1).cmp(&representation_mesh_rank(r2)) {
+            std::cmp::Ordering::Greater => shape_rep_relationship.entry(r2).or_default().push(r1),
+            std::cmp::Ordering::Less => shape_rep_relationship.entry(r1).or_default().push(r2),
+            std::cmp::Ordering::Equal => continue,
         };
     }
 
@@ -629,13 +762,14 @@ pub(crate) fn triangulate_with_materials(s: &StepFile) -> (Mesh, Stats, Vec<(usi
             let m_end = materials.len();
             crate::timing::time("shape:instance_copies", || {
                 for mat in &mats[1..] {
+                    let (normal_scale, mirrored) = instance_handedness(mat);
                     for v in v_start..v_end {
                         let p = mesh.verts[v].pos;
                         let p_h = DVec4::new(p.x, p.y, p.z, 1.0);
                         let pos = (mat * p_h).xyz();
 
                         let n = mesh.verts[v].norm;
-                        let norm = (mat * glm::vec3_to_vec4(&n)).xyz();
+                        let norm = (mat * glm::vec3_to_vec4(&n)).xyz() * normal_scale;
                         let color = mesh.verts[v].color;
 
                         mesh.verts.push(mesh::Vertex { pos, norm, color });
@@ -644,6 +778,9 @@ pub(crate) fn triangulate_with_materials(s: &StepFile) -> (Mesh, Stats, Vec<(usi
                     for t in t_start..t_end {
                         let mut tri = mesh.triangles[t];
                         tri.verts.add_scalar_mut(offset as u32);
+                        if mirrored {
+                            tri.verts.swap_rows(1, 2);
+                        }
                         mesh.triangles.push(tri);
                     }
                     materials.extend_from_within(m_start..m_end);
@@ -652,13 +789,19 @@ pub(crate) fn triangulate_with_materials(s: &StepFile) -> (Mesh, Stats, Vec<(usi
                 // Now that we've built all of the other copies of the mesh,
                 // re-use the original mesh and apply the first transform
                 let mat = mats[0];
+                let (normal_scale, mirrored) = instance_handedness(&mat);
                 for v in v_start..v_end {
                     let p = mesh.verts[v].pos;
                     let p_h = DVec4::new(p.x, p.y, p.z, 1.0);
                     mesh.verts[v].pos = (mat * p_h).xyz();
 
                     let n = mesh.verts[v].norm;
-                    mesh.verts[v].norm = (mat * glm::vec3_to_vec4(&n)).xyz();
+                    mesh.verts[v].norm = (mat * glm::vec3_to_vec4(&n)).xyz() * normal_scale;
+                }
+                if mirrored {
+                    for t in t_start..t_end {
+                        mesh.triangles[t].verts.swap_rows(1, 2);
+                    }
                 }
             });
             (mesh, stats, materials)
@@ -703,6 +846,19 @@ pub(crate) fn triangulate_with_materials(s: &StepFile) -> (Mesh, Stats, Vec<(usi
         );
     }
     (mesh, stats, materials)
+}
+
+/// Instance transforms are similarities: rotations and translations, plus
+/// the uniform scale and reflection a CARTESIAN_TRANSFORMATION_OPERATOR can
+/// add. Returns the factor that keeps transformed normals unit length, and
+/// whether the instance is mirrored, which reverses its triangles' winding.
+fn instance_handedness(mat: &DMat4) -> (f64, bool) {
+    let det = glm::mat4_to_mat3(mat).determinant();
+    let scale = det.abs().cbrt();
+    // Rigid transforms, including placements whose directions are unit
+    // only to print precision, keep their normals exactly as before.
+    let normal_scale = if (scale - 1.0).abs() > 1e-5 { 1.0 / scale } else { 1.0 };
+    (normal_scale, det < 0.0)
 }
 
 fn item_defined_transformation(
