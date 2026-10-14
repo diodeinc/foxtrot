@@ -147,8 +147,16 @@ fn mapping_placement(s: &StepFile, item: RepresentationItem) -> Result<DMat4, Er
         .0
         .get(item.0)
         .ok_or(Error::InvalidStepEntity("mapped item placement"))?;
-    if let Entity::Axis2Placement3d(_) = e {
-        let (location, axis, ref_direction) = axis2_placement_3d(s, item.cast())?;
+    if let Entity::Axis2Placement3d(a) = e {
+        let (location, axis, ref_direction) = if a.axis.is_some() {
+            axis2_placement_3d(s, item.cast())?
+        } else {
+            // ISO 10303-42 build_axes: the axis defaults to +Z. Mapping
+            // origins are often written as AXIS2_PLACEMENT_3D('',#p,$,$).
+            let ref_direction = a.ref_direction.map(|d| direction(s, d)).transpose()?;
+            let z = DVec3::z();
+            (cartesian_point(s, a.location)?, z, first_proj_axis(z, ref_direction)?)
+        };
         Ok(Surface::make_affine_transform(
             axis,
             ref_direction,
@@ -164,6 +172,20 @@ fn mapping_placement(s: &StepFile, item: RepresentationItem) -> Result<DMat4, Er
     }
 }
 
+/// ISO 10303-42 `first_proj_axis`: the unit part of `arg` orthogonal to the
+/// unit `z`. Without `arg`, +X is used, or +Y when `z` is along X. The
+/// standard compares `z` with ±X exactly; here, directions printed with
+/// round-off noise (e.g. (1., 1.E-15, 0.)) count as along X too, since
+/// projecting +X onto them leaves only noise and an arbitrary result.
+fn first_proj_axis(z: DVec3, arg: Option<DVec3>) -> Result<DVec3, Error> {
+    let v = arg.unwrap_or_else(|| {
+        if z.cross(&DVec3::x()).norm() <= 1e-9 { DVec3::y() } else { DVec3::x() }
+    });
+    (v - z * v.dot(&z))
+        .try_normalize(0.0)
+        .ok_or(Error::InvalidGeometry("reference direction is parallel to the axis"))
+}
+
 /// ISO 10303-42 `cartesian_transformation_operator_3d`: the axes come from
 /// `base_axis`, so they are orthonormal (possibly left-handed), and `scale`
 /// is uniform.
@@ -177,13 +199,7 @@ fn cartesian_transformation_operator_3d(
         Some(z) => z.try_normalize(0.0).ok_or_else(invalid)?,
         None => DVec3::z(),
     };
-    // first_proj_axis
-    let v = match optional(op.axis1)? {
-        Some(v) => v,
-        None if z.x.abs() == 1.0 && z.y == 0.0 && z.z == 0.0 => DVec3::y(),
-        None => DVec3::x(),
-    };
-    let x = (v - z * v.dot(&z)).try_normalize(0.0).ok_or_else(invalid)?;
+    let x = first_proj_axis(z, optional(op.axis1)?)?;
     // second_proj_axis. Without axis2, ISO 10303-42 projects (0, 1, 0),
     // which mirrors (e.g. axis3 = -z) or degenerates (axis3 = x) for
     // operators exporters mean as rotations. Complete a right-handed frame
@@ -738,26 +754,35 @@ pub(crate) fn triangulate_with_materials(s: &StepFile) -> (Mesh, Stats, Vec<(usi
     for (r1, r2) in filter_entities(s, |_, e| {
         ShapeRepresentationRelationship_::try_from_entity(e).map(|e| (e.rep_1, e.rep_2))
     }) {
-        let rank = representation_mesh_rank(r1);
-        match rank.cmp(&representation_mesh_rank(r2)) {
-            std::cmp::Ordering::Greater => shape_rep_relationship.entry(r2).or_default().push(r1),
-            std::cmp::Ordering::Less => shape_rep_relationship.entry(r1).or_default().push(r2),
+        let (rank1, rank2) = (representation_mesh_rank(r1), representation_mesh_rank(r2));
+        let (product1, product2) = (rep_instances.contains_key(&r1), rep_instances.contains_key(&r2));
+        let (from, to) = match rank1.cmp(&rank2) {
+            std::cmp::Ordering::Greater => (r2, r1),
+            std::cmp::Ordering::Less => (r1, r2),
             // Two representations of MAPPED_ITEMs: the product's own
             // representation leads to the other one.
-            std::cmp::Ordering::Equal if rank == 1 => {
-                match (rep_instances.contains_key(&r1), rep_instances.contains_key(&r2)) {
-                    (true, false) => shape_rep_relationship.entry(r1).or_default().push(r2),
-                    (false, true) => shape_rep_relationship.entry(r2).or_default().push(r1),
-                    (true, true) => (),
-                    (false, false) => warn!(
+            std::cmp::Ordering::Equal if rank1 == 1 => match (product1, product2) {
+                (true, false) => (r1, r2),
+                (false, true) => (r2, r1),
+                (true, true) => continue,
+                (false, false) => {
+                    warn!(
                         "Skipping SHAPE_REPRESENTATION_RELATIONSHIP between #{} and #{}: \
                          both hold only MAPPED_ITEMs and neither is a product's representation",
                         r1.0, r2.0
-                    ),
+                    );
+                    continue;
                 }
-            }
+            },
             std::cmp::Ordering::Equal => continue,
         };
+        // A product's own representation of MAPPED_ITEMs is already
+        // traversed from that product; linking it too would instance it
+        // twice. (Links to solid-bearing representations are unchanged.)
+        if rank1.max(rank2) == 1 && product1 && product2 {
+            continue;
+        }
+        shape_rep_relationship.entry(from).or_default().push(to);
     }
     let to_mesh = collect_shape_instances(s, &rep_instances, &shape_rep_relationship);
 

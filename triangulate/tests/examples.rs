@@ -361,14 +361,18 @@ fn mapped_items_instance_their_representation_at_target_times_inverse_origin() {
     // Without axis2, an operator target completes a right-handed frame:
     // these are rotations, not a mirror (axis3 = -z) or a degenerate frame
     // (axis3 = x).
+    // An axis3 printed with round-off noise off X picks the same frame as
+    // exactly X, not one flipped by the sign of the noise.
     for (axes, z, x) in [
         ("#350,$,#311,$,#351", [0., 0., -1.], [1., 0., 0.]),
         ("$,$,#311,$,#350", [1., 0., 0.], [0., 1., 0.]),
+        ("$,$,#311,$,#352", [1., 0., 0.], [0., 1., 0.]),
     ] {
         let text = mapped_only(&format!("
             #360=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',$,{});
             #350=DIRECTION('',(1.,0.,0.));
             #351=DIRECTION('',(0.,0.,-1.));
+            #352=DIRECTION('',(1.,1.E-15,0.));
         ", axes)).replace("#300=MAPPED_ITEM('',#301,#310);", "#300=MAPPED_ITEM('',#301,#360);");
         let target = frame([0., 20., 5.], z, x);
         let (mesh, stats) = triangulate_text(&text);
@@ -377,6 +381,31 @@ fn mapped_items_instance_their_representation_at_target_times_inverse_origin() {
         assert_instance(&mesh, &plain, 0,
             &|p| remap(p, &origin, &target, 1., true), &|n| remap(n, &origin, &target, 1., false));
     }
+
+    // A placement may omit its axis, which is then +Z (ISO 10303-42).
+    let no_axis = mapped_only("").replace("#302=AXIS2_PLACEMENT_3D('',#303,#304,#305);",
+        "#302=AXIS2_PLACEMENT_3D('',#303,$,$);");
+    let identity_origin = frame([10., 0., 0.], [0., 0., 1.], [1., 0., 0.]);
+    let (mesh, stats) = triangulate_text(&no_axis);
+    assert!(stats.is_complete() && stats.num_faces == 6);
+    assert_eq!(mesh.verts.len(), plain.verts.len());
+    assert_instance(&mesh, &plain, 0, &|p| remap(p, &identity_origin, &target, 1., true),
+        &|n| remap(n, &identity_origin, &target, 1., false));
+
+    // A relationship between two of the product's own representations does
+    // not instance its MAPPED_ITEMs a second time.
+    let two_reps = add_entities(
+        &CUBOID.replace("#18=SHAPE_REPRESENTATION_RELATIONSHIP('','',#123,#19);", ""),
+        &format!("{}
+            #390=SHAPE_REPRESENTATION('',(#300),#185);
+            #391=SHAPE_DEFINITION_REPRESENTATION(#190,#390);
+            #392=SHAPE_REPRESENTATION_RELATIONSHIP('','',#123,#390);
+        ", MAPPED),
+    );
+    let (mesh, stats) = triangulate_text(&two_reps);
+    assert!(stats.is_complete() && stats.num_faces == 6);
+    assert_eq!(mesh.verts.len(), plain.verts.len());
+    assert_instance(&mesh, &plain, 0, &f, &g);
 
     // A product representation leads to a related representation that also
     // holds only MAPPED_ITEMs, whichever way the relationship is written.
