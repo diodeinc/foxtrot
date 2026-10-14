@@ -219,3 +219,328 @@ fn same_rgb_faces_retain_distinct_materials_and_override_the_solid() {
         diffuse_strength: Some(0.4), ..base
     }));
 }
+
+/// A right-handed AXIS2_PLACEMENT_3D frame in millimetres: location, then
+/// its x (ref_direction), y = z × x, and z (axis) directions.
+type Frame = [[f64; 3]; 4];
+
+fn frame(location: [f64; 3], z: [f64; 3], x: [f64; 3]) -> Frame {
+    let y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
+    [location, x, y, z]
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Map a point given in `origin`'s world coordinates to the point with the
+/// same local coordinates in `target`, which may also scale (CTO).
+fn remap(p: [f64; 3], origin: &Frame, target: &Frame, scale: f64, is_point: bool) -> [f64; 3] {
+    let d = if is_point { std::array::from_fn(|i| p[i] - origin[0][i]) } else { p };
+    let local = [dot(d, origin[1]), dot(d, origin[2]), dot(d, origin[3])];
+    std::array::from_fn(|i| {
+        let t = if is_point { target[0][i] } else { 0. };
+        t + scale * (local[0] * target[1][i] + local[1] * target[2][i] + local[2] * target[3][i])
+    })
+}
+
+fn xyz(v: &triangulate::mesh::Vertex) -> ([f64; 3], [f64; 3]) {
+    ([v.pos.x, v.pos.y, v.pos.z], [v.norm.x, v.norm.y, v.norm.z])
+}
+
+fn close(a: [f64; 3], b: [f64; 3], tol: f64) -> bool {
+    (0..3).all(|i| (a[i] - b[i]).abs() <= tol)
+}
+
+fn triangulate_text(text: &str) -> (triangulate::mesh::Mesh, triangulate::stats::Stats) {
+    let flat = StepFile::strip_flatten(text.as_bytes()).unwrap();
+    let step = StepFile::parse(&flat).unwrap();
+    triangulate(&step)
+}
+
+/// Every vertex of `mesh[range]` is the matching cuboid vertex taken
+/// through `f` (points) and `g` (normals), and its triangles face outward.
+fn assert_instance(
+    mesh: &triangulate::mesh::Mesh,
+    plain: &triangulate::mesh::Mesh,
+    copy: usize,
+    f: &dyn Fn([f64; 3]) -> [f64; 3],
+    g: &dyn Fn([f64; 3]) -> [f64; 3],
+) {
+    let n = plain.verts.len();
+    for (i, v) in plain.verts.iter().enumerate() {
+        let (p, norm) = xyz(v);
+        let (q, qn) = xyz(&mesh.verts[copy * n + i]);
+        assert!(close(q, f(p), 1e-9), "vertex {}: {:?} != {:?}", i, q, f(p));
+        assert!(close(qn, g(norm), 1e-12), "normal {}: {:?} != {:?}", i, qn, g(norm));
+    }
+    let t = plain.triangles.len();
+    for tri in &mesh.triangles[copy * t..(copy + 1) * t] {
+        let [a, b, c] = [tri.verts.x, tri.verts.y, tri.verts.z].map(|i| xyz(&mesh.verts[i as usize]));
+        let (u, w) = ([0, 1, 2].map(|k| b.0[k] - a.0[k]), [0, 1, 2].map(|k| c.0[k] - a.0[k]));
+        let cross = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+        assert!(dot(cross, a.1) > 0., "triangle winding disagrees with its normal");
+    }
+}
+
+/// The cuboid's solid, ABSR #19, reached only through MAPPED_ITEM #300 in
+/// the product's SHAPE_REPRESENTATION #123. Origin and target are both
+/// rotated and translated, so any other composition order lands elsewhere.
+const MAPPED: &str = "
+    #300=MAPPED_ITEM('',#301,#310);
+    #301=REPRESENTATION_MAP(#302,#19);
+    #302=AXIS2_PLACEMENT_3D('',#303,#304,#305);
+    #303=CARTESIAN_POINT('',(0.01,0.,0.));
+    #304=DIRECTION('',(0.,0.,1.));
+    #305=DIRECTION('',(0.,1.,0.));
+    #310=AXIS2_PLACEMENT_3D('',#311,#312,#313);
+    #311=CARTESIAN_POINT('',(0.,0.02,0.005));
+    #312=DIRECTION('',(1.,0.,0.));
+    #313=DIRECTION('',(0.,1.,0.));
+";
+
+fn mapped_only(extra: &str) -> String {
+    let text = CUBOID
+        .replace("#18=SHAPE_REPRESENTATION_RELATIONSHIP('','',#123,#19);", "")
+        .replace("#123=SHAPE_REPRESENTATION('Part 1',(#124),#185);",
+            "#123=SHAPE_REPRESENTATION('Part 1',(#124,#300),#185);");
+    add_entities(&text, &format!("{}{}", MAPPED, extra))
+}
+
+#[test]
+fn mapped_items_instance_their_representation_at_target_times_inverse_origin() {
+    let (plain, _) = triangulate_text(CUBOID);
+    // The model is in metres; the mesh is in millimetres.
+    let origin = frame([10., 0., 0.], [0., 0., 1.], [0., 1., 0.]);
+    let target = frame([0., 20., 5.], [1., 0., 0.], [0., 1., 0.]);
+    let f = |p| remap(p, &origin, &target, 1., true);
+    let g = |n| remap(n, &origin, &target, 1., false);
+
+    // Only mapped geometry: one instance at the target, none stacked at the origin.
+    let (mesh, stats) = triangulate_text(&mapped_only(""));
+    assert!(stats.is_complete() && stats.num_faces == 6);
+    assert_eq!(mesh.verts.len(), plain.verts.len());
+    assert_instance(&mesh, &plain, 0, &f, &g);
+
+    // The coloured path shares the traversal and keeps the solid's style.
+    let (colored, stats) = tessellate_step_bytes(mapped_only("").as_bytes()).unwrap();
+    assert!(stats.is_complete() && stats.num_faces == 6);
+    let reference = tessellate(CUBOID);
+    assert_eq!(colored.submeshes.len(), 1);
+    assert_eq!(colored.submeshes[0].color, reference.submeshes[0].color);
+    assert_eq!(colored.submeshes[0].positions.len(), reference.submeshes[0].positions.len());
+    for (q, p) in colored.submeshes[0].positions.iter().zip(&reference.submeshes[0].positions) {
+        let expected = f(p.map(f64::from));
+        assert!(close(q.map(f64::from), expected, 1e-4), "{:?} != {:?}", q, expected);
+    }
+
+    // Nested: #19 is reached through a second, inner MAPPED_ITEM whose target
+    // is a CARTESIAN_TRANSFORMATION_OPERATOR_3D that scales by 0.5 and is
+    // left-handed (axis3 = -(axis1 × axis2)), i.e. mirrored.
+    let nested = mapped_only("
+        #320=SHAPE_REPRESENTATION('',(#321),#185);
+        #321=MAPPED_ITEM('',#322,#330);
+        #322=REPRESENTATION_MAP(#323,#19);
+        #323=AXIS2_PLACEMENT_3D('',#324,#313,#304);
+        #324=CARTESIAN_POINT('',(0.,0.,0.002));
+        #330=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',$,#331,#332,#333,0.5,#334);
+        #331=DIRECTION('',(0.,0.,1.));
+        #332=DIRECTION('',(1.,0.,0.));
+        #333=CARTESIAN_POINT('',(0.003,-0.004,0.006));
+        #334=DIRECTION('',(0.,-1.,0.));
+    ").replace("#301=REPRESENTATION_MAP(#302,#19);", "#301=REPRESENTATION_MAP(#302,#320);");
+    let inner_origin = frame([0., 0., 2.], [0., 1., 0.], [0., 0., 1.]);
+    let inner_target: Frame = [[3., -4., 6.], [0., 0., 1.], [1., 0., 0.], [0., -1., 0.]];
+    let f2 = |p| f(remap(p, &inner_origin, &inner_target, 0.5, true));
+    let g2 = |n| g(remap(n, &inner_origin, &inner_target, 1., false));
+    let (mesh, stats) = triangulate_text(&nested);
+    assert!(stats.is_complete() && stats.num_faces == 6);
+    assert_eq!(mesh.verts.len(), plain.verts.len());
+    assert_instance(&mesh, &plain, 0, &f2, &g2);
+
+    // Without axis2, an operator target completes a right-handed frame:
+    // these are rotations, not a mirror (axis3 = -z) or a degenerate frame
+    // (axis3 = x).
+    // An axis3 printed with round-off noise off X picks the same frame as
+    // exactly X, not one flipped by the sign of the noise.
+    // `v` is the direction the operator's x axis is taken from: the tilted
+    // axis3 keeps +Y as its reference, like exactly X does.
+    for (axes, z, v) in [
+        ("#350,$,#311,$,#351", [0., 0., -1.], [1., 0., 0.]),
+        ("$,$,#311,$,#350", [1., 0., 0.], [0., 1., 0.]),
+        ("$,$,#311,$,#352", [1., 1e-15, 0.], [0., 1., 0.]),
+        ("$,$,#311,$,#353", [1., 2e-8, 0.], [0., 1., 0.]),
+    ] {
+        let text = mapped_only(&format!("
+            #360=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',$,{});
+            #350=DIRECTION('',(1.,0.,0.));
+            #351=DIRECTION('',(0.,0.,-1.));
+            #352=DIRECTION('',(1.,1.E-15,0.));
+            #353=DIRECTION('',(1.,2.E-8,0.));
+        ", axes)).replace("#300=MAPPED_ITEM('',#301,#310);", "#300=MAPPED_ITEM('',#301,#360);");
+        let unit = |a: [f64; 3]| a.map(|c| c / dot(a, a).sqrt());
+        let z = unit(z);
+        let x = unit(std::array::from_fn(|i| v[i] - z[i] * dot(v, z)));
+        let target = frame([0., 20., 5.], z, x);
+        let (mesh, stats) = triangulate_text(&text);
+        assert!(stats.is_complete() && stats.num_faces == 6);
+        assert_eq!(mesh.verts.len(), plain.verts.len());
+        assert_instance(&mesh, &plain, 0,
+            &|p| remap(p, &origin, &target, 1., true), &|n| remap(n, &origin, &target, 1., false));
+    }
+
+    // A placement may omit its axis, which is then +Z (ISO 10303-42).
+    let no_axis = mapped_only("").replace("#302=AXIS2_PLACEMENT_3D('',#303,#304,#305);",
+        "#302=AXIS2_PLACEMENT_3D('',#303,$,$);");
+    let identity_origin = frame([10., 0., 0.], [0., 0., 1.], [1., 0., 0.]);
+    let (mesh, stats) = triangulate_text(&no_axis);
+    assert!(stats.is_complete() && stats.num_faces == 6);
+    assert_eq!(mesh.verts.len(), plain.verts.len());
+    assert_instance(&mesh, &plain, 0, &|p| remap(p, &identity_origin, &target, 1., true),
+        &|n| remap(n, &identity_origin, &target, 1., false));
+
+    // An axis along X without a reference direction still has a frame (ISO
+    // first_proj_axis: +Y), as an origin and as a target.
+    let along_x = frame([0., 20., 5.], [1., 0., 0.], [0., 1., 0.]);
+    let x_target = mapped_only("").replace("#310=AXIS2_PLACEMENT_3D('',#311,#312,#313);",
+        "#310=AXIS2_PLACEMENT_3D('',#311,#312,$);");
+    let x_origin = mapped_only("").replace("#300=MAPPED_ITEM('',#301,#310);", "#300=MAPPED_ITEM('',#301,#302);")
+        .replace("#302=AXIS2_PLACEMENT_3D('',#303,#304,#305);", "#302=AXIS2_PLACEMENT_3D('',#311,#312,$);")
+        .replace("#301=REPRESENTATION_MAP(#302,#19);", "#301=REPRESENTATION_MAP(#302,#19);#306=AXIS2_PLACEMENT_3D('',#303,#304,#305);")
+        .replace("#300=MAPPED_ITEM('',#301,#302);", "#300=MAPPED_ITEM('',#301,#306);");
+    for (text, origin, target) in [(x_target, &origin, &along_x), (x_origin, &along_x, &origin)] {
+        let (mesh, stats) = triangulate_text(&text);
+        assert!(stats.is_complete() && stats.num_faces == 6);
+        assert_eq!(mesh.verts.len(), plain.verts.len());
+        assert_instance(&mesh, &plain, 0, &|p| remap(p, origin, target, 1., true),
+            &|n| remap(n, origin, target, 1., false));
+    }
+
+    // A relationship between two of the product's own representations does
+    // not instance its MAPPED_ITEMs a second time.
+    let two_reps = add_entities(
+        &CUBOID.replace("#18=SHAPE_REPRESENTATION_RELATIONSHIP('','',#123,#19);", ""),
+        &format!("{}
+            #390=SHAPE_REPRESENTATION('',(#300),#185);
+            #391=SHAPE_DEFINITION_REPRESENTATION(#190,#390);
+            #392=SHAPE_REPRESENTATION_RELATIONSHIP('','',#123,#390);
+        ", MAPPED),
+    );
+    let (mesh, stats) = triangulate_text(&two_reps);
+    assert!(stats.is_complete() && stats.num_faces == 6);
+    assert_eq!(mesh.verts.len(), plain.verts.len());
+    assert_instance(&mesh, &plain, 0, &f, &g);
+
+    // A product representation leads to a related representation that also
+    // holds only MAPPED_ITEMs, whichever way the relationship is written.
+    let linked = mapped_only("
+        #370=SHAPE_REPRESENTATION('',(#371),#185);
+        #371=MAPPED_ITEM('',#301,#310);
+        #372=SHAPE_REPRESENTATION_RELATIONSHIP('','',#370,#123);
+    ");
+    let (mesh, stats) = triangulate_text(&linked);
+    assert!(stats.is_complete() && stats.num_faces == 6);
+    assert_eq!(mesh.verts.len(), 2 * plain.verts.len());
+    assert_instance(&mesh, &plain, 0, &f, &g);
+    assert_instance(&mesh, &plain, 1, &f, &g);
+
+    // A solid instanced only at an unreadable placement is skipped, not
+    // stacked at its untransformed position.
+    let unresolved = mapped_only("").replace("#300=MAPPED_ITEM('',#301,#310);", "#300=MAPPED_ITEM('',#301,#311);");
+    let (mesh, stats) = triangulate_text(&unresolved);
+    assert_eq!((mesh.verts.len(), stats.num_faces), (0, 0));
+
+    // A MAPPED_ITEM of non-mesh geometry leaves the fallback for solids the
+    // product structure does not reach.
+    let wireframe = mapped_only("
+        #380=GEOMETRICALLY_BOUNDED_WIREFRAME_SHAPE_REPRESENTATION('',(#302),#185);
+    ").replace("#301=REPRESENTATION_MAP(#302,#19);", "#301=REPRESENTATION_MAP(#302,#380);");
+    let (mesh, stats) = triangulate_text(&wireframe);
+    assert!(stats.is_complete() && stats.num_faces == 6);
+    assert_eq!(mesh.verts.len(), plain.verts.len());
+    assert_instance(&mesh, &plain, 0, &|p| p, &|n| n);
+}
+
+#[test]
+fn mapped_instances_add_to_direct_bodies_and_cycles_terminate() {
+    let (plain, _) = triangulate_text(CUBOID);
+    let origin = frame([10., 0., 0.], [0., 0., 1.], [0., 1., 0.]);
+    let target = frame([0., 20., 5.], [1., 0., 0.], [0., 1., 0.]);
+    let f = |p| remap(p, &origin, &target, 1., true);
+    let g = |n| remap(n, &origin, &target, 1., false);
+
+    // #19, reached through the SHAPE_REPRESENTATION_RELATIONSHIP, holds the
+    // solid directly and maps another representation of the same solid.
+    let mixed = add_entities(
+        &CUBOID.replace("#19=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#121),#185);",
+            "#19=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#121,#300),#185);"),
+        &format!("{}#320=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#121),#185);", MAPPED)
+            .replace("#301=REPRESENTATION_MAP(#302,#19);", "#301=REPRESENTATION_MAP(#302,#320);"),
+    );
+    // #320 also maps #19, which maps #320 again.
+    let cyclic = mixed
+        .replace("#320=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#121),#185);",
+            "#320=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#121,#340),#185);
+             #340=MAPPED_ITEM('',#341,#310);#341=REPRESENTATION_MAP(#302,#19);");
+    for text in [mixed, cyclic] {
+        let (mesh, stats) = triangulate_text(&text);
+        assert!(stats.is_complete() && stats.num_faces == 6);
+        assert_eq!(mesh.verts.len(), 2 * plain.verts.len());
+        // Instances are ordered by their matrices, not by discovery.
+        let identity = |p| p;
+        let mapped_first = close(xyz(&mesh.verts[0]).0, f(xyz(&plain.verts[0]).0), 1e-9);
+        let (first, second): (&dyn Fn(_) -> _, &dyn Fn(_) -> _) =
+            if mapped_first { (&f, &identity) } else { (&identity, &f) };
+        let (first_n, second_n): (&dyn Fn(_) -> _, &dyn Fn(_) -> _) =
+            if mapped_first { (&g, &identity) } else { (&identity, &g) };
+        assert_instance(&mesh, &plain, 0, first, first_n);
+        assert_instance(&mesh, &plain, 1, second, second_n);
+    }
+}
+
+#[test]
+fn presentation_mapped_items_do_not_change_the_mesh() {
+    // Creo writes saved views as MAPPED_ITEMs of the part's representation
+    // in draughting and presentation models; those are not geometry.
+    let views = add_entities(CUBOID, &format!("{}
+        #400=DRAUGHTING_MODEL('',(#300),#185);
+        #401=PRESENTATION_VIEW('',(#402),#185);
+        #402=MAPPED_ITEM('',#403,#310);
+        #403=REPRESENTATION_MAP(#302,#123);
+        #404=PRESENTATION_AREA('',(#405),#185);
+        #405=MAPPED_ITEM('',#406,#311);
+        #406=REPRESENTATION_MAP(#311,#401);
+    ", MAPPED));
+    let (plain, _) = triangulate_text(CUBOID);
+    let (mesh, stats) = triangulate_text(&views);
+    assert!(stats.is_complete() && stats.num_faces == 6);
+    assert_eq!(mesh.verts.len(), plain.verts.len());
+    assert_instance(&mesh, &plain, 0, &|p| p, &|n| n);
+    assert_eq!(geometry(&tessellate(&views)), geometry(&tessellate(CUBOID)));
+}
+
+#[test]
+fn scaled_mapped_instances_are_meshed_to_the_same_physical_tolerance() {
+    // cube_hole's solid has a cylindrical hole: chords that are within
+    // tolerance at scale 1 deviate ten times as far once scaled by 10.
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/cube_hole.step"),
+    )
+    .unwrap();
+    let triangles = |scale: &str| {
+        let text = source
+            .replace("#18=SHAPE_REPRESENTATION_RELATIONSHIP('','',#143,#19);", "")
+            .replace("#143=SHAPE_REPRESENTATION('Part 1',(#144),#219);",
+                "#143=SHAPE_REPRESENTATION('Part 1',(#144,#900),#219);");
+        let text = add_entities(&text, &format!("
+            #900=MAPPED_ITEM('',#901,#902);
+            #901=REPRESENTATION_MAP(#144,#19);
+            #902=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',$,$,$,#903,{},$);
+            #903=CARTESIAN_POINT('',(0.,0.,0.));
+        ", scale));
+        let (mesh, stats) = triangulate_text(&text);
+        assert!(stats.is_complete() && stats.num_faces > 0);
+        mesh.triangles.len()
+    };
+    assert!(triangles("10.") > 2 * triangles("1."));
+}
