@@ -328,6 +328,7 @@ fn mapped_items_instance_their_representation_at_target_times_inverse_origin() {
     let reference = tessellate(CUBOID);
     assert_eq!(colored.submeshes.len(), 1);
     assert_eq!(colored.submeshes[0].color, reference.submeshes[0].color);
+    assert_eq!(colored.submeshes[0].positions.len(), reference.submeshes[0].positions.len());
     for (q, p) in colored.submeshes[0].positions.iter().zip(&reference.submeshes[0].positions) {
         let expected = f(p.map(f64::from));
         assert!(close(q.map(f64::from), expected, 1e-4), "{:?} != {:?}", q, expected);
@@ -357,11 +358,54 @@ fn mapped_items_instance_their_representation_at_target_times_inverse_origin() {
     assert_eq!(mesh.verts.len(), plain.verts.len());
     assert_instance(&mesh, &plain, 0, &f2, &g2);
 
-    // An unresolvable mapping is skipped, not replaced by the solid stacked
-    // at its untransformed position.
+    // Without axis2, an operator target completes a right-handed frame:
+    // these are rotations, not a mirror (axis3 = -z) or a degenerate frame
+    // (axis3 = x).
+    for (axes, z, x) in [
+        ("#350,$,#311,$,#351", [0., 0., -1.], [1., 0., 0.]),
+        ("$,$,#311,$,#350", [1., 0., 0.], [0., 1., 0.]),
+    ] {
+        let text = mapped_only(&format!("
+            #360=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',$,{});
+            #350=DIRECTION('',(1.,0.,0.));
+            #351=DIRECTION('',(0.,0.,-1.));
+        ", axes)).replace("#300=MAPPED_ITEM('',#301,#310);", "#300=MAPPED_ITEM('',#301,#360);");
+        let target = frame([0., 20., 5.], z, x);
+        let (mesh, stats) = triangulate_text(&text);
+        assert!(stats.is_complete() && stats.num_faces == 6);
+        assert_eq!(mesh.verts.len(), plain.verts.len());
+        assert_instance(&mesh, &plain, 0,
+            &|p| remap(p, &origin, &target, 1., true), &|n| remap(n, &origin, &target, 1., false));
+    }
+
+    // A product representation leads to a related representation that also
+    // holds only MAPPED_ITEMs, whichever way the relationship is written.
+    let linked = mapped_only("
+        #370=SHAPE_REPRESENTATION('',(#371),#185);
+        #371=MAPPED_ITEM('',#301,#310);
+        #372=SHAPE_REPRESENTATION_RELATIONSHIP('','',#370,#123);
+    ");
+    let (mesh, stats) = triangulate_text(&linked);
+    assert!(stats.is_complete() && stats.num_faces == 6);
+    assert_eq!(mesh.verts.len(), 2 * plain.verts.len());
+    assert_instance(&mesh, &plain, 0, &f, &g);
+    assert_instance(&mesh, &plain, 1, &f, &g);
+
+    // A solid instanced only at an unreadable placement is skipped, not
+    // stacked at its untransformed position.
     let unresolved = mapped_only("").replace("#300=MAPPED_ITEM('',#301,#310);", "#300=MAPPED_ITEM('',#301,#311);");
     let (mesh, stats) = triangulate_text(&unresolved);
     assert_eq!((mesh.verts.len(), stats.num_faces), (0, 0));
+
+    // A MAPPED_ITEM of non-mesh geometry leaves the fallback for solids the
+    // product structure does not reach.
+    let wireframe = mapped_only("
+        #380=GEOMETRICALLY_BOUNDED_WIREFRAME_SHAPE_REPRESENTATION('',(#302),#185);
+    ").replace("#301=REPRESENTATION_MAP(#302,#19);", "#301=REPRESENTATION_MAP(#302,#380);");
+    let (mesh, stats) = triangulate_text(&wireframe);
+    assert!(stats.is_complete() && stats.num_faces == 6);
+    assert_eq!(mesh.verts.len(), plain.verts.len());
+    assert_instance(&mesh, &plain, 0, &|p| p, &|n| n);
 }
 
 #[test]
@@ -420,4 +464,30 @@ fn presentation_mapped_items_do_not_change_the_mesh() {
     assert_eq!(mesh.verts.len(), plain.verts.len());
     assert_instance(&mesh, &plain, 0, &|p| p, &|n| n);
     assert_eq!(geometry(&tessellate(&views)), geometry(&tessellate(CUBOID)));
+}
+
+#[test]
+fn scaled_mapped_instances_are_meshed_to_the_same_physical_tolerance() {
+    // cube_hole's solid has a cylindrical hole: chords that are within
+    // tolerance at scale 1 deviate ten times as far once scaled by 10.
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/cube_hole.step"),
+    )
+    .unwrap();
+    let triangles = |scale: &str| {
+        let text = source
+            .replace("#18=SHAPE_REPRESENTATION_RELATIONSHIP('','',#143,#19);", "")
+            .replace("#143=SHAPE_REPRESENTATION('Part 1',(#144),#219);",
+                "#143=SHAPE_REPRESENTATION('Part 1',(#144,#900),#219);");
+        let text = add_entities(&text, &format!("
+            #900=MAPPED_ITEM('',#901,#902);
+            #901=REPRESENTATION_MAP(#144,#19);
+            #902=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',$,$,$,#903,{},$);
+            #903=CARTESIAN_POINT('',(0.,0.,0.));
+        ", scale));
+        let (mesh, stats) = triangulate_text(&text);
+        assert!(stats.is_complete() && stats.num_faces > 0);
+        mesh.triangles.len()
+    };
+    assert!(triangles("10.") > 2 * triangles("1."));
 }
