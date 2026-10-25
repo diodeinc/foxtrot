@@ -501,16 +501,7 @@ pub(crate) fn triangulate_with_materials(s: &StepFile) -> (Mesh, Stats, Vec<(usi
     // Physical mesh approximation budget in native coordinates, distinct
     // from the source's geometric uncertainty.
     let tolerance = 0.01 / scale;
-    let styles: HashMap<usize, (DVec3, SurfaceMaterial)> =
-        filter_entities(s, |_, e| MechanicalDesignGeometricPresentationRepresentation_::try_from_entity(e))
-        .into_iter()
-        .flat_map(|m| m.items.iter())
-        .filter_map(|item| s.entity(item.cast::<StyledItem_>()))
-        .filter_map(|styled| {
-            styled.styles.iter().find_map(|&p| presentation_style(s, p))
-                .map(|appearance| (styled.item.0, appearance))
-        })
-        .collect();
+    let styles = collect_styles(s);
     let styled_item_colors = styles.iter().map(|(&id, &(color, _))| (id, color)).collect();
 
     // Store a map of ShapeRepresentationRelationships, which some models
@@ -731,14 +722,66 @@ fn normalized(value: f64) -> Option<f32> {
     value.is_finite().then(|| value.clamp(0.0, 1.0) as f32)
 }
 
+/// Maps each styled representation item (solid, shell, or face) to its
+/// surface appearance. An OVER_RIDING_STYLED_ITEM beats the style it
+/// overrides on the same item regardless of entity order; on a face it beats
+/// its solid's and shell's styles like any face style. Context-dependent
+/// overrides would need per-instance colours and are not represented.
+fn collect_styles(s: &StepFile) -> HashMap<usize, (DVec3, SurfaceMaterial)> {
+    let styled_item = |id: usize| match s.0.get(id)? {
+        Entity::StyledItem(i) => Some((i.item.0, &i.styles, None)),
+        Entity::OverRidingStyledItem(i) => Some((i.item.0, &i.styles, Some(i.over_ridden_style.0))),
+        _ => None,
+    };
+    let mut styles: HashMap<usize, (usize, (DVec3, SurfaceMaterial))> = HashMap::new();
+    let items = filter_entities(s, |_, e| MechanicalDesignGeometricPresentationRepresentation_::try_from_entity(e))
+        .into_iter()
+        .flat_map(|m| m.items.iter());
+    for item in items {
+        let Some((target, assignments, mut over_ridden)) = styled_item(item.0) else { continue; };
+        let Some(appearance) = assignments.iter().find_map(|&p| presentation_style(s, p)) else { continue; };
+        // Count override links; the bound stops malformed cyclic chains.
+        let mut depth = 0;
+        while let Some(id) = over_ridden.filter(|_| depth < s.0.len()) {
+            depth += 1;
+            over_ridden = styled_item(id).and_then(|i| i.2);
+        }
+        if styles.get(&target).map_or(true, |&(d, _)| depth >= d) {
+            styles.insert(target, (depth, appearance));
+        }
+    }
+    styles.into_iter().map(|(id, (_, appearance))| (id, appearance)).collect()
+}
+
 fn rgb(s: &StepFile, color: Colour) -> Option<DVec3> {
-    let c = s.entity(color.cast::<ColourRgb_>())?;
-    Some(DVec3::new(c.red, c.green, c.blue))
+    let name = match s.0.get(color.0)? {
+        Entity::ColourRgb(c) => return Some(DVec3::new(c.red, c.green, c.blue)),
+        Entity::DraughtingPreDefinedColour(c) => c.name.0,
+        Entity::PreDefinedColour(c) => c.name.0,
+        _ => return None,
+    };
+    // The predefined colour names of ISO 10303-46.
+    let (r, g, b) = match name.to_ascii_lowercase().as_str() {
+        "black" => (0., 0., 0.),
+        "red" => (1., 0., 0.),
+        "green" => (0., 1., 0.),
+        "blue" => (0., 0., 1.),
+        "yellow" => (1., 1., 0.),
+        "magenta" => (1., 0., 1.),
+        "cyan" => (0., 1., 1.),
+        "white" => (1., 1., 1.),
+        _ => return None,
+    };
+    Some(DVec3::new(r, g, b))
 }
 
 fn presentation_style(s: &StepFile, p: PresentationStyleAssignment) -> Option<(DVec3, SurfaceMaterial)> {
-    let p = s.entity(p)?;
-    p.styles.iter().find_map(|style| {
+    let styles = match s.0.get(p.0)? {
+        Entity::PresentationStyleAssignment(p) => &p.styles,
+        Entity::PresentationStyleByContext(p) => &p.styles,
+        _ => return None,
+    };
+    styles.iter().find_map(|style| {
         // Entity selects parse as their first ID alternative; inspect the entity.
         let usage = match style {
             PresentationStyleSelect::PreDefinedPresentationStyle(id) => s.entity(id.cast::<SurfaceStyleUsage_>()),
@@ -861,19 +904,19 @@ fn shell(
     materials: &mut Vec<(usize, SurfaceMaterial)>,
 ) {
     let data = match &s[c] {
-        Entity::ClosedShell(shell) => Some((&shell.cfs_faces, true)),
-        Entity::OpenShell(shell) => Some((&shell.cfs_faces, true)),
+        Entity::ClosedShell(shell) => Some((&shell.cfs_faces, true, c.0)),
+        Entity::OpenShell(shell) => Some((&shell.cfs_faces, true, c.0)),
         // WR1 forbids an oriented shell as the element of another oriented
         // shell. Resolve the concrete face set once, without recursive cases.
         Entity::OrientedClosedShell(shell) => s
             .entity(shell.closed_shell_element)
-            .map(|element| (&element.cfs_faces, shell.orientation)),
+            .map(|element| (&element.cfs_faces, shell.orientation, shell.closed_shell_element.0)),
         Entity::OrientedOpenShell(shell) => s
             .entity(shell.open_shell_element)
-            .map(|element| (&element.cfs_faces, shell.orientation)),
+            .map(|element| (&element.cfs_faces, shell.orientation, shell.open_shell_element.0)),
         _ => None,
     };
-    let Some((faces, orientation)) = data else {
+    let Some((faces, orientation, element)) = data else {
         error!("Invalid shell or oriented shell element {:?}", c);
         stats.failures.push(TessellationFailure {
             entity_id: c.0,
@@ -883,6 +926,9 @@ fn shell(
         });
         return;
     };
+    // A shell's style overrides its solid's for faces without their own.
+    let (default_color, default_material) = styles.get(&c.0).or_else(|| styles.get(&element))
+        .copied().unwrap_or((default_color, default_material));
     let v_start = mesh.verts.len();
     let t_start = mesh.triangles.len();
     // Sample every edge once up front, so faces sharing an edge share its

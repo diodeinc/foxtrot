@@ -219,3 +219,66 @@ fn same_rgb_faces_retain_distinct_materials_and_override_the_solid() {
         diffuse_strength: Some(0.4), ..base
     }));
 }
+
+/// A surface colour style for `target`, overriding `over` when given.
+fn color_style(id: u32, target: u32, over: Option<u32>, colour: &str) -> String {
+    let item = match over {
+        Some(over) => format!("OVER_RIDING_STYLED_ITEM('',(#{}),#{target},#{over})", id + 1),
+        None => format!("STYLED_ITEM('',(#{}),#{target})", id + 1),
+    };
+    let [a, b, c, d, e, f] = std::array::from_fn(|i| id + 1 + i as u32);
+    format!("#{id}={item};
+        #{a}=PRESENTATION_STYLE_ASSIGNMENT((#{b}));
+        #{b}=SURFACE_STYLE_USAGE(.BOTH.,#{c});
+        #{c}=SURFACE_SIDE_STYLE('',(#{d}));
+        #{d}=SURFACE_STYLE_FILL_AREA(#{e});
+        #{e}=FILL_AREA_STYLE('',(#{f}));
+        #{f}=FILL_AREA_STYLE_COLOUR('',#{}),;
+        #{}={colour};", f + 1, f + 1).replace("),;", ");")
+}
+
+#[test]
+fn overrides_beat_solid_and_shell_styles_and_predefined_colours_resolve() {
+    // Overrides precede the styles they override, so entity order cannot
+    // decide. #400 restyles the solid; faces #106-#108 are overridden.
+    let styled = CUBOID.replace("(#113),", "(#430,#420,#410,#400,#113,#440),");
+    let styled = add_entities(&styled, &[
+        color_style(400, 121, Some(113), "COLOUR_RGB('',0.2,0.4,0.6)"),
+        color_style(410, 106, Some(113), "DRAUGHTING_PRE_DEFINED_COLOUR('red')"),
+        // Overrides the solid's override, through a context style assignment.
+        color_style(420, 107, Some(400), "DRAUGHTING_PRE_DEFINED_COLOUR('black')")
+            .replace("PRESENTATION_STYLE_ASSIGNMENT((#422))",
+                "PRESENTATION_STYLE_BY_CONTEXT((#422),#121)"),
+        color_style(430, 108, Some(440), "PRE_DEFINED_COLOUR('yellow')"),
+        color_style(440, 108, None, "DRAUGHTING_PRE_DEFINED_COLOUR('green')"),
+    ].concat());
+    let colors = |mesh: &TessellatedMesh| {
+        let mut colors: Vec<_> = mesh.submeshes.iter().flat_map(|s| s.normals.iter()
+            .map(move |n| (n.map(|v| v as i8), s.color.map(|c| (c * 255.).round() as u8))))
+            .collect();
+        colors.sort();
+        colors.dedup();
+        colors
+    };
+    let blue = [51, 102, 153, 255];
+    let faces = |rest: [u8; 4]| {
+        let mut expected = vec![
+            ([-1, 0, 0], [255, 0, 0, 255]),
+            ([0, -1, 0], [0, 0, 0, 255]),
+            ([1, 0, 0], [255, 255, 0, 255]),
+            ([0, 0, -1], rest),
+            ([0, 1, 0], rest),
+            ([0, 0, 1], rest),
+        ];
+        expected.sort();
+        expected
+    };
+    let mesh = tessellate(&styled);
+    assert_eq!(colors(&mesh), faces(blue));
+    assert_eq!(geometry(&mesh), geometry(&tessellate(CUBOID)));
+
+    // A shell style beats the solid's but not the faces' overrides.
+    let shell = styled.replace("#113,#440),", "#113,#440,#450),");
+    let shell = add_entities(&shell, &color_style(450, 112, None, "DRAUGHTING_PRE_DEFINED_COLOUR('cyan')"));
+    assert_eq!(colors(&tessellate(&shell)), faces([0, 255, 255, 255]));
+}

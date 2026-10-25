@@ -105,7 +105,8 @@ impl ColoredSubmesh {
 ///
 /// This is the main entry point for downstream consumers that want
 /// colour-bucketed geometry without pulling in the `step` crate directly.
-/// A face style replaces its solid's style, including unspecified properties.
+/// A face style replaces its shell's, and a shell style its solid's, including
+/// unspecified properties. An over-riding style beats the style it overrides.
 /// The first supported surface usage wins; rendering RGB takes precedence over
 /// fill RGB. Separate front/back styles and context-dependent overrides are not
 /// represented. RGB retains the existing 8-bit quantization; other properties
